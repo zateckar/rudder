@@ -2,10 +2,16 @@ name: Build and Push Docker Image
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     tags: ["v*"]
   pull_request:
-    branches: [main]
+    branches: [maaster]
+  workflow_dispatch:
+    inputs:
+      base_path:
+        description: 'Base path for serving under a subpath (e.g., inno)'
+        required: false
+        default: ''
 
 env:
   REGISTRY: ghcr.io
