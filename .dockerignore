@@ -1,0 +1,68 @@
+# Dependencies
+node_modules
+.pnpm-store
+
+# Source control
+.git
+.gitignore
+
+# Build artifacts not needed at runtime
+.svelte-kit
+.vercel
+.netlify
+.wrangler
+
+# Development files
+.vscode
+.idea
+*.md
+!README.md
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# Database (persist via volumes)
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# SSH Keys
+*.pem
+*.key
+keys/
+
+# Test & Coverage
+coverage/
+test-results/
+playwright-report/
+*.lcov
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Kubernetes
+k8s/
+
+# GitHub Actions
+.github/
+
+# Scripts (not needed at runtime)
+scripts/
+
+# Design docs
+design.md
+IMPLEMENTATION_PLAN.md
+STATUS.md
+
+# Agents
+.agents/

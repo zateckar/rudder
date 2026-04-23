@@ -1,0 +1,64 @@
+# Dependencies
+node_modules
+
+# Output
+.output
+.vercel
+.netlify
+.wrangler
+/.svelte-kit
+/build
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+!.env.test
+
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Database
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+
+# SSH Keys
+*.pem
+*.key
+keys/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+
+# Coverage & Testing
+coverage/
+*.lcov
+
+# Playwright
+/test-results/
+/blob-report/
+/playwright-report/
+
+# Temporary files
+tmp/
+temp/
+.agents/*
+.opencode/*
+gsd-repo/*
+docs/*
+.planning/*

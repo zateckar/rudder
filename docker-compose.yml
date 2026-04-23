@@ -1,0 +1,54 @@
+version: "3.8"
+
+services:
+  rudder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rudder
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DATABASE_URL=file:/app/data/rudder.db
+      - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET is required}
+      - SESSION_MAX_AGE=${SESSION_MAX_AGE:-604800}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
+      - PUBLIC_URL=${PUBLIC_URL:-http://localhost:3000}
+      # Optional: Worker registration secret
+      - WORKER_REGISTRATION_SECRET=${WORKER_REGISTRATION_SECRET:-}
+      # Optional: Seed token for initial admin setup
+      - SEED_TOKEN=${SEED_TOKEN:-}
+      # Optional: OIDC Providers
+      - OIDC_GOOGLE_CLIENT_ID=${OIDC_GOOGLE_CLIENT_ID:-}
+      - OIDC_GOOGLE_CLIENT_SECRET=${OIDC_GOOGLE_CLIENT_SECRET:-}
+      - OIDC_GITHUB_CLIENT_ID=${OIDC_GITHUB_CLIENT_ID:-}
+      - OIDC_GITHUB_CLIENT_SECRET=${OIDC_GITHUB_CLIENT_SECRET:-}
+      - OIDC_OKTA_CLIENT_ID=${OIDC_OKTA_CLIENT_ID:-}
+      - OIDC_OKTA_CLIENT_SECRET=${OIDC_OKTA_CLIENT_SECRET:-}
+      - OIDC_OKTA_DOMAIN=${OIDC_OKTA_DOMAIN:-}
+      - OIDC_AUTH0_CLIENT_ID=${OIDC_AUTH0_CLIENT_ID:-}
+      - OIDC_AUTH0_CLIENT_SECRET=${OIDC_AUTH0_CLIENT_SECRET:-}
+      - OIDC_AUTH0_DOMAIN=${OIDC_AUTH0_DOMAIN:-}
+    volumes:
+      - rudder-data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+        reservations:
+          memory: 256M
+          cpus: "0.25"
+
+volumes:
+  rudder-data:
+    driver: local

@@ -1,0 +1,171 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rudder
+  labels:
+    app.kubernetes.io/name: rudder
+    app.kubernetes.io/part-of: rudder
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rudder-secrets
+  namespace: rudder
+  labels:
+    app.kubernetes.io/name: rudder
+type: Opaque
+stringData:
+  SESSION_SECRET: "CHANGE_ME_TO_A_RANDOM_64_CHAR_STRING"
+  ENCRYPTION_KEY: "CHANGE_ME_TO_A_RANDOM_32_CHAR_STRING"
+  WORKER_REGISTRATION_SECRET: ""
+  SEED_TOKEN: ""
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rudder-config
+  namespace: rudder
+  labels:
+    app.kubernetes.io/name: rudder
+data:
+  NODE_ENV: "production"
+  PORT: "3000"
+  DATABASE_URL: "file:/app/data/rudder.db"
+  SESSION_MAX_AGE: "604800"
+  PUBLIC_URL: "https://rudder.example.com"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rudder-data
+  namespace: rudder
+  labels:
+    app.kubernetes.io/name: rudder
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rudder
+  namespace: rudder
+  labels:
+    app.kubernetes.io/name: rudder
+    app.kubernetes.io/component: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rudder
+      app.kubernetes.io/component: web
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rudder
+        app.kubernetes.io/component: web
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+      containers:
+        - name: rudder
+          image: ghcr.io/OWNER/rudder:latest
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: rudder-config
+            - secretRef:
+                name: rudder-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: rudder-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rudder
+  namespace: rudder
+  labels:
+    app.kubernetes.io/name: rudder
+    app.kubernetes.io/component: web
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: rudder
+    app.kubernetes.io/component: web
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rudder
+  namespace: rudder
+  labels:
+    app.kubernetes.io/name: rudder
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: rudder.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: rudder
+                port:
+                  name: http
+  tls:
+    - hosts:
+        - rudder.example.com
+      secretName: rudder-tls
