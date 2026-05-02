@@ -43,6 +43,7 @@ Container orchestration platform built with SvelteKit, Drizzle ORM, and SQLite. 
 - **Team resource quotas** -- configurable limits on CPU, memory, containers, and applications per team
 - **OIDC SSO** -- Google, GitHub, Okta, Auth0, plus generic OIDC provider
 - **API keys** -- team-scoped keys with expiration for programmatic access
+- **kubectl-compatible API** -- manage deployments via standard Kubernetes tooling
 - **Audit logging** -- full trail of all create/update/delete operations
 - **Azure backup/restore** -- automated daily backup to Azure Blob Storage with restore
 
@@ -127,6 +128,7 @@ Browser (Svelte 5 + xterm.js + Monaco Editor)
 SvelteKit Server (Node.js adapter)
     |-- Security headers, session auth, audit logging
     |-- REST API + WebSocket (terminal)
+    |-- K8s-compatible API (/k8s/) for kubectl access
     |
     +-- SQLite (Drizzle ORM, 26 tables)
     |
@@ -148,6 +150,91 @@ SvelteKit Server (Node.js adapter)
 - User-provided container labels sanitized to prevent Traefik route hijacking
 - Access logs rotated daily (logrotate, 14-day retention)
 - Traefik dashboard protected with mTLS (same as Podman API)
+
+## kubectl Integration
+
+Rudder exposes a Kubernetes-compatible API at `/k8s/` that lets you manage deployments with standard `kubectl` commands.
+
+### Supported Commands
+
+```sh
+kubectl get namespaces              # List teams
+kubectl get deployments -n <team>   # List applications
+kubectl get pods -n <team>          # List containers
+kubectl describe deployment <name>  # Application details
+kubectl apply -f deployment.yaml    # Create or update + deploy
+kubectl scale deploy <name> --replicas=3  # Scale replicas
+kubectl delete deployment <name>    # Undeploy + remove
+kubectl logs <pod-name>             # Container logs
+kubectl delete pod <pod-name>       # Remove container
+```
+
+### Setup
+
+1. Generate a kubeconfig (requires active session):
+
+```sh
+# Team-scoped access
+curl -X POST http://localhost:7244/api/kubeconfig \
+  -H "Content-Type: application/json" \
+  -H "Cookie: session_id=YOUR_SESSION" \
+  -d '{"teamId": "your-team-id"}'
+
+# Global admin access
+curl -X POST http://localhost:7244/api/kubeconfig \
+  -H "Content-Type: application/json" \
+  -H "Cookie: session_id=YOUR_SESSION" \
+  -d '{}'
+```
+
+2. Save the returned `kubeconfig` field to `~/.kube/config` (or use `KUBECONFIG` env var).
+
+3. Use kubectl:
+
+```sh
+kubectl get deployments
+kubectl get pods
+```
+
+### Resource Mapping
+
+| Kubernetes | Rudder | Notes |
+|------------|--------|-------|
+| Namespace | Team | Identified by team slug |
+| Deployment | Application | Supports create, update, scale, delete |
+| Pod | Container | Individual running containers |
+| Scale | Replicas | `kubectl scale` adjusts replica count |
+
+### Deployment YAML Example
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+  annotations:
+    rudder.dev/worker: "worker-name"      # optional: target worker
+    rudder.dev/domain: "app.example.com"   # optional: custom domain
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app
+    spec:
+      containers:
+      - name: my-app
+        image: nginx:latest
+        env:
+        - name: NODE_ENV
+          value: production
+        ports:
+        - containerPort: 80
+```
+
 
 ## Tech Stack
 

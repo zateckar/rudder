@@ -1,12 +1,13 @@
 import { sequence } from '@sveltejs/kit/hooks';
 import type { Handle } from '@sveltejs/kit';
 import { db } from '$lib/db';
-import { users, auditLogs } from '$lib/db/schema';
+import { users, auditLogs, apiKeys } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { getSessionIdFromCookies, validateSession } from '$lib/auth';
 import { v4 as uuid } from 'uuid';
 import { initializeTerminalServer } from '$lib/server/terminal';
 import { env } from '$env/dynamic/private';
+import { hashKey } from '$lib/server/encryption';
 
 const securityHeaders: Handle = async ({ event, resolve }) => {
   const response = await resolve(event);
@@ -55,6 +56,27 @@ const authentication: Handle = async ({ event, resolve }) => {
       const user = await db.select().from(users).where(eq(users.id, userId)).get();
       if (user) {
         event.locals.userRole = user.role;
+      }
+    }
+  }
+
+  // Bearer token auth via API keys (for K8s-compatible API and programmatic access)
+  if (!userId) {
+    const authHeader = event.request.headers.get('authorization');
+    if (authHeader?.startsWith('Bearer ')) {
+      const token = authHeader.slice(7).trim();
+      if (token) {
+        try {
+          const keyHash = hashKey(token);
+          const apiKey = await db.select().from(apiKeys).where(eq(apiKeys.keyHash, keyHash)).get();
+          if (apiKey && (!apiKey.expiresAt || apiKey.expiresAt > new Date())) {
+            event.locals.apiUser = true;
+            event.locals.teamId = apiKey.teamId;
+            await db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, apiKey.id));
+          }
+        } catch (e) {
+          console.error('Bearer auth error:', e);
+        }
       }
     }
   }
