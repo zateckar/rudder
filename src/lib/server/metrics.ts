@@ -8,9 +8,10 @@ import { containers, workers, containerMetrics, workerMetrics, workerPings, syst
 import { eq, lt } from 'drizzle-orm';
 import { getRestPodmanClient } from './podman-client';
 import { v4 as uuid } from 'uuid';
-import { createPodmanClient, createSSHPodmanClient } from './podman';
+import { createPodmanClient } from './podman';
 import { getSSHKey, type SSHConnectionConfig } from './ssh';
 import { getHostStats } from './host-metrics';
+import { getHostStatsHttp } from './host-metrics-http';
 import { evaluateAlerts } from './alerts';
 
 const DEFAULT_INTERVAL_SECONDS = 300;   // 5 minutes
@@ -171,22 +172,6 @@ async function collectWorkerMetrics(): Promise<void> {
           try { systemDf = await client.systemDf(); } catch (e) { console.error(`[metrics] systemDf() failed for ${worker.name}:`, e); }
         }
         client.destroy();
-      } else if (worker.sshKeyId) {
-        const sshKey = await getSSHKey(worker.sshKeyId);
-        if (sshKey) {
-          const sshClient = createSSHPodmanClient({
-            host: worker.hostname,
-            port: worker.sshPort,
-            username: worker.sshUser,
-            privateKey: sshKey.privateKey,
-          });
-          const ok = await sshClient.ping();
-          if (ok) {
-            pingStatus = 'online';
-            try { sysInfo = await sshClient.info(); } catch (e) { console.error(`[metrics] info() failed for ${worker.name} (SSH):`, e); }
-          }
-          sshClient.destroy();
-        }
       }
 
       const latencyMs = Date.now() - start;
@@ -235,7 +220,25 @@ async function collectWorkerMetrics(): Promise<void> {
       let hostMemUsed: number | null = memUsed;
       let hostMemPercent: number | null = memPercent;
 
-      if (worker.sshKeyId) {
+      // Prefer HTTP metrics endpoint (installed during provisioning)
+      // Fall back to SSH for workers not yet re-provisioned
+      if (worker.baseDomain && worker.podmanCaCert) {
+        try {
+          const httpStats = await getHostStatsHttp(worker as any);
+          if (httpStats) {
+            if (httpStats.cpuPercent != null) hostCpu = httpStats.cpuPercent;
+            if (httpStats.diskTotal != null) hostDiskLimit = httpStats.diskTotal;
+            if (httpStats.diskPercent != null) hostDiskPercent = httpStats.diskPercent;
+            if (httpStats.netRxBytes != null) hostNetRx = httpStats.netRxBytes;
+            if (httpStats.netTxBytes != null) hostNetTx = httpStats.netTxBytes;
+            if (httpStats.memTotal != null) hostMemTotal = httpStats.memTotal;
+            if (httpStats.memUsed != null) hostMemUsed = httpStats.memUsed;
+            if (httpStats.memPercent != null) hostMemPercent = httpStats.memPercent;
+          }
+        } catch (e) {
+          console.warn(`[metrics] HTTP host stats failed for ${worker.name}:`, e);
+        }
+      } else if (worker.sshKeyId) {
         try {
           const sshKey = await getSSHKey(worker.sshKeyId);
           if (sshKey) {
@@ -251,7 +254,6 @@ async function collectWorkerMetrics(): Promise<void> {
             if (hostStats.diskPercent != null) hostDiskPercent = hostStats.diskPercent;
             if (hostStats.netRxBytes != null) hostNetRx = hostStats.netRxBytes;
             if (hostStats.netTxBytes != null) hostNetTx = hostStats.netTxBytes;
-            // Prefer SSH memory data if available (more accurate than Podman's)
             if (hostStats.memTotal != null) hostMemTotal = hostStats.memTotal;
             if (hostStats.memUsed != null) hostMemUsed = hostStats.memUsed;
             if (hostStats.memPercent != null) hostMemPercent = hostStats.memPercent;

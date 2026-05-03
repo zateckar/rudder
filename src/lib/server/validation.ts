@@ -87,10 +87,12 @@ export const schemas = {
 
   provisionWorker: z.object({
     workerId: z.string().uuid(),
+    sshPrivateKey: z.string().min(1).max(50000).optional(),
   }),
 
   terminalCommand: z.object({
     command: z.string().min(1).max(10000),
+    sshPrivateKey: z.string().min(1).max(50000).optional(),
   }),
 
   terminalToken: z.object({

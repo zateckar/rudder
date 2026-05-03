@@ -29,7 +29,7 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
   if (workerId) {
     const worker = await db.select().from(workers).where(eq(workers.id, workerId)).get();
     if (!worker) return json({ error: 'Worker not found' }, { status: 404 });
-    if (!worker.sshKeyId) return json({ error: 'Worker SSH not configured' }, { status: 400 });
+    // SSH key will be provided ad-hoc via browser vault — no need to require sshKeyId
   }
 
   // Generate a short-lived token (5 minutes) for terminal WebSocket handshake.

@@ -128,12 +128,22 @@ export async function connectTraefik(
 /**
  * Run the Netavark stale-rule cleanup on a worker via SSH.
  *
+ * NOTE: As of the security hardening, this cleanup is also installed
+ * as a systemd timer on each worker during provisioning. This SSH-based call
+ * is kept as a supplementary trigger for immediate cleanup after network removal,
+ * but it is entirely optional — if no sshConfig is provided, the timer will
+ * handle cleanup within 5 minutes.
+ *
  * This is a best-effort operation: errors are logged but never propagated so
  * that a cleanup failure never blocks a deployment or deletion.
  */
 export async function purgeStaleNetavarkRules(
-  sshConfig: SSHConnectionConfig,
+  sshConfig: SSHConnectionConfig | null | undefined,
 ): Promise<void> {
+  if (!sshConfig) {
+    // No SSH config available — rely on the systemd timer on the worker
+    return;
+  }
   try {
     const result = await executeSSHCommand(sshConfig, 'sudo bash', NETAVARK_CLEANUP_SCRIPT);
     if (result.stdout.trim()) {
@@ -154,7 +164,8 @@ export async function purgeStaleNetavarkRules(
  *
  * When `sshConfig` is provided, a Netavark iptables cleanup is performed after
  * the network is removed to purge any stale DNAT rules and orphaned bridge
- * interfaces that Podman/Netavark may have left behind.
+ * interfaces that Podman/Netavark may have left behind. If not provided,
+ * the systemd timer on the worker handles this automatically.
  */
 export async function teardownAppNetwork(
   client: PodmanClient,

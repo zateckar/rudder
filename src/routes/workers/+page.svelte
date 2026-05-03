@@ -1,15 +1,24 @@
 <script lang="ts">
+  import SshKeyPrompt from '$lib/components/SshKeyPrompt.svelte';
   let { data } = $props();
 
   let busy = $state<Record<string, boolean>>({});
+  let showProvisionModal = $state(false);
+  let provisionTargetId = $state('');
+  function requestProvision(workerId: string) {
+    provisionTargetId = workerId;
+    showProvisionModal = true;
+  }
 
-  async function provisionWorker(workerId: string) {
+  async function provisionWorker(sshKey: string) {
+    const workerId = provisionTargetId;
+    showProvisionModal = false;
     busy[workerId] = true;
     try {
       const response = await fetch('/api/workers/provision', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workerId }),
+        body: JSON.stringify({ workerId, sshPrivateKey: sshKey }),
       });
       if (response.ok) {
         window.location.reload();
@@ -56,7 +65,7 @@
               <button
                 class="btn-tiny btn-provision"
                 disabled={busy[worker.id]}
-                onclick={() => provisionWorker(worker.id)}
+                onclick={() => requestProvision(worker.id)}
                 title="Retry provisioning this worker"
               >
                 Provision
@@ -70,7 +79,19 @@
   </div>
 {/if}
 
+{#if showProvisionModal}
+<SshKeyPrompt
+  workerId={provisionTargetId}
+  title="Provision Worker"
+  description="Paste the SSH private key for root access. This key is used only for this provisioning session and is <strong>never stored</strong> on the server."
+  submitLabel="Start Provisioning"
+  onsubmit={provisionWorker}
+  oncancel={() => showProvisionModal = false}
+/>
+{/if}
+
 <style>
+  /* Modal styles moved to SshKeyPrompt component */
   header {
     display: flex;
     justify-content: space-between;

@@ -389,6 +389,28 @@ echo "traefik.yml written (port 443 only, TLS-ALPN-01, CrowdSec plugin)"
 echo "${podmanApiRoutingYmlB64}" | base64 -d > /etc/traefik/dynamic/podman-api.yml
 echo "podman-api.yml (mTLS-secured Podman API route) written"
 
+# Metrics endpoint route — secured with same mTLS as Podman API
+if [ -n "${baseDomain}" ]; then
+cat > /etc/traefik/dynamic/metrics.yml << METRICSYMLEOF
+http:
+  routers:
+    rudder-metrics:
+      rule: "Host(\`metrics.${baseDomain}\`)"
+      entryPoints:
+        - websecure
+      service: rudder-metrics
+      tls:
+        certResolver: letsencrypt
+        options: podman-mtls
+  services:
+    rudder-metrics:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:9100"
+METRICSYMLEOF
+echo "metrics.yml (mTLS-secured host metrics route) written"
+fi
+
 echo "${crowdsecMiddlewareYmlB64}" | base64 -d > /etc/traefik/dynamic/crowdsec.yml
 echo "crowdsec.yml (CrowdSec AppSec middleware) written"
 
@@ -479,6 +501,150 @@ echo ""
 if [ \$FAILURES -gt 0 ]; then
   echo "WARNING: \$FAILURES step(s) had errors"
 fi
+
+# ── Netavark stale-rule cleanup (systemd timer) ──────────────────────────
+cat > /usr/local/bin/rudder-netavark-cleanup.sh << 'NETAVARK_SCRIPT'
+#!/bin/bash
+set -uo pipefail
+sudo iptables -t nat -L NETAVARK-HOSTPORT-DNAT -n &>/dev/null || exit 0
+declare -A stale
+while IFS= read -r line; do
+  linenum=$(printf '%s' "$line" | awk '{print $1}')
+  [[ "$linenum" =~ ^[0-9]+$ ]] || continue
+  chain=$(printf '%s' "$line" | grep -oE 'NETAVARK-DN-[A-F0-9]+')
+  [[ -z "$chain" ]] && continue
+  cid=$(printf '%s' "$line" | sed 's/.*id: //' | awk '{print $1}' | cut -c1-12)
+  [[ -z "$cid" ]] && continue
+  sudo podman inspect "$cid" &>/dev/null && continue
+  stale["$chain"]="$linenum"
+done < <(sudo iptables -t nat -L NETAVARK-HOSTPORT-DNAT -n --line-numbers 2>/dev/null | tail -n +3)
+[[ \${#stale[@]} -eq 0 ]] && exit 0
+echo "[rudder] Purging \${#stale[@]} stale Netavark DNAT rule(s)..."
+mapfile -t sorted_lines < <(printf '%s\n' "\${stale[@]}" | sort -rn)
+for linenum in "\${sorted_lines[@]}"; do
+  sudo iptables -t nat -D NETAVARK-HOSTPORT-DNAT "$linenum" 2>/dev/null || true
+done
+for chain in "\${!stale[@]}"; do
+  sudo iptables -t nat -F "$chain" 2>/dev/null || true
+  sudo iptables -t nat -X "$chain" 2>/dev/null || true
+  echo "[rudder] Removed stale chain $chain"
+done
+active_ifaces=$(sudo podman network ls -q 2>/dev/null | \
+  xargs -r -I{} sudo podman network inspect {} --format '{{.NetworkInterface}}' 2>/dev/null || true)
+while IFS= read -r iface; do
+  [[ -z "$iface" ]] && continue
+  ip link show "$iface" 2>/dev/null | grep -q 'state DOWN' || continue
+  printf '%s\n' "$active_ifaces" | grep -qxF "$iface" && continue
+  sudo ip link delete "$iface" 2>/dev/null || true
+  echo "[rudder] Removed orphaned bridge interface $iface"
+done < <(ip -o link show 2>/dev/null | awk -F'[ :@]+' '/podman[0-9]+/{print $2}')
+NETAVARK_SCRIPT
+chmod +x /usr/local/bin/rudder-netavark-cleanup.sh
+
+cat > /etc/systemd/system/rudder-netavark-cleanup.service << 'SVCEOF'
+[Unit]
+Description=Rudder Netavark stale rule cleanup
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rudder-netavark-cleanup.sh
+SVCEOF
+
+cat > /etc/systemd/system/rudder-netavark-cleanup.timer << 'TIMEREOF'
+[Unit]
+Description=Run Rudder Netavark cleanup every 5 minutes
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+[Install]
+WantedBy=timers.target
+TIMEREOF
+
+systemctl daemon-reload
+systemctl enable --now rudder-netavark-cleanup.timer
+echo "Netavark cleanup timer installed (runs every 5 min)"
+
+# ── Host metrics HTTP endpoint (systemd timer + socat) ────────────────
+cat > /usr/local/bin/rudder-metrics.sh << 'METRICS_SCRIPT'
+#!/bin/bash
+set -uo pipefail
+
+# CPU: two /proc/stat samples 1s apart
+read_cpu() { head -1 /proc/stat | awk '{print $2,$3,$4,$5,$6,$7,$8,$9}'; }
+cpu1=$(read_cpu)
+sleep 1
+cpu2=$(read_cpu)
+
+cpu_percent=$(echo "$cpu1" "$cpu2" | awk '{
+  u1=$1+$2+$3+$6+$7+$8; i1=$4+$5
+  u2=$9+$10+$11+$14+$15+$16; i2=$12+$13
+  dt=(u2+i2)-(u1+i1)
+  if(dt>0) printf "%.1f", 100*(u2-u1)/dt; else print "0"
+}')
+cpu_cores=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo)
+
+# Memory from /proc/meminfo
+mem_total=$(awk '/^MemTotal:/{print $2*1024}' /proc/meminfo)
+mem_free=$(awk '/^MemFree:/{print $2*1024}' /proc/meminfo)
+mem_available=$(awk '/^MemAvailable:/{print $2*1024}' /proc/meminfo)
+mem_used=$((mem_total - mem_available))
+if [ "$mem_total" -gt 0 ] 2>/dev/null; then
+  mem_percent=$(awk "BEGIN{printf \"%.1f\", 100*$mem_used/$mem_total}")
+else
+  mem_percent=0
+fi
+
+# Disk from df
+read disk_total disk_used disk_available disk_percent_raw <<< $(df -B1 / | awk 'NR==2{print $2,$3,$4,$5}')
+disk_percent=$(echo "$disk_percent_raw" | tr -d '%')
+
+# Network from /proc/net/dev
+read net_rx net_tx <<< $(awk 'NR>2 && $1!~/lo:/{rx+=$2; tx+=$10} END{print rx, tx}' /proc/net/dev)
+
+cat > /tmp/rudder-metrics.json << JSONEOF
+{"cpu_percent":\${cpu_percent:-0},"cpu_cores":\${cpu_cores:-1},"mem_total":\${mem_total:-0},"mem_free":\${mem_free:-0},"mem_available":\${mem_available:-0},"mem_used":\${mem_used:-0},"mem_percent":\${mem_percent:-0},"disk_total":\${disk_total:-0},"disk_used":\${disk_used:-0},"disk_available":\${disk_available:-0},"disk_percent":\${disk_percent:-0},"net_rx_bytes":\${net_rx:-0},"net_tx_bytes":\${net_tx:-0}}
+JSONEOF
+chmod 644 /tmp/rudder-metrics.json
+METRICS_SCRIPT
+chmod +x /usr/local/bin/rudder-metrics.sh
+
+cat > /etc/systemd/system/rudder-metrics.service << 'MSVCEOF'
+[Unit]
+Description=Rudder host metrics collector
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rudder-metrics.sh
+MSVCEOF
+
+cat > /etc/systemd/system/rudder-metrics.timer << 'MTIMEREOF'
+[Unit]
+Description=Collect Rudder host metrics every 30 seconds
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=30s
+AccuracySec=5s
+[Install]
+WantedBy=timers.target
+MTIMEREOF
+
+# Serve metrics JSON via a simple socat HTTP listener on localhost:9100
+cat > /etc/systemd/system/rudder-metrics-http.service << 'MHTTPEOF'
+[Unit]
+Description=Rudder metrics HTTP endpoint
+After=network.target
+[Service]
+ExecStart=/bin/bash -c 'while true; do socat TCP-LISTEN:9100,reuseaddr,fork SYSTEM:"echo HTTP/1.1 200 OK; echo Content-Type: application/json; echo Connection: close; echo; cat /tmp/rudder-metrics.json 2>/dev/null || echo {}"; done'
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+MHTTPEOF
+
+systemctl daemon-reload
+systemctl enable --now rudder-metrics.timer
+systemctl enable --now rudder-metrics-http.service
+# Run initial collection
+/usr/local/bin/rudder-metrics.sh
+echo "Host metrics HTTP service installed (port 9100, collected every 30s)"
 
 WORKER_IP=$(hostname -I | awk '{print \$1}')
 echo "=== Provisioning complete for ${workerName} ==="

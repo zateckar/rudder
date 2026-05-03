@@ -59,23 +59,10 @@ export function GET({ url }: { url: URL }) {
           }
 
           const worker = await db.select().from(workers).where(eq(workers.id, targetWorkerId)).get();
-          if (!worker || !worker.sshKeyId) {
+          if (!worker) {
             ws.close(1008, 'Worker not configured');
             return;
           }
-
-          const sshKey = await getSSHKey(worker.sshKeyId);
-          if (!sshKey) {
-            ws.close(1008, 'SSH key not found');
-            return;
-          }
-
-          const sshConfig: SSHConnectionConfig = {
-            host: worker.hostname,
-            port: worker.sshPort,
-            username: worker.sshUser,
-            privateKey: sshKey.privateKey,
-          };
 
           // Auto-close after timeout
           const timeout = setTimeout(() => {
@@ -85,9 +72,51 @@ export function GET({ url }: { url: URL }) {
           ws.addEventListener('close', () => clearTimeout(timeout));
 
           if (mode === 'host') {
-            await handleHostTerminal(ws, sshConfig);
+            // Host terminal: SSH key provided ad-hoc via first WS message,
+            // or fallback to stored key if available
+            let privateKey: string | null = null;
+
+            if (worker.sshKeyId) {
+              const sshKey = await getSSHKey(worker.sshKeyId);
+              if (sshKey) privateKey = sshKey.privateKey;
+            }
+
+            if (privateKey) {
+              // Use stored key directly
+              const sshConfig: SSHConnectionConfig = {
+                host: worker.hostname,
+                port: worker.sshPort,
+                username: worker.sshUser,
+                privateKey,
+              };
+              await handleHostTerminal(ws, sshConfig);
+            } else {
+              // Wait for client to send SSH key as first message
+              ws.send(JSON.stringify({ type: 'need_ssh_key', message: 'Please provide SSH key' }));
+              const keyHandler = async (event: MessageEvent) => {
+                ws.removeEventListener('message', keyHandler as any);
+                try {
+                  const msg = JSON.parse(typeof event.data === 'string' ? event.data : event.data.toString());
+                  if (msg.type === 'ssh_key' && msg.key) {
+                    const sshConfig: SSHConnectionConfig = {
+                      host: worker.hostname,
+                      port: worker.sshPort,
+                      username: worker.sshUser,
+                      privateKey: msg.key,
+                    };
+                    await handleHostTerminal(ws, sshConfig);
+                  } else {
+                    ws.close(1008, 'Invalid SSH key message');
+                  }
+                } catch {
+                  ws.close(1008, 'Failed to parse SSH key message');
+                }
+              };
+              ws.addEventListener('message', keyHandler as any);
+            }
           } else {
-            await handleContainerTerminal(ws, sshConfig, containerId!);
+            // Container terminal uses Podman REST API (no SSH needed)
+            await handleContainerTerminal(ws, worker, containerId!);
           }
         } catch (error: any) {
           console.error('Terminal error:', error);
@@ -149,46 +178,64 @@ async function handleHostTerminal(ws: WebSocket, sshConfig: SSHConnectionConfig)
   });
 }
 
-async function handleContainerTerminal(ws: WebSocket, sshConfig: SSHConnectionConfig, containerId: string) {
+async function handleContainerTerminal(ws: WebSocket, worker: any, containerId: string) {
   ws.send(JSON.stringify({ type: 'connected', message: 'Container terminal ready' }));
 
-  // Write SSH key to temp file
-  const tmpKeyFile = join(tmpdir(), `rudder-term-${Date.now()}.pem`);
-  writeFileSync(tmpKeyFile, sshConfig.privateKey, { mode: 0o600 });
+  // Use Podman REST API WebSocket instead of SSH
+  const { getRestPodmanClient } = await import('$lib/server/podman-client');
+  
+  let client;
+  try {
+    client = getRestPodmanClient(worker);
+  } catch (e: any) {
+    ws.send(`\x1b[31mError: Cannot connect to Podman REST API: ${e.message}\r\n\x1b[0m`);
+    ws.close(1011, 'Podman REST API not available');
+    return;
+  }
 
-  const sshProc = spawn('ssh', [
-    '-o', 'StrictHostKeyChecking=no',
-    '-o', 'UserKnownHostsFile=/dev/null',
-    '-i', tmpKeyFile,
-    '-p', String(sshConfig.port),
-    '-t', // Force PTY allocation
-    `${sshConfig.username}@${sshConfig.host}`,
-    `podman exec -it ${containerId} /bin/sh`,
-  ], { stdio: ['pipe', 'pipe', 'pipe'] });
+  try {
+    const containerWs = await client.execContainer(containerId, ['/bin/sh'], {
+      attachStdin: true,
+      attachStdout: true,
+      attachStderr: true,
+      tty: true,
+    });
 
-  // Forward container output to WebSocket
-  sshProc.stdout.on('data', (data: Buffer) => {
-    if (ws.readyState === WebSocket.OPEN) ws.send(data.toString());
-  });
-  sshProc.stderr.on('data', (data: Buffer) => {
-    if (ws.readyState === WebSocket.OPEN) ws.send(data.toString());
-  });
+    // Forward container output to client WebSocket
+    containerWs.on('message', (data: any) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(typeof data === 'string' ? data : data.toString());
+      }
+    });
 
-  sshProc.on('close', () => {
-    if (ws.readyState === WebSocket.OPEN) ws.close(1000, 'Container session ended');
-    cleanupKeyFile(tmpKeyFile);
-  });
+    containerWs.on('close', () => {
+      if (ws.readyState === WebSocket.OPEN) ws.close(1000, 'Container session ended');
+      client.destroy();
+    });
 
-  // Forward WebSocket input to container
-  ws.addEventListener('message', (event) => {
-    const data = typeof event.data === 'string' ? event.data : event.data.toString();
-    sshProc.stdin.write(data);
-  });
+    containerWs.on('error', (err: any) => {
+      console.error('Container WebSocket error:', err);
+      if (ws.readyState === WebSocket.OPEN) ws.close(1011, 'Container connection error');
+      client.destroy();
+    });
 
-  ws.addEventListener('close', () => {
-    sshProc.kill();
-    cleanupKeyFile(tmpKeyFile);
-  });
+    // Forward client input to container
+    ws.addEventListener('message', (event) => {
+      const data = typeof event.data === 'string' ? event.data : event.data.toString();
+      if (containerWs.readyState === WebSocket.OPEN) {
+        containerWs.send(data);
+      }
+    });
+
+    ws.addEventListener('close', () => {
+      containerWs.close();
+      client.destroy();
+    });
+  } catch (e: any) {
+    ws.send(`\x1b[31mError: ${e.message}\r\n\x1b[0m`);
+    ws.close(1011, 'Failed to exec into container');
+    client.destroy();
+  }
 }
 
 function cleanupKeyFile(path: string) {

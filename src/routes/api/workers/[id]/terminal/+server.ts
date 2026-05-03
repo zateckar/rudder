@@ -17,7 +17,7 @@ export const POST: RequestHandler = async ({ params, request, cookies }) => {
   if (!user || user.role !== 'admin') return json({ error: 'Admin access required' }, { status: 403 });
 
   const worker = await db.select().from(workers).where(eq(workers.id, params.id)).get();
-  if (!worker || !worker.sshKeyId) return json({ error: 'Worker not found or SSH not configured' }, { status: 404 });
+  if (!worker) return json({ error: 'Worker not found' }, { status: 404 });
 
   let body;
   try {
@@ -32,14 +32,25 @@ export const POST: RequestHandler = async ({ params, request, cookies }) => {
   const { command } = body;
 
   try {
-    const sshKey = await getSSHKey(worker.sshKeyId);
-    if (!sshKey) return json({ error: 'SSH key not found' }, { status: 500 });
+    // Accept ad-hoc SSH key from request body (never stored)
+    const adHocKey = body.sshPrivateKey;
+    let privateKey: string;
+
+    if (adHocKey) {
+      privateKey = adHocKey;
+    } else if (worker.sshKeyId) {
+      const sshKey = await getSSHKey(worker.sshKeyId);
+      if (!sshKey) return json({ error: 'SSH key not found' }, { status: 500 });
+      privateKey = sshKey.privateKey;
+    } else {
+      return json({ error: 'SSH key required — provide sshPrivateKey in request body' }, { status: 400 });
+    }
 
     const sshConfig: SSHConnectionConfig = {
       host: worker.hostname,
       port: worker.sshPort,
       username: worker.sshUser,
-      privateKey: sshKey.privateKey,
+      privateKey,
     };
 
     const result = await executeSSHCommand(sshConfig, command);

@@ -4,12 +4,9 @@ import { db } from '$lib/db';
 import { workers, users, containers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { getRestPodmanClient } from '$lib/server/podman-client';
-import { getSSHKey } from '$lib/server/ssh';
-import { createSSHPodmanClient } from '$lib/server/podman';
-
-async function sshExec(sshClient: any, cmd: string): Promise<string> {
+async function restExec(client: any, containerId: string, cmd: string[]): Promise<string> {
   try {
-    const r = await sshClient['exec'](cmd);
+    const r = await client.execContainerHttp(containerId, cmd);
     return r.exitCode === 0 ? r.stdout.trim() : '';
   } catch { return ''; }
 }
@@ -60,45 +57,29 @@ export const GET: RequestHandler = async ({ params, url, cookies }) => {
       client.destroy();
     }
 
-    // Fallback: use SSH to find traefik and read configs/logs
-    if (worker.sshKeyId) {
-      const sshKey = await getSSHKey(worker.sshKeyId);
-      if (sshKey) {
-        const sshClient = createSSHPodmanClient({
-          host: worker.hostname,
-          port: worker.sshPort,
-          username: worker.sshUser,
-          privateKey: sshKey.privateKey,
-        });
-
-        // Find traefik container status
-        const psOut = await sshExec(sshClient, `podman ps -a --filter name=traefik --format '{{.ID}} {{.Status}} {{.State}}' 2>/dev/null`);
-        if (psOut && traefikStatus === 'not_found') {
-          const parts = psOut.split(/\s+/);
-          traefikStatus = parts[2] || parts[1] || 'unknown';
-        }
-
-        // Get logs
-        if (!traefikLogs) {
-          traefikLogs = await sshExec(sshClient, `podman logs --tail ${tailLines} traefik 2>&1`);
-        }
-
+    // Read traefik configs via REST API exec (no SSH needed)
+    if (worker.podmanApiUrl && traefikStatus !== 'not_found') {
+      const client = getRestPodmanClient(worker);
+      try {
         // Read static config
-        traefikStaticConfig = await sshExec(sshClient, `cat /etc/traefik/traefik.yml 2>/dev/null || podman exec traefik cat /etc/traefik/traefik.yml 2>/dev/null`);
+        if (!traefikStaticConfig) {
+          traefikStaticConfig = await restExec(client, 'traefik', ['cat', '/etc/traefik/traefik.yml']);
+        }
 
         // Read dynamic configs
-        const dynamicList = await sshExec(sshClient, `ls /etc/traefik/dynamic/ 2>/dev/null`);
+        const dynamicList = await restExec(client, 'traefik', ['ls', '/etc/traefik/dynamic/']);
         if (dynamicList) {
           for (const file of dynamicList.split('\n').filter(Boolean)) {
-            const content = await sshExec(sshClient, `cat "/etc/traefik/dynamic/${file}" 2>/dev/null`);
-            if (content) {
-              traefikDynamicConfigs[file] = content;
+            if (!traefikDynamicConfigs[file]) {
+              const content = await restExec(client, 'traefik', ['cat', `/etc/traefik/dynamic/${file}`]);
+              if (content) {
+                traefikDynamicConfigs[file] = content;
+              }
             }
           }
         }
-
-        sshClient.destroy();
-      }
+      } catch {}
+      client.destroy();
     }
 
     // Get app routing rules from our DB containers

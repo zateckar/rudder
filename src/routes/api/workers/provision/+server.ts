@@ -68,7 +68,7 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
     throw error;
   }
 
-  const { workerId } = body;
+  const { workerId, sshPrivateKey: adHocKey } = body;
 
   try {
     return await withLock(
@@ -81,29 +81,37 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
           return json({ error: 'Worker not found' }, { status: 404 });
         }
 
-        if (!worker.sshKeyId) {
-          return json({ error: 'No SSH key configured' }, { status: 400 });
+        if (!adHocKey && !worker.sshKeyId) {
+          return json({ error: 'No SSH key provided. Paste a provisioning SSH private key or configure one on the worker.' }, { status: 400 });
         }
 
         if (worker.status === 'provisioning') {
           return json({ error: 'Worker is already being provisioned' }, { status: 409 });
         }
 
-        const sshKey = await getSSHKey(worker.sshKeyId);
-        if (!sshKey) {
-          return json({ error: 'SSH key not found' }, { status: 404 });
+        // Prefer ad-hoc key (never stored) over stored key
+        let privateKey: string;
+        if (adHocKey) {
+          privateKey = adHocKey;
+        } else {
+          const sshKey = await getSSHKey(worker.sshKeyId!);
+          if (!sshKey) {
+            return json({ error: 'SSH key not found' }, { status: 404 });
+          }
+          privateKey = sshKey.privateKey;
+          console.warn('[provision] Using stored SSH key for provisioning. For better security, provide an ad-hoc key instead.');
         }
 
         let tempKeyPath: string | undefined;
         
         try {
-          tempKeyPath = createTempKeyFile(sshKey.privateKey);
+          tempKeyPath = createTempKeyFile(privateKey);
           
           const canConnect = await testSSHConnection({
             host: worker.hostname,
             port: worker.sshPort,
             username: worker.sshUser,
-            privateKey: sshKey.privateKey,
+            privateKey,
           });
 
           console.log('SSH connection test result:', canConnect);
@@ -128,7 +136,7 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
               host: worker.hostname,
               port: worker.sshPort,
               username: worker.sshUser,
-              privateKey: sshKey.privateKey,
+              privateKey,
             },
             `sudo bash -s`,
             script

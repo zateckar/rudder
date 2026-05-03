@@ -4,8 +4,9 @@ import { db } from '$lib/db';
 import { workers, users, workerPings } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { getSSHKey, type SSHConnectionConfig } from '$lib/server/ssh';
-import { createPodmanClient, createSSHPodmanClient } from '$lib/server/podman';
+import { createPodmanClient } from '$lib/server/podman';
 import { getHostStats } from '$lib/server/host-metrics';
+import { getHostStatsHttp } from '$lib/server/host-metrics-http';
 
 export const POST: RequestHandler = async ({ params, cookies }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -60,35 +61,22 @@ export const POST: RequestHandler = async ({ params, cookies }) => {
       }
 
       client.destroy();
-    } else if (worker.sshKeyId) {
-      const sshKey = await getSSHKey(worker.sshKeyId);
-      if (sshKey) {
-        const sshClient = createSSHPodmanClient({
-          host: worker.hostname,
-          port: worker.sshPort,
-          username: worker.sshUser,
-          privateKey: sshKey.privateKey,
-        });
-
-        const ok = await sshClient.ping();
-        latencyMs = Date.now() - start;
-
-        if (ok) {
-          pingStatus = 'online';
-          try { sysInfo = await sshClient.info(); } catch {}
-        }
-
-        sshClient.destroy();
-      }
     }
 
     // Parse useful fields from sysInfo
     const host = sysInfo?.host;
     const store = sysInfo?.store;
 
-    // Collect host-level stats via SSH (fills gaps Podman API doesn't provide)
+    // Collect host-level stats — prefer HTTP metrics endpoint, fall back to SSH
     let hostStats: Awaited<ReturnType<typeof getHostStats>> | null = null;
-    if (worker.sshKeyId) {
+    if (worker.baseDomain && worker.podmanCaCert) {
+      try {
+        hostStats = await getHostStatsHttp(worker as any);
+      } catch (e) {
+        console.warn('[worker-info] HTTP host stats failed, trying SSH:', e);
+      }
+    }
+    if (!hostStats && worker.sshKeyId) {
       try {
         const sshKey = await getSSHKey(worker.sshKeyId);
         if (sshKey) {

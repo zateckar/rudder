@@ -222,7 +222,7 @@ export async function POST({
       manifest: parsed.manifest,
       environment: parsed.environment,
       volumes: null,
-      restartPolicy: parsed.restartPolicy,
+      restartPolicy: parsed.restartPolicy as 'always' | 'no' | 'on-failure' | 'unless-stopped' | undefined,
       replicas: parsed.replicas,
       createdBy: null,
       createdAt: new Date(),

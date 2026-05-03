@@ -1,11 +1,16 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import SshKeyPrompt from '$lib/components/SshKeyPrompt.svelte';
 
   let { data } = $props();
 
   let activeTab = $state<'overview' | 'metrics' | 'events' | 'containers' | 'images' | 'networks' | 'traefik' | 'crowdsec' | 'terminal'>('overview');
   let systemInfo = $state<any>(null);
   let loadingInfo = $state(false);
+
+  // SSH key held in memory for terminal session (never persisted server-side)
+  let terminalSshKey = $state('');
+  let showTerminalKeyPrompt = $state(false);
 
   let events = $state<any[]>([]);
   let allSyslogEvents = $state<any[]>([]);
@@ -21,6 +26,7 @@
   let collectMsg = $state('');
   let provisioning = $state(false);
   let provisionMsg = $state('');
+  let showProvisionModal = $state(false);
 
   let metricsClient = $state<any[] | null>(null);
   let metricsLoading = $state(false);
@@ -290,7 +296,13 @@
     if (tab === 'networks' && !networksLoaded && !networksLoading) loadNetworks();
     if (tab === 'traefik' && !traefikLoading) loadTraefik();
     if (tab === 'crowdsec' && !crowdsecLoading) loadCrowdsec();
-    if (tab === 'terminal') initTerminal();
+    if (tab === 'terminal') {
+      if (terminalSshKey) {
+        initTerminal();
+      } else {
+        showTerminalKeyPrompt = true;
+      }
+    }
   }
 
   onMount(() => {
@@ -313,15 +325,19 @@
     }
   }
 
-  async function provisionWorker() {
-    if (!confirm(`Re-provision worker "${data.worker.name}"? This will reinstall Podman, Traefik, and CrowdSec on the remote host.`)) return;
+  function requestProvision() {
+    showProvisionModal = true;
+  }
+
+  async function provisionWorker(sshKey: string) {
+    showProvisionModal = false;
     provisioning = true;
     provisionMsg = '';
     try {
       const res = await fetch('/api/workers/provision', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workerId }),
+        body: JSON.stringify({ workerId, sshPrivateKey: sshKey }),
       });
       const body = await res.json();
       if (body.success) {
@@ -493,7 +509,7 @@
       const res = await fetch(`/api/workers/${workerId}/terminal`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: cmd }),
+        body: JSON.stringify({ command: cmd, sshPrivateKey: terminalSshKey }),
       });
       const body = await res.json();
       if (body.error) {
@@ -639,12 +655,23 @@
 
 </script>
 
+{#if showProvisionModal}
+<SshKeyPrompt
+  workerId={workerId}
+  title="Provision Worker"
+  description="Paste the SSH private key for root access. This key is used only for this provisioning session and is <strong>never stored</strong> on the server."
+  submitLabel="Start Provisioning"
+  onsubmit={provisionWorker}
+  oncancel={() => showProvisionModal = false}
+/>
+{/if}
+
 <div class="page">
   <div class="header">
     <div class="header-top">
       <a href="/workers" class="back-link">&larr; Workers</a>
       <div class="header-actions">
-        <button class="btn-tiny btn-accent" disabled={provisioning} onclick={provisionWorker} title="Re-run provisioning script on this worker (reinstalls Podman, Traefik, CrowdSec)">
+        <button class="btn-tiny btn-accent" disabled={provisioning} onclick={requestProvision} title="Re-run provisioning script on this worker (reinstalls Podman, Traefik, CrowdSec)">
           {provisioning ? 'Re-provisioning…' : (provisionMsg || 'Re-provision')}
         </button>
         <button class="btn-tiny" onclick={collectMetrics} title="Manually collect worker and container metrics">{collectMsg || 'Collect Now'}</button>
@@ -1330,24 +1357,36 @@
 
   <!-- Terminal tab -->
   {#if activeTab === 'terminal'}
-    <div class="terminal-section">
-      {#if termConnecting}
-        <div class="terminal-status">
-          <div class="spinner"></div>
-          <p>Connecting to {data.worker.name}…</p>
-        </div>
-      {:else if termError}
-        <div class="terminal-status">
-          <p class="error">{termError}</p>
-          <button class="btn-load" onclick={() => { termError = ''; initTerminal(); }}>Retry</button>
-        </div>
-      {/if}
-      <div bind:this={termEl} class="terminal-wrapper" style:display={termError || termConnecting ? 'none' : 'block'}></div>
-    </div>
+    {#if showTerminalKeyPrompt}
+      <SshKeyPrompt
+        workerId={workerId}
+        title="SSH Key for Terminal"
+        description="Paste the SSH private key to connect to this worker's terminal. The key is held in memory for this session only."
+        submitLabel="Connect"
+        onsubmit={(key) => { terminalSshKey = key; showTerminalKeyPrompt = false; initTerminal(); }}
+        oncancel={() => { showTerminalKeyPrompt = false; activeTab = 'overview'; }}
+      />
+    {:else}
+      <div class="terminal-section">
+        {#if termConnecting}
+          <div class="terminal-status">
+            <div class="spinner"></div>
+            <p>Connecting to {data.worker.name}…</p>
+          </div>
+        {:else if termError}
+          <div class="terminal-status">
+            <p class="error">{termError}</p>
+            <button class="btn-load" onclick={() => { termError = ''; initTerminal(); }}>Retry</button>
+          </div>
+        {/if}
+        <div bind:this={termEl} class="terminal-wrapper" style:display={termError || termConnecting ? 'none' : 'block'}></div>
+      </div>
+    {/if}
   {/if}
 </div>
 
 <style>
+  /* Modal styles moved to SshKeyPrompt component */
   .page {
     padding: 0 24px;
   }

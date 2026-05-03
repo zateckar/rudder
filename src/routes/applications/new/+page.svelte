@@ -854,8 +854,7 @@ spec:
     margin-bottom: 16px;
   }
 
-  .form-group label,
-  .form-group .label {
+  .form-group label {
     display: block;
     margin-bottom: 6px;
     font-weight: 500;
@@ -906,10 +905,6 @@ spec:
     color: var(--text-muted);
     margin-top: 4px;
     margin-bottom: 8px;
-  }
-
-  .help-text.error {
-    color: var(--red-text);
   }
 
   .validation-errors {
@@ -1203,47 +1198,6 @@ spec:
     background: var(--bg-hover);
   }
 
-  /* Auto-selected worker */
-  .auto-worker {
-    background: var(--bg-raised);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    padding: 12px 14px;
-  }
-
-  .auto-worker-name {
-    font-weight: 600;
-    font-size: 14px;
-    color: var(--text-primary);
-    margin-right: 8px;
-  }
-
-  .auto-worker-domain {
-    font-size: 12px;
-    color: var(--text-muted);
-  }
-
-  .auto-worker-stats {
-    display: flex;
-    gap: 8px;
-    margin-top: 8px;
-    flex-wrap: wrap;
-  }
-
-  .worker-stat {
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: var(--radius-sm);
-    background: var(--blue-subtle);
-    color: var(--blue-text);
-    font-weight: 500;
-  }
-
-  .worker-stat.warn {
-    background: var(--yellow-subtle);
-    color: var(--yellow);
-  }
-
   .worker-select {
     width: 100%;
     padding: 8px 12px;
@@ -1255,10 +1209,6 @@ spec:
     cursor: pointer;
   }
   .worker-select:focus { border-color: var(--accent); outline: none; }
-
-  .mono {
-    font-family: var(--font-mono);
-  }
 
   .no-worker-banner {
     background: var(--red-subtle);

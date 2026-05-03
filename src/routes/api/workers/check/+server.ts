@@ -2,8 +2,7 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { getSSHKey } from '$lib/server/ssh';
-import { createPodmanClient, createSSHPodmanClient } from '$lib/server/podman';
+import { createPodmanClient } from '$lib/server/podman';
 
 export async function POST({ request, cookies, locals }: { request: Request; cookies: any; locals: any }) {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -35,7 +34,6 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
 
   try {
     let isOnline = false;
-    let useRestApi = false;
 
     // Try REST API first if credentials are available
     if (worker.podmanApiUrl && worker.podmanCaCert && worker.podmanClientCert && worker.podmanClientKey) {
@@ -48,26 +46,9 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
         });
 
         isOnline = await podmanClient.ping();
-        useRestApi = true;
         podmanClient.destroy();
       } catch (e) {
-        console.warn('REST API check failed, trying SSH:', e);
-      }
-    }
-
-    // Fall back to SSH if REST API is not available
-    if (!isOnline && worker.sshKeyId) {
-      const sshKey = await getSSHKey(worker.sshKeyId);
-      if (sshKey) {
-        const sshClient = createSSHPodmanClient({
-          host: worker.hostname,
-          port: worker.sshPort,
-          username: worker.sshUser,
-          privateKey: sshKey.privateKey,
-        });
-
-        isOnline = await sshClient.ping();
-        sshClient.destroy();
+        console.warn('REST API check failed:', e);
       }
     }
     
@@ -84,7 +65,7 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
         .where(eq(workers.id, workerId));
     }
     
-    return json({ online: isOnline, useRestApi });
+    return json({ online: isOnline });
   } catch (error: any) {
     console.error('Worker check error:', error);
     await db.update(workers)

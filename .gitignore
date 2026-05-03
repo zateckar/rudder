@@ -1,39 +1,31 @@
 # Dependencies
-node_modules
+node_modules/
 
-# Output
-.output
-.vercel
-.netlify
-.wrangler
-/.svelte-kit
-/build
+# Build output
+.svelte-kit/
+build/
+dist/
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Environment & Secrets
+# Environment & secrets
 .env
 .env.*
 !.env.example
-!.env.test
 
-# Vite
-vite.config.js.timestamp-*
-vite.config.ts.timestamp-*
+# SSH keys - NEVER commit private keys
+*.pem
+*.key
+id_rsa*
+id_ed25519*
 
 # Database
 *.db
 *.db-journal
-*.db-wal
-*.db-shm
-data/
+*.sqlite
+*.sqlite-journal
 
-# SSH Keys
-*.pem
-*.key
-keys/
+# OS files
+.DS_Store
+Thumbs.db
 
 # IDE
 .vscode/
@@ -44,7 +36,17 @@ keys/
 # Logs
 *.log
 npm-debug.log*
+*.db-wal
+*.db-shm
+data/
 
+# SSH Keys
+*.pem
+*.key
+keys/
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
 # Coverage & Testing
 coverage/
 *.lcov
