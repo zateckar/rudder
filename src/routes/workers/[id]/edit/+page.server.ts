@@ -1,6 +1,6 @@
 import { redirect, fail, error } from '@sveltejs/kit';
 import { db } from '$lib/db';
-import { workers, users, sshKeys } from '$lib/db/schema';
+import { workers, users } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 
 export const load = async ({ params, cookies }: { params: { id: string }; cookies: any }) => {
@@ -20,12 +20,10 @@ export const load = async ({ params, cookies }: { params: { id: string }; cookie
   const worker = await db.select().from(workers).where(eq(workers.id, params.id)).get();
   if (!worker) throw error(404, 'Worker not found');
 
-  const allSshKeys = await db.select().from(sshKeys).all();
 
   return {
     user: currentUser,
     worker,
-    sshKeys: allSshKeys,
   };
 };
 
@@ -53,7 +51,6 @@ export const actions = {
     const hostname = formData.get('hostname')?.toString();
     const sshPort = parseInt(formData.get('sshPort')?.toString() || '22');
     const sshUser = formData.get('sshUser')?.toString();
-    const sshKeyId = formData.get('sshKeyId')?.toString();
     const baseDomain = formData.get('baseDomain')?.toString() || '';
     const podmanApiUrl = formData.get('podmanApiUrl')?.toString() || '';
 
@@ -69,10 +66,6 @@ export const actions = {
       baseDomain: baseDomain || null,
       podmanApiUrl: podmanApiUrl || (baseDomain ? `https://podman-api.${baseDomain}` : `https://${hostname}`),
     };
-
-    if (sshKeyId) {
-      updates.sshKeyId = sshKeyId;
-    }
 
     await db.update(workers).set(updates).where(eq(workers.id, params.id));
 

@@ -8,7 +8,7 @@ import { db } from '$lib/db';
 import { containers, workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { validateTerminalToken } from '$lib/server/terminal-tokens';
-import { getSSHKey, executeSSHCommand, type SSHConnectionConfig } from '$lib/server/ssh';
+import { executeSSHCommand, type SSHConnectionConfig } from '$lib/server/ssh';
 import { join } from 'path';
 import { writeFileSync, unlinkSync } from 'fs';
 import { tmpdir } from 'os';
@@ -72,48 +72,28 @@ export function GET({ url }: { url: URL }) {
           ws.addEventListener('close', () => clearTimeout(timeout));
 
           if (mode === 'host') {
-            // Host terminal: SSH key provided ad-hoc via first WS message,
-            // or fallback to stored key if available
-            let privateKey: string | null = null;
-
-            if (worker.sshKeyId) {
-              const sshKey = await getSSHKey(worker.sshKeyId);
-              if (sshKey) privateKey = sshKey.privateKey;
-            }
-
-            if (privateKey) {
-              // Use stored key directly
-              const sshConfig: SSHConnectionConfig = {
-                host: worker.hostname,
-                port: worker.sshPort,
-                username: worker.sshUser,
-                privateKey,
-              };
-              await handleHostTerminal(ws, sshConfig);
-            } else {
-              // Wait for client to send SSH key as first message
-              ws.send(JSON.stringify({ type: 'need_ssh_key', message: 'Please provide SSH key' }));
-              const keyHandler = async (event: MessageEvent) => {
-                ws.removeEventListener('message', keyHandler as any);
-                try {
-                  const msg = JSON.parse(typeof event.data === 'string' ? event.data : event.data.toString());
-                  if (msg.type === 'ssh_key' && msg.key) {
-                    const sshConfig: SSHConnectionConfig = {
-                      host: worker.hostname,
-                      port: worker.sshPort,
-                      username: worker.sshUser,
-                      privateKey: msg.key,
-                    };
-                    await handleHostTerminal(ws, sshConfig);
-                  } else {
-                    ws.close(1008, 'Invalid SSH key message');
-                  }
-                } catch {
-                  ws.close(1008, 'Failed to parse SSH key message');
+            // SSH key must be provided ad-hoc by client (never stored server-side)
+            ws.send(JSON.stringify({ type: 'need_ssh_key', message: 'Please provide SSH key' }));
+            const keyHandler = async (event: MessageEvent) => {
+              ws.removeEventListener('message', keyHandler as any);
+              try {
+                const msg = JSON.parse(typeof event.data === 'string' ? event.data : event.data.toString());
+                if (msg.type === 'ssh_key' && msg.key) {
+                  const sshConfig: SSHConnectionConfig = {
+                    host: worker.hostname,
+                    port: worker.sshPort,
+                    username: worker.sshUser,
+                    privateKey: msg.key,
+                  };
+                  await handleHostTerminal(ws, sshConfig);
+                } else {
+                  ws.close(1008, 'Invalid SSH key message');
                 }
-              };
-              ws.addEventListener('message', keyHandler as any);
-            }
+              } catch {
+                ws.close(1008, 'Failed to parse SSH key message');
+              }
+            };
+            ws.addEventListener('message', keyHandler as any);
           } else {
             // Container terminal uses Podman REST API (no SSH needed)
             await handleContainerTerminal(ws, worker, containerId!);

@@ -42,7 +42,6 @@ export const workers = sqliteTable('workers', {
   hostname: text('hostname').notNull(),
   sshPort: integer('ssh_port').notNull().default(22),
   sshUser: text('ssh_user').notNull(),
-  sshKeyId: text('ssh_key_id').references(() => sshKeys.id),
   podmanApiUrl: text('podman_api_url').notNull(),
   podmanCaCert: text('podman_ca_cert'),
   podmanClientCert: text('podman_client_cert'),
@@ -54,15 +53,6 @@ export const workers = sqliteTable('workers', {
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   provisionedAt: integer('provisioned_at', { mode: 'timestamp' }),
   lastSeenAt: integer('last_seen_at', { mode: 'timestamp' }),
-});
-
-export const sshKeys = sqliteTable('ssh_keys', {
-  id: text('id').primaryKey(),
-  name: text('name').notNull(),
-  privateKey: text('private_key').notNull(),
-  publicKey: text('public_key').notNull(),
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-  usedForProvisioning: integer('used_for_provisioning', { mode: 'boolean' }).notNull().default(false),
 });
 
 export const applications = sqliteTable('applications', {

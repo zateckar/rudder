@@ -2,12 +2,12 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { applications, workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { getSSHKey, executeSSHCommand, createTempKeyFile, deleteTempKeyFile } from '$lib/server/ssh';
+import { executeSSHCommand, createTempKeyFile, deleteTempKeyFile } from '$lib/server/ssh';
 import { generateTraefikConfig } from '$lib/server/provisioning';
 
 export async function POST({ request, cookies, locals }: { request: Request; cookies: any; locals: any }) {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
+
   const sessionId = getSessionIdFromCookies(cookies);
   const userId = sessionId ? await validateSession(sessionId) : null;
 
@@ -21,36 +21,35 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
   }
 
   const body = await request.json();
-  const { workerId, apps, action } = body;
+  const { workerId, apps, action, sshPrivateKey } = body;
 
   if (!workerId) {
     return json({ error: 'Worker ID required' }, { status: 400 });
   }
 
-  const worker = await db.select().from(workers).where(eq(workers.id, workerId)).get();
-  
-  if (!worker || !worker.sshKeyId) {
-    return json({ error: 'Worker not found or not configured' }, { status: 404 });
+  if (!sshPrivateKey) {
+    return json({ error: 'SSH private key required for Traefik management. Provide sshPrivateKey in the request body.' }, { status: 400 });
   }
 
-  const sshKey = await getSSHKey(worker.sshKeyId);
-  if (!sshKey) {
-    return json({ error: 'SSH key not found' }, { status: 404 });
+  const worker = await db.select().from(workers).where(eq(workers.id, workerId)).get();
+
+  if (!worker) {
+    return json({ error: 'Worker not found' }, { status: 404 });
   }
 
   let tempKeyPath: string | undefined;
-  
+
   try {
-    tempKeyPath = createTempKeyFile(sshKey.privateKey);
+    tempKeyPath = createTempKeyFile(sshPrivateKey);
 
     if (action === 'reload') {
-      // Just reload Traefik - it will automatically detect new containers with labels
+      // Just reload Traefik — it auto-detects new containers via labels
       const result = await executeSSHCommand(
         {
           host: worker.hostname,
           port: worker.sshPort,
           username: worker.sshUser,
-          privateKey: sshKey.privateKey,
+          privateKey: sshPrivateKey,
         },
         'systemctl reload traefik'
       );
@@ -62,7 +61,7 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
 
       return json({ success: true, message: 'Traefik configuration reloaded' });
     } else if (action === 'config' && apps && Array.isArray(apps)) {
-      // Generate and apply a complete Traefik configuration (for manual override)
+      // Generate and apply a complete Traefik configuration
       const traefikConfig = generateTraefikConfig('example.com', apps);
       const encodedConfig = Buffer.from(traefikConfig).toString('base64');
 
@@ -71,7 +70,7 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
           host: worker.hostname,
           port: worker.sshPort,
           username: worker.sshUser,
-          privateKey: sshKey.privateKey,
+          privateKey: sshPrivateKey,
         },
         `echo "${encodedConfig}" | base64 -d > /etc/traefik/dynamic/manual.yml && systemctl reload traefik`
       );
@@ -83,11 +82,11 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
 
       return json({ success: true, message: 'Traefik configuration applied' });
     } else {
-      // Default action: just reload Traefik since it should auto-detect container labels
+      // Default: reload Traefik (auto-detects container labels)
       return await POST({
         request: new Request(request.url, {
           method: 'POST',
-          body: JSON.stringify({ workerId, action: 'reload' })
+          body: JSON.stringify({ workerId, action: 'reload', sshPrivateKey })
         }),
         cookies,
         locals

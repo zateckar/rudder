@@ -1,6 +1,6 @@
 import { redirect, fail } from '@sveltejs/kit';
 import { db } from '$lib/db';
-import { workers, users, sshKeys } from '$lib/db/schema';
+import { workers, users } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 
 export const load = async ({ cookies }: { cookies: any }) => {
@@ -17,11 +17,8 @@ export const load = async ({ cookies }: { cookies: any }) => {
     throw redirect(303, '/dashboard');
   }
 
-  const allSshKeys = await db.select().from(sshKeys).all();
-
   return {
     user: currentUser,
-    sshKeys: allSshKeys,
   };
 };
 
@@ -45,10 +42,9 @@ export const actions = {
     const hostname = formData.get('hostname')?.toString();
     const sshPort = parseInt(formData.get('sshPort')?.toString() || '22');
     const sshUser = formData.get('sshUser')?.toString();
-    const sshKeyId = formData.get('sshKeyId')?.toString();
     const baseDomain = formData.get('baseDomain')?.toString() || '';
 
-    if (!name || !hostname || !sshUser || !sshKeyId) {
+    if (!name || !hostname || !sshUser) {
       return fail(400, { error: 'Missing required fields' });
     }
 
@@ -66,7 +62,6 @@ export const actions = {
       hostname,
       sshPort,
       sshUser,
-      sshKeyId,
       baseDomain: baseDomain || null,
       podmanApiUrl,
       status: 'offline',

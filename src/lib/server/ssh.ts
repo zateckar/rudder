@@ -1,62 +1,13 @@
 import { execSync } from 'child_process';
-import { decrypt, encrypt } from '../server/encryption';
-import { db } from '../db';
-import { sshKeys } from '../db/schema';
-import { v4 as uuid } from 'uuid';
-import { eq } from 'drizzle-orm';
-import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync } from 'fs';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import { writeFileSync, unlinkSync, existsSync } from 'fs';
+import { join } from 'path';
 import { tmpdir, platform } from 'os';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export interface SSHConnectionConfig {
   host: string;
   port: number;
   username: string;
   privateKey: string;
-}
-
-export async function createSSHKey(name: string, privateKey: string, publicKey: string): Promise<string> {
-  const id = uuid();
-  const encryptedPrivateKey = encrypt(privateKey);
-  
-  await db.insert(sshKeys).values({
-    id,
-    name,
-    privateKey: encryptedPrivateKey,
-    publicKey,
-    createdAt: new Date(),
-    usedForProvisioning: false,
-  });
-  
-  return id;
-}
-
-export async function getSSHKey(id: string): Promise<{ id: string; name: string; privateKey: string; publicKey: string } | null> {
-  const key = await db.select().from(sshKeys).where(eq(sshKeys.id, id)).get();
-  
-  if (!key) return null;
-  
-  return {
-    id: key.id,
-    name: key.name,
-    privateKey: decrypt(key.privateKey),
-    publicKey: key.publicKey,
-  };
-}
-
-export async function listSSHKeys(): Promise<{ id: string; name: string; publicKey: string; createdAt: Date; usedForProvisioning: boolean }[]> {
-  const keys = await db.select().from(sshKeys).all();
-  
-  return keys.map(key => ({
-    id: key.id,
-    name: key.name,
-    publicKey: key.publicKey,
-    createdAt: key.createdAt,
-    usedForProvisioning: key.usedForProvisioning,
-  }));
 }
 
 export function createTempKeyFile(privateKey: string): string {

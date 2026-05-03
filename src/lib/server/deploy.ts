@@ -2,7 +2,7 @@
  * Shared deploy logic — used by both the deploy API endpoint and the webhook trigger.
  */
 import { db } from '$lib/db';
-import { applications, workers, containers, teams, volumes, secrets, deployments, sshKeys } from '$lib/db/schema';
+import { applications, workers, containers, teams, volumes, secrets, deployments } from '$lib/db/schema';
 import { eq, inArray, or, desc } from 'drizzle-orm';
 import { v4 as uuid } from 'uuid';
 import { getRestPodmanClient } from '$lib/server/podman-client';
@@ -10,7 +10,6 @@ import { parseCompose, validateCompose } from '$lib/server/compose';
 import { parseK8sManifest, validateK8sManifest } from '$lib/server/kubernetes';
 import { generateTraefikLabelsForApp, type AppMiddlewareOptions } from '$lib/server/provisioning';
 import { decrypt } from '$lib/server/encryption';
-import { executeSSHCommand, getSSHKey, type SSHConnectionConfig } from '$lib/server/ssh';
 import { ensureAppNetwork, joinNetwork, connectTraefik, teardownAppNetwork } from '$lib/server/networks';
 
 /** Parse memory string like "512m", "2g" -> bytes */
@@ -144,44 +143,7 @@ async function buildImageFromGit(
   app: typeof applications.$inferSelect,
 ): Promise<string> {
   if (!app.gitRepo) throw new Error('No git repository configured');
-  if (!worker.sshKeyId) throw new Error('Worker has no SSH key configured');
-
-  const sshKey = await db.select().from(sshKeys).where(eq(sshKeys.id, worker.sshKeyId)).get();
-  if (!sshKey) throw new Error('SSH key not found for worker');
-
-  const config: SSHConnectionConfig = {
-    host: worker.hostname,
-    port: worker.sshPort,
-    username: worker.sshUser,
-    privateKey: decrypt(sshKey.privateKey),
-  };
-
-  const gitBranch = app.gitBranch || 'main';
-  const gitDockerfile = app.gitDockerfile || 'Dockerfile';
-  const imageName = `rudder/${app.name}:latest`;
-  const buildDir = `rudder-build-${app.name}`;
-
-  const buildCommand = [
-    `cd /tmp`,
-    `rm -rf ${buildDir}`,
-    `git clone --depth 1 --branch ${gitBranch} ${app.gitRepo} ${buildDir}`,
-    `cd ${buildDir}`,
-    `podman build -t ${imageName} -f ${gitDockerfile} .`,
-    `cd /tmp`,
-    `rm -rf ${buildDir}`,
-  ].join(' && ');
-
-  console.log(`[deploy] Building image from git for ${app.name}: ${app.gitRepo}@${gitBranch}`);
-
-  const result = await executeSSHCommand(config, buildCommand);
-
-  if (result.exitCode !== 0) {
-    const errOutput = result.stderr || result.stdout || 'Unknown build error';
-    throw new Error(`Git build failed (exit ${result.exitCode}): ${errOutput.substring(0, 500)}`);
-  }
-
-  console.log(`[deploy] Successfully built image ${imageName} on worker ${worker.name}`);
-  return imageName;
+  throw new Error('Git-based image builds via SSH are not supported. SSH keys are no longer stored server-side. Please use a pre-built Docker image instead.');
 }
 
 export interface DeployResult {
@@ -199,16 +161,9 @@ export interface DeployResult {
  */
 export async function resolveWorkerSSHConfig(
   worker: typeof workers.$inferSelect,
-): Promise<SSHConnectionConfig | null> {
-  if (!worker.sshKeyId) return null;
-  const sshKey = await getSSHKey(worker.sshKeyId);
-  if (!sshKey) return null;
-  return {
-    host: worker.hostname,
-    port: worker.sshPort,
-    username: worker.sshUser,
-    privateKey: sshKey.privateKey, // already decrypted by getSSHKey
-  };
+): Promise<null> {
+  // SSH keys are no longer stored server-side — always returns null
+  return null;
 }
 
 /**

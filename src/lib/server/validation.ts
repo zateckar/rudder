@@ -38,7 +38,6 @@ export const schemas = {
   teamId: z.string().uuid().min(1),
   userId: z.string().uuid().min(1),
   applicationId: z.string().uuid().min(1),
-  sshKeyId: z.string().uuid().min(1),
   secretId: z.string().uuid().min(1),
   
   hostname: z.string()
@@ -80,14 +79,13 @@ export const schemas = {
     hostname: z.string().min(1).max(253),
     sshPort: z.number().int().min(1).max(65535).default(22),
     sshUser: z.string().min(1).max(100),
-    sshKeyId: z.string().uuid(),
     baseDomain: z.string().max(253).optional(),
     labels: z.record(z.string(), z.string()).optional(),
   }),
 
   provisionWorker: z.object({
     workerId: z.string().uuid(),
-    sshPrivateKey: z.string().min(1).max(50000).optional(),
+    sshPrivateKey: z.string().min(1).max(50000),
   }),
 
   terminalCommand: z.object({
@@ -149,12 +147,6 @@ export const schemas = {
   containerExec: z.object({
     cmd: z.array(z.string()).min(1).max(100),
     tty: z.boolean().optional(),
-  }),
-
-  createSshKey: z.object({
-    name: z.string().min(1).max(100),
-    privateKey: z.string().min(1).max(50000),
-    publicKey: z.string().min(1).max(10000),
   }),
 
   createVolume: z.object({

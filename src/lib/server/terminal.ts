@@ -3,15 +3,14 @@ import type { Server } from 'http';
 import { db } from '$lib/db';
 import { containers, workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { getSSHKey, executeSSHCommand, type SSHConnectionConfig } from '$lib/server/ssh';
-import { createSSHPodmanClient, type SSHPodmanClient } from '$lib/server/podman';
+import { executeSSHCommand, type SSHConnectionConfig } from '$lib/server/ssh';
 import { validateTerminalToken } from '$lib/server/terminal-tokens';
 
 interface TerminalSession {
   ws: WebSocket;
   containerId?: string;
   workerId: string;
-  podmanClient?: SSHPodmanClient;
+  podmanClient?: any;
   containerWs?: WebSocket;
   mode: 'container' | 'host';
   createdAt: Date;
@@ -102,40 +101,68 @@ export function initializeTerminalServer(server: Server) {
       }
 
       const worker = await db.select().from(workers).where(eq(workers.id, targetWorkerId)).get();
-      if (!worker || !worker.sshKeyId) {
+      if (!worker) {
         ws.close(1008, 'Worker not configured');
         return;
       }
 
-      const sshKey = await getSSHKey(worker.sshKeyId);
-      if (!sshKey) {
-        ws.close(1008, 'SSH key not found');
-        return;
+      let sshConfig: SSHConnectionConfig | null = null;
+
+      if (mode === 'host') {
+        // SSH key must be provided ad-hoc by the client (never stored server-side)
+        ws.send(JSON.stringify({ type: 'need_ssh_key', message: 'Please provide SSH private key' }));
+
+        const privateKey = await new Promise<string | null>((resolve) => {
+          const keyTimeout = setTimeout(() => resolve(null), 30000);
+          ws.once('message', (data: Buffer) => {
+            clearTimeout(keyTimeout);
+            try {
+              const msg = JSON.parse(data.toString());
+              resolve(msg.type === 'ssh_key' && msg.key ? msg.key : null);
+            } catch {
+              resolve(null);
+            }
+          });
+        });
+
+        if (!privateKey) {
+          ws.close(1008, 'SSH key not provided');
+          return;
+        }
+
+        sshConfig = {
+          host: worker.hostname,
+          port: worker.sshPort,
+          username: worker.sshUser,
+          privateKey,
+        };
       }
 
-      const sshConfig: SSHConnectionConfig = {
-        host: worker.hostname,
-        port: worker.sshPort,
-        username: worker.sshUser,
-        privateKey: sshKey.privateKey,
-      };
+      let containerPodmanClient: any = null;
+
+      if (mode === 'container') {
+        const { getRestPodmanClient } = await import('$lib/server/podman-client');
+        try {
+          containerPodmanClient = getRestPodmanClient(worker);
+        } catch (e: any) {
+          ws.close(1011, 'Podman REST API not available for this worker');
+          return;
+        }
+      }
 
       const session: TerminalSession = {
         ws,
         containerId: containerId || undefined,
         workerId: targetWorkerId,
+        podmanClient: containerPodmanClient,
         mode,
         createdAt: new Date(),
       };
 
-      if (mode === 'container') {
-        session.podmanClient = createSSHPodmanClient(sshConfig);
-      }
-
       terminalSessions.set(sessionId, session);
       scheduleSessionCleanup(sessionId, session);
 
-      if (mode === 'host') {
+      if (mode === 'host' && sshConfig) {
         await setupHostTerminal(session, sshConfig);
       } else {
         await setupTerminalConnection(session);
@@ -291,97 +318,11 @@ async function setupTerminalConnection(session: TerminalSession) {
       }
     }
 
-    // SSH client - use command execution for each input
-    // Set up terminal for command execution
+    // SSH fallback removed — container terminals require Podman REST API
     if (session.ws.readyState === WebSocket.OPEN) {
-      session.ws.send(JSON.stringify({ type: 'connected', message: 'Terminal ready (command mode)' }));
-      session.ws.send('Container Terminal - Type commands below (each command runs in a new shell)\r\n');
-      session.ws.send('$ ');
+      session.ws.send(JSON.stringify({ type: 'error', message: 'Container terminal requires Podman REST API. This worker does not support SSH-based exec.' }));
+      session.ws.close(1011, 'Podman REST API required for container terminals');
     }
-
-    let currentCommand = '';
-
-    session.ws.on('message', async (data) => {
-      const input = data.toString();
-      
-      for (const char of input) {
-        if (char === '\r' || char === '\n') {
-          // Execute command
-          if (currentCommand.trim()) {
-            session.ws.send('\r\n');
-            try {
-              const escapedCommand = currentCommand.trim().replace(/'/g, "'\\''");
-              const fullCommand = `podman exec ${containerId} /bin/sh -c '${escapedCommand}'`;
-              
-              const { getSSHKey, executeSSHCommand } = await import('$lib/server/ssh');
-              
-              // Get worker info for SSH
-              const { db } = await import('$lib/db');
-              const { workers } = await import('$lib/db/schema');
-              const { containers } = await import('$lib/db/schema');
-              const { eq } = await import('drizzle-orm');
-              
-              const container = await db.select().from(containers).where(eq(containers.id, containerId)).get();
-              if (!container || !container.workerId) {
-                session.ws.send('Container not found\r\n');
-                session.ws.send('$ ');
-                currentCommand = '';
-                continue;
-              }
-              
-              const worker = await db.select().from(workers).where(eq(workers.id, container.workerId)).get();
-              if (!worker || !worker.sshKeyId) {
-                session.ws.send('Worker not configured\r\n');
-                session.ws.send('$ ');
-                currentCommand = '';
-                continue;
-              }
-              
-              const sshKey = await getSSHKey(worker.sshKeyId);
-              if (!sshKey) {
-                session.ws.send('SSH key not found\r\n');
-                session.ws.send('$ ');
-                currentCommand = '';
-                continue;
-              }
-              
-              const result = await executeSSHCommand(
-                {
-                  host: worker.hostname,
-                  port: worker.sshPort,
-                  username: worker.sshUser,
-                  privateKey: sshKey.privateKey,
-                },
-                fullCommand
-              );
-              
-              if (result.stdout) {
-                session.ws.send(result.stdout.replace(/\n/g, '\r\n'));
-              }
-              if (result.stderr) {
-                session.ws.send(`\x1b[31m${result.stderr.replace(/\n/g, '\r\n')}\x1b[0m`);
-              }
-            } catch (error: any) {
-              session.ws.send(`\x1b[31mError: ${error.message}\r\n\x1b[0m`);
-            }
-            session.ws.send('$ ');
-          } else {
-            session.ws.send('\r\n$ ');
-          }
-          currentCommand = '';
-        } else if (char === '\x7f' || char === '\b') {
-          // Backspace
-          if (currentCommand.length > 0) {
-            currentCommand = currentCommand.slice(0, -1);
-            session.ws.send('\b \b');
-          }
-        } else if (char >= ' ') {
-          // Printable character
-          currentCommand += char;
-          session.ws.send(char);
-        }
-      }
-    });
 
   } catch (error) {
     console.error('Failed to setup terminal connection:', error);

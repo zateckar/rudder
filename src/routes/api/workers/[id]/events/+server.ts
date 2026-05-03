@@ -3,8 +3,7 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { workers, users } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { getSSHKey } from '$lib/server/ssh';
-import { createPodmanClient, createSSHPodmanClient } from '$lib/server/podman';
+import { createPodmanClient } from '$lib/server/podman';
 
 export const GET: RequestHandler = async ({ params, url, cookies }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -44,27 +43,6 @@ export const GET: RequestHandler = async ({ params, url, cookies }) => {
       const client = createPodmanClient({ apiUrl: worker.podmanApiUrl });
       events = await client.events(since, undefined, Object.keys(filters).length > 0 ? filters : undefined);
       client.destroy();
-    } else if (worker.sshKeyId) {
-      const sshKey = await getSSHKey(worker.sshKeyId);
-      if (sshKey) {
-        const sshClient = createSSHPodmanClient({
-          host: worker.hostname,
-          port: worker.sshPort,
-          username: worker.sshUser,
-          privateKey: sshKey.privateKey,
-        });
-        // Events via SSH CLI
-        const filtersStr = Object.entries(filters)
-          .map(([k, v]) => `--filter '${k}=${v.join(',')}'`)
-          .join(' ');
-        const result = await sshClient['exec'](`podman events --since '${since}' ${filtersStr} --format json 2>/dev/null | head -200`);
-        if (result.exitCode === 0 && result.stdout.trim()) {
-          events = result.stdout.trim().split('\n').map(l => {
-            try { return JSON.parse(l); } catch { return null; }
-          }).filter(Boolean);
-        }
-        sshClient.destroy();
-      }
     }
 
     return json({ events, count: events.length });

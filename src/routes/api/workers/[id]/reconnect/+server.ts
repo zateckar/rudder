@@ -4,14 +4,13 @@ import { db } from '$lib/db';
 import { workers, users } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { SSHPodmanClient } from '$lib/server/podman';
-import { getSSHKey } from '$lib/server/ssh';
 
-export const POST: RequestHandler = async ({ params, cookies }) => {
+export const POST: RequestHandler = async ({ params, request, cookies }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
+
   const sessionId = getSessionIdFromCookies(cookies);
   const userId = sessionId ? await validateSession(sessionId) : null;
-  
+
   if (!userId) {
     return json({ error: 'Unauthorized' }, { status: 401 });
   }
@@ -27,45 +26,46 @@ export const POST: RequestHandler = async ({ params, cookies }) => {
     return json({ error: 'Worker not found' }, { status: 404 });
   }
 
-  // Try to connect via SSH
+  // Parse optional ad-hoc SSH key from request body (never stored server-side)
+  let sshPrivateKey: string | undefined;
+  try {
+    const body = await request.json();
+    sshPrivateKey = body?.sshPrivateKey;
+  } catch {
+    // No body or invalid JSON — will fall back to REST API if configured
+  }
+
   let status: 'online' | 'offline' | 'error' = 'offline';
   let errorMessage: string | null = null;
 
   try {
-    if (worker.sshKeyId) {
-      const sshKey = await getSSHKey(worker.sshKeyId);
-      if (sshKey) {
-        const client = new SSHPodmanClient({
-          host: worker.hostname,
-          port: worker.sshPort,
-          username: worker.sshUser,
-          privateKey: sshKey.privateKey,
-        });
+    if (sshPrivateKey) {
+      // Use ad-hoc SSH key for reconnect (key is never stored)
+      const client = new SSHPodmanClient({
+        host: worker.hostname,
+        port: worker.sshPort,
+        username: worker.sshUser,
+        privateKey: sshPrivateKey,
+      });
 
-        // Try to list containers as a connectivity test
-        await client.listContainers();
-        status = 'online';
-      } else {
-        errorMessage = 'SSH key not found';
-        status = 'error';
-      }
+      // List containers as a connectivity test
+      await client.listContainers();
+      status = 'online';
+    } else if (worker.podmanApiUrl && worker.podmanCaCert && worker.podmanClientCert && worker.podmanClientKey) {
+      // Fall back to Podman REST API with mTLS if credentials are configured
+      const { PodmanClient } = await import('$lib/server/podman');
+      const client = new PodmanClient({
+        apiUrl: worker.podmanApiUrl,
+        caCert: worker.podmanCaCert,
+        clientCert: worker.podmanClientCert,
+        clientKey: worker.podmanClientKey,
+      });
+
+      await client.listContainers();
+      status = 'online';
     } else {
-      // Try REST API if configured
-      if (worker.podmanApiUrl && worker.podmanCaCert && worker.podmanClientCert && worker.podmanClientKey) {
-        const { PodmanClient } = await import('$lib/server/podman');
-        const client = new PodmanClient({
-          apiUrl: worker.podmanApiUrl,
-          caCert: worker.podmanCaCert,
-          clientCert: worker.podmanClientCert,
-          clientKey: worker.podmanClientKey,
-        });
-
-        await client.listContainers();
-        status = 'online';
-      } else {
-        errorMessage = 'No SSH key or REST API configured';
-        status = 'error';
-      }
+      errorMessage = 'No SSH key provided and no Podman API credentials configured. Provide an SSH key to reconnect via SSH.';
+      status = 'error';
     }
   } catch (error: any) {
     status = 'error';

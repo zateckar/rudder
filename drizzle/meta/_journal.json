@@ -15,6 +15,41 @@
       "when": 1773613477127,
       "tag": "0001_gifted_black_widow",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1773700000000,
+      "tag": "0002_add_secrets",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1773800000000,
+      "tag": "0003_add_crowdsec_bouncer_key",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1773900000000,
+      "tag": "0004_add_app_ratelimit_auth",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1774000000000,
+      "tag": "0005_features_batch",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1774100000000,
+      "tag": "0006_remove_ssh_keys",
+      "breakpoints": true
     }
   ]
 }

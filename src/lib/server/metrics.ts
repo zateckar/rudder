@@ -9,7 +9,6 @@ import { eq, lt } from 'drizzle-orm';
 import { getRestPodmanClient } from './podman-client';
 import { v4 as uuid } from 'uuid';
 import { createPodmanClient } from './podman';
-import { getSSHKey, type SSHConnectionConfig } from './ssh';
 import { getHostStats } from './host-metrics';
 import { getHostStatsHttp } from './host-metrics-http';
 import { evaluateAlerts } from './alerts';
@@ -237,29 +236,6 @@ async function collectWorkerMetrics(): Promise<void> {
           }
         } catch (e) {
           console.warn(`[metrics] HTTP host stats failed for ${worker.name}:`, e);
-        }
-      } else if (worker.sshKeyId) {
-        try {
-          const sshKey = await getSSHKey(worker.sshKeyId);
-          if (sshKey) {
-            const sshConfig: SSHConnectionConfig = {
-              host: worker.hostname,
-              port: worker.sshPort,
-              username: worker.sshUser,
-              privateKey: sshKey.privateKey,
-            };
-            const hostStats = await getHostStats(sshConfig);
-            if (hostStats.cpuPercent != null) hostCpu = hostStats.cpuPercent;
-            if (hostStats.diskTotal != null) hostDiskLimit = hostStats.diskTotal;
-            if (hostStats.diskPercent != null) hostDiskPercent = hostStats.diskPercent;
-            if (hostStats.netRxBytes != null) hostNetRx = hostStats.netRxBytes;
-            if (hostStats.netTxBytes != null) hostNetTx = hostStats.netTxBytes;
-            if (hostStats.memTotal != null) hostMemTotal = hostStats.memTotal;
-            if (hostStats.memUsed != null) hostMemUsed = hostStats.memUsed;
-            if (hostStats.memPercent != null) hostMemPercent = hostStats.memPercent;
-          }
-        } catch (e) {
-          console.warn(`[metrics] SSH host stats failed for ${worker.name}, using Podman-only data:`, e);
         }
       }
 

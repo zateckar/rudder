@@ -1,8 +1,8 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
-import { workers, sshKeys, applications } from '$lib/db/schema';
+import { workers, applications } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { getSSHKey, executeSSHCommand, createTempKeyFile, deleteTempKeyFile, testSSHConnection } from '$lib/server/ssh';
+import { executeSSHCommand, createTempKeyFile, deleteTempKeyFile, testSSHConnection } from '$lib/server/ssh';
 import { generateProvisioningScript } from '$lib/server/provisioning';
 import { env } from '$lib/server/env';
 import { randomBytes } from 'crypto';
@@ -81,26 +81,15 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
           return json({ error: 'Worker not found' }, { status: 404 });
         }
 
-        if (!adHocKey && !worker.sshKeyId) {
-          return json({ error: 'No SSH key provided. Paste a provisioning SSH private key or configure one on the worker.' }, { status: 400 });
+        if (!adHocKey) {
+          return json({ error: 'No SSH key provided. Paste the SSH private key in the provisioning dialog.' }, { status: 400 });
         }
 
         if (worker.status === 'provisioning') {
           return json({ error: 'Worker is already being provisioned' }, { status: 409 });
         }
 
-        // Prefer ad-hoc key (never stored) over stored key
-        let privateKey: string;
-        if (adHocKey) {
-          privateKey = adHocKey;
-        } else {
-          const sshKey = await getSSHKey(worker.sshKeyId!);
-          if (!sshKey) {
-            return json({ error: 'SSH key not found' }, { status: 404 });
-          }
-          privateKey = sshKey.privateKey;
-          console.warn('[provision] Using stored SSH key for provisioning. For better security, provide an ad-hoc key instead.');
-        }
+        const privateKey = adHocKey;
 
         let tempKeyPath: string | undefined;
         

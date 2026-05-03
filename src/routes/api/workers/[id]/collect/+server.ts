@@ -3,9 +3,7 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { workers, users, workerMetrics, workerPings } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { getSSHKey, type SSHConnectionConfig } from '$lib/server/ssh';
-import { createPodmanClient, createSSHPodmanClient } from '$lib/server/podman';
-import { getHostStats } from '$lib/server/host-metrics';
+import { createPodmanClient } from '$lib/server/podman';
 
 export const POST: RequestHandler = async ({ params, cookies }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -51,22 +49,6 @@ export const POST: RequestHandler = async ({ params, cookies }) => {
         try { systemDf = await client.systemDf(); } catch (e) { console.error(`[collect] systemDf() failed for ${worker.name}:`, e); }
       }
       client.destroy();
-    } else if (worker.sshKeyId) {
-      const sshKey = await getSSHKey(worker.sshKeyId);
-      if (sshKey) {
-        const sshClient = createSSHPodmanClient({
-          host: worker.hostname,
-          port: worker.sshPort,
-          username: worker.sshUser,
-          privateKey: sshKey.privateKey,
-        });
-        const ok = await sshClient.ping();
-        if (ok) {
-          pingStatus = 'online';
-          try { sysInfo = await sshClient.info(); } catch (e) { console.error(`[collect] info() failed for ${worker.name} (SSH):`, e); }
-        }
-        sshClient.destroy();
-      }
     }
 
     const latencyMs = Date.now() - start;
@@ -120,30 +102,6 @@ export const POST: RequestHandler = async ({ params, cookies }) => {
     let hostMemUsed: number | null = memUsed;
     let hostMemPercent: number | null = memPercent;
 
-    if (worker.sshKeyId) {
-      try {
-        const sshKey = await getSSHKey(worker.sshKeyId);
-        if (sshKey) {
-          const sshConfig: SSHConnectionConfig = {
-            host: worker.hostname,
-            port: worker.sshPort,
-            username: worker.sshUser,
-            privateKey: sshKey.privateKey,
-          };
-          const hostStats = await getHostStats(sshConfig);
-          if (hostStats.cpuPercent != null) hostCpu = hostStats.cpuPercent;
-          if (hostStats.diskTotal != null) hostDiskLimit = hostStats.diskTotal;
-          if (hostStats.diskPercent != null) hostDiskPercent = hostStats.diskPercent;
-          if (hostStats.netRxBytes != null) hostNetRx = hostStats.netRxBytes;
-          if (hostStats.netTxBytes != null) hostNetTx = hostStats.netTxBytes;
-          if (hostStats.memTotal != null) hostMemTotal = hostStats.memTotal;
-          if (hostStats.memUsed != null) hostMemUsed = hostStats.memUsed;
-          if (hostStats.memPercent != null) hostMemPercent = hostStats.memPercent;
-        }
-      } catch (e) {
-        console.warn(`[collect] SSH host stats failed for ${worker.name}, using Podman-only data:`, e);
-      }
-    }
 
     await db.insert(workerMetrics).values({
       id: uuidv4(),

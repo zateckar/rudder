@@ -57,7 +57,7 @@ export const PATCH: RequestHandler = async ({ params, request, cookies, locals }
   }
 
   const body = await request.json();
-  const allowedFields = ['name', 'hostname', 'sshPort', 'sshUser', 'sshKeyId', 'labels', 'status'];
+  const allowedFields = ['name', 'hostname', 'sshPort', 'sshUser', 'labels', 'status'];
   const updates: Record<string, any> = {};
 
   for (const field of allowedFields) {

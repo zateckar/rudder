@@ -2,7 +2,6 @@ import { redirect } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { users, systemSettings } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { listSSHKeys } from '$lib/server/ssh';
 
 export const load = async ({ cookies }: { cookies: any }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -30,12 +29,10 @@ export const load = async ({ cookies }: { cookies: any }) => {
   const intervalRow = await db.select().from(systemSettings).where(eq(systemSettings.key, 'metrics_interval_seconds')).get();
   const metricsInterval = intervalRow ? parseInt(intervalRow.value) : 300;
 
-  const sshKeys = await listSSHKeys();
 
   return {
     user: currentUser,
     usersList: allUsers,
     metricsInterval,
-    sshKeys,
   };
 };

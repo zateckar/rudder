@@ -54,22 +54,6 @@
       </div>
     </div>
 
-    <div class="form-section">
-      <h2>SSH Key</h2>
-      {#if data.sshKeys.length === 0}
-        <p class="help-text">No SSH keys configured.</p>
-      {:else}
-        <div class="ssh-keys-list">
-          {#each data.sshKeys as key}
-            <label class="ssh-key-option">
-              <input type="radio" name="sshKeyId" value={key.id} checked={key.id === worker.sshKeyId} />
-              <span class="key-name">{key.name}</span>
-              <span class="key-meta">Created: {new Date(key.createdAt).toLocaleDateString()}</span>
-            </label>
-          {/each}
-        </div>
-      {/if}
-    </div>
 
     <div class="form-section">
       <h2>Podman API</h2>
@@ -192,44 +176,6 @@
   .help-text {
     font-size: 13px;
     color: var(--text-secondary);
-  }
-
-  .ssh-keys-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .ssh-key-option {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 12px;
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    background: var(--bg-raised);
-    cursor: pointer;
-    transition: background 0.15s;
-  }
-
-  .ssh-key-option:hover {
-    background: var(--bg-hover);
-  }
-
-  .ssh-key-option input {
-    margin: 0;
-    accent-color: var(--accent);
-  }
-
-  .key-name {
-    font-weight: 500;
-    color: var(--text-primary);
-  }
-
-  .key-meta {
-    font-size: 12px;
-    color: var(--text-muted);
-    margin-left: auto;
   }
 
   .form-actions {

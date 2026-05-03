@@ -3,7 +3,7 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { workers, users } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { getSSHKey, executeSSHCommand, type SSHConnectionConfig } from '$lib/server/ssh';
+import { executeSSHCommand, type SSHConnectionConfig } from '$lib/server/ssh';
 import { parseJsonBody, ValidationError, schemas } from '$lib/server/validation';
 
 export const POST: RequestHandler = async ({ params, request, cookies }) => {
@@ -32,17 +32,9 @@ export const POST: RequestHandler = async ({ params, request, cookies }) => {
   const { command } = body;
 
   try {
-    // Accept ad-hoc SSH key from request body (never stored)
-    const adHocKey = body.sshPrivateKey;
-    let privateKey: string;
-
-    if (adHocKey) {
-      privateKey = adHocKey;
-    } else if (worker.sshKeyId) {
-      const sshKey = await getSSHKey(worker.sshKeyId);
-      if (!sshKey) return json({ error: 'SSH key not found' }, { status: 500 });
-      privateKey = sshKey.privateKey;
-    } else {
+    // SSH key must be provided ad-hoc in the request body (never stored server-side)
+    const privateKey = body.sshPrivateKey;
+    if (!privateKey) {
       return json({ error: 'SSH key required — provide sshPrivateKey in request body' }, { status: 400 });
     }
 

@@ -15,15 +15,9 @@
   let savingInterval = $state(false);
   let intervalSaved = $state(false);
 
-  let sshKeys = $state<any[]>([]);
-  let showSshForm = $state(false);
-
   $effect(() => {
     metricsInterval = data.metricsInterval;
-    sshKeys = data.sshKeys || [];
   });
-  let sshCreating = $state(false);
-  let sshError = $state('');
 
   async function saveInterval() {
     savingInterval = true;
@@ -108,43 +102,6 @@
       addError = e.message;
     } finally {
       adding = false;
-    }
-  }
-
-  async function createSshKey() {
-    const nameInput = document.getElementById('sshKeyName') as HTMLInputElement;
-    const keyInput = document.getElementById('sshPrivateKey') as HTMLTextAreaElement;
-    if (!nameInput?.value || !keyInput?.value) return;
-    sshCreating = true;
-    sshError = '';
-    try {
-      const res = await fetch('/api/ssh-keys', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: nameInput.value, privateKey: keyInput.value }),
-      });
-      const body = await res.json();
-      if (res.ok) {
-        showSshForm = false;
-        sshKeys = [...sshKeys, body];
-      } else {
-        sshError = body.error || 'Failed to add key';
-      }
-    } catch (e: any) {
-      sshError = e.message;
-    } finally {
-      sshCreating = false;
-    }
-  }
-
-  async function deleteSshKey(id: string) {
-    if (!confirm('Delete this SSH key?')) return;
-    const res = await fetch(`/api/ssh-keys?id=${id}`, { method: 'DELETE' });
-    if (res.ok) {
-      sshKeys = sshKeys.filter(k => k.id !== id);
-    } else {
-      const body = await res.json();
-      alert(body.error || 'Failed to delete');
     }
   }
 </script>
@@ -239,55 +196,6 @@
       <span class="text-muted">30 days</span>
     </div>
   </div>
-</div>
-
-<!-- ── SSH Keys ────────────────────────────────────────────────────── -->
-<div class="settings-section">
-  <div class="ssh-header">
-    <h2 class="section-title" style="margin-bottom:0">SSH Keys</h2>
-    <button class="btn-tiny" onclick={() => { showSshForm = !showSshForm; sshError = ''; }}>
-      {showSshForm ? 'Cancel' : '+ Add Key'}
-    </button>
-  </div>
-  <p class="ssh-desc">Used to connect to worker nodes for provisioning and remote management.</p>
-
-  {#if sshError}
-    <div class="ssh-error">{sshError}</div>
-  {/if}
-
-  {#if showSshForm}
-    <div class="ssh-form">
-      <div class="form-group">
-        <label for="sshKeyName">Key Name</label>
-        <input type="text" id="sshKeyName" placeholder="e.g., production-workers" />
-      </div>
-      <div class="form-group">
-        <label for="sshPrivateKey">Private Key (PEM)</label>
-        <textarea id="sshPrivateKey" rows="6" placeholder="-----BEGIN RSA PRIVATE KEY-----&#10;...&#10;-----END RSA PRIVATE KEY-----"></textarea>
-        <span class="form-hint">Paste the full PEM private key. The public key is derived automatically.</span>
-      </div>
-      <button class="btn-primary" disabled={sshCreating} onclick={createSshKey}>
-        {sshCreating ? 'Adding…' : 'Add SSH Key'}
-      </button>
-    </div>
-  {/if}
-
-  {#if sshKeys.length === 0}
-    <p class="text-muted" style="padding:12px 0">No SSH keys yet.</p>
-  {:else}
-    <div class="ssh-keys-list">
-      {#each sshKeys as key}
-        <div class="ssh-key-row">
-          <div class="ssh-key-info">
-            <span class="ssh-key-name">{key.name}</span>
-            <span class="ssh-key-meta mono">{key.publicKey?.substring(0, 50)}…</span>
-            <span class="ssh-key-meta">Added {new Date(key.createdAt).toLocaleDateString()}</span>
-          </div>
-          <button class="btn-tiny btn-delete" onclick={() => deleteSshKey(key.id)}>Delete</button>
-        </div>
-      {/each}
-    </div>
-  {/if}
 </div>
 
 <!-- ── Add User modal ─────────────────────────────────────────────── -->
@@ -647,42 +555,4 @@
     gap: 10px;
     margin-top: 20px;
   }
-
-  /* ── SSH Keys ──────────────────────────────────── */
-
-  .ssh-header {
-    display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;
-  }
-  .ssh-desc { font-size: 13px; color: var(--text-muted); margin-bottom: 14px; }
-
-  .ssh-form {
-    background: var(--bg-overlay); border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-md); padding: 16px; margin-bottom: 14px;
-  }
-
-  .ssh-form textarea {
-    width: 100%; padding: 9px 12px; border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm); font-size: 13px; font-family: var(--font-mono);
-    background: var(--bg-input); color: var(--text-primary); box-sizing: border-box; resize: vertical;
-  }
-  .ssh-form textarea:focus { outline: none; border-color: var(--border-focus); }
-
-  .ssh-error {
-    background: var(--red-subtle); border: 1px solid var(--red); color: var(--red-text);
-    padding: 8px 12px; border-radius: var(--radius-sm); margin-bottom: 14px; font-size: 13px;
-  }
-
-  .ssh-keys-list { display: flex; flex-direction: column; }
-  .ssh-key-row {
-    display: flex; justify-content: space-between; align-items: center;
-    padding: 10px 0; border-bottom: 1px solid var(--border-subtle);
-  }
-  .ssh-key-row:last-child { border-bottom: none; }
-  .ssh-key-info { display: flex; flex-direction: column; gap: 2px; }
-  .ssh-key-name { font-weight: 500; font-size: 14px; color: var(--text-primary); }
-  .ssh-key-meta { font-size: 12px; color: var(--text-muted); }
-  .ssh-key-meta.mono { font-family: var(--font-mono); }
-  .mono { font-family: var(--font-mono); }
-
-  .form-hint { display: block; font-size: 11px; color: var(--text-muted); margin-top: 4px; }
 </style>

@@ -3,7 +3,6 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { workers, users, workerPings } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { getSSHKey, type SSHConnectionConfig } from '$lib/server/ssh';
 import { createPodmanClient } from '$lib/server/podman';
 import { getHostStats } from '$lib/server/host-metrics';
 import { getHostStatsHttp } from '$lib/server/host-metrics-http';
@@ -74,22 +73,6 @@ export const POST: RequestHandler = async ({ params, cookies }) => {
         hostStats = await getHostStatsHttp(worker as any);
       } catch (e) {
         console.warn('[worker-info] HTTP host stats failed, trying SSH:', e);
-      }
-    }
-    if (!hostStats && worker.sshKeyId) {
-      try {
-        const sshKey = await getSSHKey(worker.sshKeyId);
-        if (sshKey) {
-          const sshConfig: SSHConnectionConfig = {
-            host: worker.hostname,
-            port: worker.sshPort,
-            username: worker.sshUser,
-            privateKey: sshKey.privateKey,
-          };
-          hostStats = await getHostStats(sshConfig);
-        }
-      } catch (e) {
-        console.warn('[worker-info] SSH host stats failed, using Podman-only data:', e);
       }
     }
 
