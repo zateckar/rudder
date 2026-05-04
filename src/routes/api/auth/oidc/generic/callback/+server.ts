@@ -7,7 +7,6 @@ import { redirect } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { oidcConfig, users, userOidc, teams, teamMembers } from '$lib/db/schema';
 import { eq, and, inArray } from 'drizzle-orm';
-import { v4 as uuid } from 'uuid';
 import { createSession } from '$lib/auth';
 
 function decodeJwtPayload(token: string): Record<string, any> | null {
@@ -44,7 +43,7 @@ async function syncUserTeams(userId: string, teamNames: string[]): Promise<void>
       }
     } else {
       // Create new team
-      const teamId = uuid();
+      const teamId = crypto.randomUUID();
       const slug = teamName.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 100);
       await db.insert(teams).values({
         id: teamId,
@@ -222,7 +221,7 @@ export async function GET({ url, cookies }: { url: URL; cookies: any }) {
       userId = existingUser.id;
       // Link this OIDC to the existing user
       await db.insert(userOidc).values({
-        id: uuid(),
+        id: crypto.randomUUID(),
         userId,
         provider: 'auth0',
         providerId: `generic:${providerId}`,
@@ -236,7 +235,7 @@ export async function GET({ url, cookies }: { url: URL; cookies: any }) {
       }
 
       // Create new user
-      userId = uuid();
+      userId = crypto.randomUUID();
       const now = new Date();
       const finalUsername = username || (() => {
         const base = email.split('@')[0].replace(/[^a-z0-9]/gi, '').toLowerCase().slice(0, 20);
@@ -255,7 +254,7 @@ export async function GET({ url, cookies }: { url: URL; cookies: any }) {
       });
 
       await db.insert(userOidc).values({
-        id: uuid(),
+        id: crypto.randomUUID(),
         userId,
         provider: 'auth0',
         providerId: `generic:${providerId}`,

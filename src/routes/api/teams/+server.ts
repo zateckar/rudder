@@ -2,7 +2,6 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { teams, teamMembers, users } from '$lib/db/schema';
 import { eq, inArray } from 'drizzle-orm';
-import { v4 as uuid } from 'uuid';
 
 function slugify(text: string): string {
   return text
@@ -93,7 +92,7 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
     return json({ error: 'Team with similar name already exists' }, { status: 400 });
   }
 
-  const teamId = uuid();
+  const teamId = crypto.randomUUID();
   const now = new Date();
 
   await db.insert(teams).values({

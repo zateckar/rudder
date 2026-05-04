@@ -3,7 +3,6 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { secrets, users, teams, teamMembers } from '$lib/db/schema';
 import { eq, and, or, isNull } from 'drizzle-orm';
-import { v4 as uuid } from 'uuid';
 import { encrypt, decrypt } from '$lib/server/encryption';
 import { parseJsonBody, ValidationError, schemas } from '$lib/server/validation';
 
@@ -89,7 +88,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
   }
 
   const now = new Date();
-  const id = uuid();
+  const id = crypto.randomUUID();
 
   await db.insert(secrets).values({
     id,

@@ -13,7 +13,6 @@ import { db } from '$lib/db';
 import { apiKeys, teams, teamMembers, users } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { getSessionIdFromCookies, validateSession } from '$lib/auth';
-import { v4 as uuid } from 'uuid';
 import { hashKey } from '$lib/server/encryption';
 import { randomBytes } from 'crypto';
 
@@ -91,7 +90,7 @@ export async function POST({
 
   // Generate API key
   const rawKey = 'rud_' + randomBytes(24).toString('base64url');
-  const keyId = uuid();
+  const keyId = crypto.randomUUID();
 
   await db.insert(apiKeys).values({
     id: keyId,

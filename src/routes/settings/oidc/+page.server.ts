@@ -2,7 +2,6 @@ import { redirect, fail } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { users, oidcConfig } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { v4 as uuid } from 'uuid';
 
 export const load = async ({ cookies, url }: { cookies: any; url: URL }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -70,7 +69,7 @@ export const actions = {
     if (existing) {
       await db.update(oidcConfig).set({ ...data, updatedAt: now }).where(eq(oidcConfig.id, existing.id));
     } else {
-      await db.insert(oidcConfig).values({ id: uuid(), ...data, createdAt: now, updatedAt: now });
+      await db.insert(oidcConfig).values({ id: crypto.randomUUID(), ...data, createdAt: now, updatedAt: now });
     }
 
     return { success: true };

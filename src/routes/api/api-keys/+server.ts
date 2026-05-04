@@ -2,7 +2,6 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { apiKeys, users, teamMembers } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { v4 as uuid } from 'uuid';
 import { hashKey } from '$lib/server/encryption';
 import { randomBytes } from 'crypto';
 
@@ -57,7 +56,7 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
     ? new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000)
     : null;
 
-  const keyId = uuid();
+  const keyId = crypto.randomUUID();
 
   await db.insert(apiKeys).values({
     id: keyId,

@@ -1,4 +1,3 @@
-import { v4 as uuid } from 'uuid';
 import { eq, and } from 'drizzle-orm';
 import { db } from '../db';
 import { users, userOidc } from '../db/schema';
@@ -221,7 +220,7 @@ export async function findOrCreateUserFromOIDC(
   if (existingUser) {
     // Link OIDC to existing user
     await db.insert(userOidc).values({
-      id: uuid(),
+      id: crypto.randomUUID(),
       userId: existingUser.id,
       provider,
       providerId: userInfo.id,
@@ -231,7 +230,7 @@ export async function findOrCreateUserFromOIDC(
   }
 
   // Create new user
-  const userId = uuid();
+  const userId = crypto.randomUUID();
   const now = new Date();
 
   await db.insert(users).values({
@@ -247,7 +246,7 @@ export async function findOrCreateUserFromOIDC(
 
   // Create OIDC link
   await db.insert(userOidc).values({
-    id: uuid(),
+    id: crypto.randomUUID(),
     userId,
     provider,
     providerId: userInfo.id,

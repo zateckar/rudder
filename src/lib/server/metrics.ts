@@ -7,7 +7,6 @@ import { db } from '$lib/db';
 import { containers, workers, containerMetrics, workerMetrics, workerPings, systemSettings } from '$lib/db/schema';
 import { eq, lt } from 'drizzle-orm';
 import { getRestPodmanClient } from './podman-client';
-import { v4 as uuid } from 'uuid';
 import { createPodmanClient } from './podman';
 import { getHostStats } from './host-metrics';
 import { getHostStatsHttp } from './host-metrics-http';
@@ -113,7 +112,7 @@ async function collectContainerMetrics(): Promise<void> {
         }
 
         await db.insert(containerMetrics).values({
-          id: uuid(),
+          id: crypto.randomUUID(),
           containerId: container.id,
           collectedAt: now,
           cpuPercent: Math.round(cpuPercent * 100) / 100,
@@ -177,7 +176,7 @@ async function collectWorkerMetrics(): Promise<void> {
 
       // Store ping
       await db.insert(workerPings).values({
-        id: uuid(),
+        id: crypto.randomUUID(),
         workerId: worker.id,
         pingedAt: now,
         status: pingStatus,
@@ -240,7 +239,7 @@ async function collectWorkerMetrics(): Promise<void> {
       }
 
       await db.insert(workerMetrics).values({
-        id: uuid(),
+        id: crypto.randomUUID(),
         workerId: worker.id,
         collectedAt: now,
         cpuPercent: hostCpu,

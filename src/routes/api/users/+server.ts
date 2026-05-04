@@ -3,7 +3,6 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { users } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { v4 as uuid } from 'uuid';
 import { hashPassword } from '$lib/auth';
 
 export const GET: RequestHandler = async ({ cookies, url }) => {
@@ -75,7 +74,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
     return json({ error: 'Email already exists' }, { status: 409 });
   }
 
-  const newUserId = uuid();
+  const newUserId = crypto.randomUUID();
   const now = new Date();
 
   await db.insert(users).values({

@@ -2,7 +2,6 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { teamQuotas, teams, users, applications, containers } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { v4 as uuid } from 'uuid';
 
 /** GET: Return quota for this team + current usage */
 export async function GET({ params, cookies }: { params: { id: string }; cookies: any }) {
@@ -68,7 +67,7 @@ export async function POST({ params, request, cookies }: { params: { id: string 
     }).where(eq(teamQuotas.id, existing.id));
   } else {
     await db.insert(teamQuotas).values({
-      id: uuid(),
+      id: crypto.randomUUID(),
       teamId: params.id,
       maxCpuCores: maxCpuCores ?? null,
       maxMemoryBytes: maxMemoryBytes ?? null,

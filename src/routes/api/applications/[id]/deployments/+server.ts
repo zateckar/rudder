@@ -2,7 +2,6 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { applications, deployments, users } from '$lib/db/schema';
 import { eq, desc } from 'drizzle-orm';
-import { v4 as uuid } from 'uuid';
 
 export async function GET({ params, cookies }: { params: { id: string }; cookies: any }) {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -99,7 +98,7 @@ export async function POST({ params, request, cookies }: { params: { id: string 
   const nextVersion = (lastDeployment?.version ?? 0) + 1;
 
   // Create a new deployment record for the rollback
-  const rollbackDeploymentId = uuid();
+  const rollbackDeploymentId = crypto.randomUUID();
   await db.insert(deployments).values({
     id: rollbackDeploymentId,
     applicationId: params.id,

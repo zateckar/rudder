@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "PowerShell(bun install)",
+      "PowerShell(bun run db:init)",
+      "PowerShell(bun check)",
+      "PowerShell(Stop-Process -Name \"bun\" -Force -ErrorAction SilentlyContinue)",
+      "PowerShell(bun run dev)"
+    ]
+  }
+}

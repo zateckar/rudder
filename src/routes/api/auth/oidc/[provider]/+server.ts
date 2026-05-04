@@ -2,7 +2,6 @@ import { redirect } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { env } from '$lib/server/env';
 import { generateAuthorizationUrl, type OIDCProvider } from '$lib/auth/oidc';
-import { v4 as uuid } from 'uuid';
 
 const VALID_PROVIDERS: OIDCProvider[] = ['google', 'github', 'okta', 'auth0'];
 
@@ -13,7 +12,7 @@ export const GET: RequestHandler = async ({ params, cookies, url }) => {
     throw redirect(303, '/login?error=invalid_provider');
   }
 
-  const state = uuid();
+  const state = crypto.randomUUID();
   const redirectUri = `${env.PUBLIC_URL}/api/auth/oidc/${provider}/callback`;
   
   const authUrl = generateAuthorizationUrl(provider, state, redirectUri);

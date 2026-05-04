@@ -39,7 +39,6 @@ import {
   applicationTemplates,
 } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { v4 as uuid } from 'uuid';
 import { executeApplicationDeploy } from '$lib/server/deploy';
 import { getRestPodmanClient } from '$lib/server/podman-client';
 
@@ -208,7 +207,7 @@ export async function POST({
       (worker.baseDomain
         ? `${parsed.name}.${team.slug}.${worker.baseDomain}`
         : null);
-    const appId = uuid();
+    const appId = crypto.randomUUID();
 
     await db.insert(applications).values({
       id: appId,

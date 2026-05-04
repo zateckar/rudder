@@ -41,10 +41,8 @@ export const POST = async ({ request, cookies }: { request: Request; cookies: an
     return json({ error: `Template "${name}" already exists for your team` }, { status: 400 });
   }
 
-  const { v4: uuidv4 } = await import('uuid');
-
   await db.insert(applicationTemplates).values({
-    id: uuidv4(),
+    id: crypto.randomUUID(),
     name,
     description,
     sourceAppId: app.id,

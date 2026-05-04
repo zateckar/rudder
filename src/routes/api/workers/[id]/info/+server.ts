@@ -123,9 +123,8 @@ export const POST: RequestHandler = async ({ params, cookies }) => {
     };
 
     // Store ping record
-    const { v4: uuidv4 } = await import('uuid');
     await db.insert(workerPings).values({
-      id: uuidv4(),
+      id: crypto.randomUUID(),
       workerId: params.id,
       pingedAt: new Date(),
       status: pingStatus as any,

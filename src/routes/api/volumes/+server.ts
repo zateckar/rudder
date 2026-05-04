@@ -3,7 +3,6 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { volumes, users, teamMembers } from '$lib/db/schema';
 import { eq, or } from 'drizzle-orm';
-import { v4 as uuid } from 'uuid';
 
 export const GET: RequestHandler = async ({ cookies, url }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -78,7 +77,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
     }
   }
 
-  const volumeId = uuid();
+  const volumeId = crypto.randomUUID();
   const now = new Date();
 
   await db.insert(volumes).values({

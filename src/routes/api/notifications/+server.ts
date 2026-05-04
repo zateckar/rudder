@@ -3,7 +3,6 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { notificationChannels, users, teamMembers } from '$lib/db/schema';
 import { eq, or } from 'drizzle-orm';
-import { v4 as uuid } from 'uuid';
 
 export const GET: RequestHandler = async ({ cookies }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -103,7 +102,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
   }
 
   const now = new Date();
-  const id = uuid();
+  const id = crypto.randomUUID();
 
   await db.insert(notificationChannels).values({
     id,

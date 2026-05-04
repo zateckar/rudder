@@ -1,5 +1,3 @@
-import { parse as parseYaml } from 'yaml';
-
 export interface K8sMetadata {
   name?: string;
   namespace?: string;
@@ -67,7 +65,7 @@ export interface ParsedK8sContainer {
 }
 
 export function parseK8sManifest(manifest: string, appName: string, teamSlug?: string): ParsedK8sContainer[] {
-  const docs = manifest.split('---').map(doc => parseYaml(doc)).filter(Boolean);
+  const docs = manifest.split('---').map(doc => Bun.YAML.parse(doc) as any).filter(Boolean);
   
   const containers: ParsedK8sContainer[] = [];
   const volumes: Record<string, string> = {};
@@ -253,7 +251,7 @@ export function validateK8sManifest(manifest: string): { valid: boolean; errors:
   const errors: string[] = [];
   
   try {
-    const docs = manifest.split('---').map(doc => parseYaml(doc)).filter(Boolean);
+    const docs = manifest.split('---').map(doc => Bun.YAML.parse(doc) as any).filter(Boolean);
     
     if (docs.length === 0) {
       errors.push('Empty manifest');

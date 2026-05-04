@@ -1,6 +1,5 @@
-import { drizzle } from 'drizzle-orm/better-sqlite3';
-import type { Database as DB } from 'better-sqlite3';
-import Database from 'better-sqlite3';
+import { drizzle } from 'drizzle-orm/bun-sqlite';
+import { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -14,11 +13,11 @@ if (!existsSync(dbDir)) {
 }
 
 const sqlite = new Database(dbPath);
-sqlite.pragma('journal_mode = WAL');
-sqlite.pragma('foreign_keys = ON');
+sqlite.run('PRAGMA journal_mode = WAL');
+sqlite.run('PRAGMA foreign_keys = ON');
 
 // Ensure new tables exist (idempotent — safe to run on every startup)
-sqlite.exec(`
+sqlite.run(`
   CREATE TABLE IF NOT EXISTS container_metrics (
     id TEXT PRIMARY KEY NOT NULL,
     container_id TEXT NOT NULL,
@@ -58,48 +57,48 @@ sqlite.exec(`
 
 // Add description column to applications if it doesn't exist
 try {
-  sqlite.exec(`ALTER TABLE applications ADD COLUMN description TEXT;`);
+  sqlite.run(`ALTER TABLE applications ADD COLUMN description TEXT;`);
 } catch {
   // Column already exists
 }
 
 // Add crowdsec_bouncer_key column to workers if it doesn't exist
 try {
-  sqlite.exec(`ALTER TABLE workers ADD COLUMN crowdsec_bouncer_key TEXT;`);
+  sqlite.run(`ALTER TABLE workers ADD COLUMN crowdsec_bouncer_key TEXT;`);
 } catch {
   // Column already exists
 }
 
 // Add team claim columns to oidc_config if they don't exist
 try {
-  sqlite.exec(`ALTER TABLE oidc_config ADD COLUMN team_claim_name TEXT;`);
+  sqlite.run(`ALTER TABLE oidc_config ADD COLUMN team_claim_name TEXT;`);
 } catch {
   // Column already exists
 }
 try {
-  sqlite.exec(`ALTER TABLE oidc_config ADD COLUMN team_claim_key TEXT;`);
+  sqlite.run(`ALTER TABLE oidc_config ADD COLUMN team_claim_key TEXT;`);
 } catch {
   // Column already exists
 }
 
 // Add per-application rate limiting and auth columns
 try {
-  sqlite.exec(`ALTER TABLE applications ADD COLUMN rate_limit_avg INTEGER;`);
+  sqlite.run(`ALTER TABLE applications ADD COLUMN rate_limit_avg INTEGER;`);
 } catch {
   // Column already exists
 }
 try {
-  sqlite.exec(`ALTER TABLE applications ADD COLUMN rate_limit_burst INTEGER;`);
+  sqlite.run(`ALTER TABLE applications ADD COLUMN rate_limit_burst INTEGER;`);
 } catch {
   // Column already exists
 }
 try {
-  sqlite.exec(`ALTER TABLE applications ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'none';`);
+  sqlite.run(`ALTER TABLE applications ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'none';`);
 } catch {
   // Column already exists
 }
 try {
-  sqlite.exec(`ALTER TABLE applications ADD COLUMN auth_config TEXT;`);
+  sqlite.run(`ALTER TABLE applications ADD COLUMN auth_config TEXT;`);
 } catch {
   // Column already exists
 }
@@ -113,11 +112,11 @@ for (const col of [
   `ALTER TABLE applications ADD COLUMN git_dockerfile TEXT;`,
   `ALTER TABLE applications ADD COLUMN healthcheck TEXT;`,
 ]) {
-  try { sqlite.exec(col); } catch { /* Column already exists */ }
+  try { sqlite.run(col); } catch { /* Column already exists */ }
 }
 
 // Create new feature tables
-sqlite.exec(`
+sqlite.run(`
   CREATE TABLE IF NOT EXISTS deployments (
     id TEXT PRIMARY KEY NOT NULL,
     application_id TEXT NOT NULL REFERENCES applications(id),
@@ -130,7 +129,7 @@ sqlite.exec(`
   );
 `);
 
-sqlite.exec(`
+sqlite.run(`
   CREATE TABLE IF NOT EXISTS notification_channels (
     id TEXT PRIMARY KEY NOT NULL,
     name TEXT NOT NULL, type TEXT NOT NULL, config TEXT NOT NULL,
@@ -141,7 +140,7 @@ sqlite.exec(`
   );
 `);
 
-sqlite.exec(`
+sqlite.run(`
   CREATE TABLE IF NOT EXISTS alert_rules (
     id TEXT PRIMARY KEY NOT NULL,
     name TEXT NOT NULL, resource_type TEXT NOT NULL, resource_id TEXT,
@@ -155,7 +154,7 @@ sqlite.exec(`
   );
 `);
 
-sqlite.exec(`
+sqlite.run(`
   CREATE TABLE IF NOT EXISTS alert_events (
     id TEXT PRIMARY KEY NOT NULL,
     rule_id TEXT REFERENCES alert_rules(id),
@@ -167,7 +166,7 @@ sqlite.exec(`
   );
 `);
 
-sqlite.exec(`
+sqlite.run(`
   CREATE TABLE IF NOT EXISTS deploy_webhooks (
     id TEXT PRIMARY KEY NOT NULL,
     application_id TEXT NOT NULL REFERENCES applications(id),
@@ -179,7 +178,7 @@ sqlite.exec(`
   );
 `);
 
-sqlite.exec(`
+sqlite.run(`
   CREATE TABLE IF NOT EXISTS team_quotas (
     id TEXT PRIMARY KEY NOT NULL,
     team_id TEXT NOT NULL REFERENCES teams(id),
@@ -189,7 +188,7 @@ sqlite.exec(`
   );
 `);
 
-sqlite.exec(`
+sqlite.run(`
   CREATE TABLE IF NOT EXISTS stacks (
     id TEXT PRIMARY KEY NOT NULL,
     name TEXT NOT NULL, description TEXT,
@@ -199,7 +198,7 @@ sqlite.exec(`
   );
 `);
 
-sqlite.exec(`
+sqlite.run(`
   CREATE TABLE IF NOT EXISTS backup_config (
     id TEXT PRIMARY KEY NOT NULL,
     storage_account_name TEXT NOT NULL,
@@ -212,7 +211,7 @@ sqlite.exec(`
 `);
 
 // Application templates table
-sqlite.exec(`
+sqlite.run(`
   CREATE TABLE IF NOT EXISTS application_templates (
     id TEXT PRIMARY KEY NOT NULL,
     name TEXT NOT NULL,
@@ -287,4 +286,3 @@ sqlite.exec(`
 `);
 
 export const db = drizzle(sqlite);
-export type Db = DB;

@@ -2,7 +2,6 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { deployWebhooks, applications } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { v4 as uuid } from 'uuid';
 import { randomBytes } from 'crypto';
 import { hashKey } from '$lib/server/encryption';
 import { canAccessApplication } from '$lib/server/auth';
@@ -50,7 +49,7 @@ export async function POST({ params, cookies }: { params: { id: string }; cookie
   const rawToken = randomBytes(32).toString('hex');
   const tokenHash = hashKey(rawToken);
 
-  const id = uuid();
+  const id = crypto.randomUUID();
   await db.insert(deployWebhooks).values({
     id,
     applicationId: params.id,

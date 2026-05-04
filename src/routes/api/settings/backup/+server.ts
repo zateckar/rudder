@@ -4,7 +4,6 @@ import { backupConfig, users } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { encrypt } from '$lib/server/encryption';
 import { performBackup, listBackups, restoreBackup, testConnection } from '$lib/server/backup';
-import { v4 as uuid } from 'uuid';
 
 async function requireAdmin(cookies: any): Promise<{ userId: string; error?: never } | { error: Response; userId?: never }> {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -76,7 +75,7 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
     });
   } else {
     await db.insert(backupConfig).values({
-      id: uuid(),
+      id: crypto.randomUUID(),
       storageAccountName,
       accessKey: encryptedKey,
       containerName: containerName || 'rudder-backups',

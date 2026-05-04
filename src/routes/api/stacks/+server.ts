@@ -2,7 +2,6 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { stacks, applications, teams, teamMembers, users } from '$lib/db/schema';
 import { eq, inArray } from 'drizzle-orm';
-import { v4 as uuid } from 'uuid';
 
 /** GET: List stacks for the user's teams */
 export async function GET({ cookies }: { cookies: any }) {
@@ -69,7 +68,7 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
   }
 
   const now = new Date();
-  const id = uuid();
+  const id = crypto.randomUUID();
 
   await db.insert(stacks).values({
     id,

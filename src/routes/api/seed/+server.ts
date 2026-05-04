@@ -2,8 +2,6 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { users, teams, teamMembers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import bcrypt from 'bcrypt';
-import { v4 as uuid } from 'uuid';
 import { env } from '$env/dynamic/private';
 
 export async function POST({ request, cookies, locals }: { request: Request; cookies: any; locals: any }) {
@@ -37,9 +35,9 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
     return json({ success: false, error: 'Admin user already exists' });
   }
 
-  const hashedPassword = await bcrypt.hash('admin123', 10);
-  const userId2 = uuid();
-  const teamId = uuid();
+  const hashedPassword = await Bun.password.hash('admin123', { algorithm: 'bcrypt', cost: 10 });
+  const userId2 = crypto.randomUUID();
+  const teamId = crypto.randomUUID();
 
   // Create admin user
   await db.insert(users).values({

@@ -4,7 +4,6 @@
 import { db } from '$lib/db';
 import { applications, workers, containers, teams, volumes, secrets, deployments } from '$lib/db/schema';
 import { eq, inArray, or, desc } from 'drizzle-orm';
-import { v4 as uuid } from 'uuid';
 import { getRestPodmanClient } from '$lib/server/podman-client';
 import { parseCompose, validateCompose } from '$lib/server/compose';
 import { parseK8sManifest, validateK8sManifest } from '$lib/server/kubernetes';
@@ -203,7 +202,7 @@ export async function executeApplicationDeploy(
     deployImage = app.manifest;
   }
 
-  const deploymentId = uuid();
+  const deploymentId = crypto.randomUUID();
   await db.insert(deployments).values({
     id: deploymentId,
     applicationId: app.id,
@@ -301,7 +300,7 @@ export async function executeApplicationDeploy(
           });
 
           await db.insert(containers).values({
-            id: uuid(),
+            id: crypto.randomUUID(),
             applicationId: app.id,
             workerId: worker.id,
             containerId: containerResult.Id,
@@ -496,7 +495,7 @@ export async function executeApplicationDeploy(
         });
 
         await db.insert(containers).values({
-          id: uuid(),
+          id: crypto.randomUUID(),
           applicationId: app.id,
           workerId: worker.id,
           containerId: containerResult.Id,
@@ -575,7 +574,7 @@ export async function executeApplicationDeploy(
           });
 
           await db.insert(containers).values({
-            id: uuid(),
+            id: crypto.randomUUID(),
             applicationId: app.id,
             workerId: worker.id,
             containerId: containerResult.Id,

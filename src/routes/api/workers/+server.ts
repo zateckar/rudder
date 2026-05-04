@@ -2,7 +2,6 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { v4 as uuid } from 'uuid';
 import { env } from '$lib/server/env';
 import { parseJsonBody, ValidationError, schemas } from '$lib/server/validation';
 
@@ -52,7 +51,7 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
 
   const { name, hostname, sshPort, sshUser, baseDomain, labels } = body;
 
-  const workerId = uuid();
+  const workerId = crypto.randomUUID();
 
   await db.insert(workers).values({
     id: workerId,

@@ -1,4 +1,3 @@
-import { parse as parseYaml } from 'yaml';
 import { generateTraefikLabelsForApp } from './provisioning';
 
 export interface ComposeService {
@@ -69,7 +68,7 @@ export interface ParsedContainer {
 }
 
 export function parseCompose(manifest: string, appName: string, teamSlug?: string, baseDomain?: string, appId?: string): ParsedContainer[] {
-  const config = parseYaml(manifest) as ComposeConfig;
+  const config = Bun.YAML.parse(manifest) as ComposeConfig;
   
   if (!config || !config.services) {
     throw new Error('Invalid compose file: no services defined');
@@ -281,7 +280,7 @@ export function validateCompose(manifest: string): { valid: boolean; errors: str
   const errors: string[] = [];
   
   try {
-    const config = parseYaml(manifest) as ComposeConfig;
+    const config = Bun.YAML.parse(manifest) as ComposeConfig;
     
     if (!config) {
       errors.push('Invalid YAML');

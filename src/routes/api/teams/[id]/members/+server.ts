@@ -2,7 +2,6 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { teams, teamMembers, users } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { v4 as uuid } from 'uuid';
 
 export async function POST({ params, request, cookies }: { params: { id: string }; request: Request; cookies: any }) {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');

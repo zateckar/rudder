@@ -12,7 +12,6 @@ import {
   containerMetrics,
 } from '$lib/db/schema';
 import { eq, and, desc } from 'drizzle-orm';
-import { v4 as uuid } from 'uuid';
 import { sendNotification } from './notifications';
 
 /** Deduplication window: don't re-trigger the same rule within this period */
@@ -67,7 +66,7 @@ async function evaluateRule(rule: AlertRule): Promise<void> {
   const message = buildAlertMessage(rule, metricValue);
   const severity = getSeverity(rule, metricValue);
 
-  const eventId = uuid();
+  const eventId = crypto.randomUUID();
   const now = new Date();
 
   await db.insert(alertEvents).values({

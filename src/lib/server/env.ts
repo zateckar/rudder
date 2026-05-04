@@ -1,23 +1,6 @@
 import { z } from 'zod';
-import * as dotenv from 'dotenv';
-import { fileURLToPath } from 'url';
-import { dirname, join, resolve } from 'path';
-import { existsSync } from 'fs';
 
-// Load environment variables for local development/build
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const possibleEnvPaths = [
-  join(__dirname, '../../../.env'),
-  join(process.cwd(), '.env'),
-  resolve('.env')
-];
-
-for (const envPath of possibleEnvPaths) {
-  if (existsSync(envPath)) {
-    dotenv.config({ path: envPath });
-    break;
-  }
-}
+// Bun automatically loads .env files, no manual loading needed
 
 const envSchema = z.object({
   DATABASE_URL: z.string().default('./data/rudder.db'),

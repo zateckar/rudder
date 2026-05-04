@@ -52,12 +52,11 @@ export const POST: RequestHandler = async ({ params, cookies }) => {
     }
 
     const latencyMs = Date.now() - start;
-    const { v4: uuidv4 } = await import('uuid');
     const now = new Date();
 
     // Store ping
     await db.insert(workerPings).values({
-      id: uuidv4(),
+      id: crypto.randomUUID(),
       workerId: params.id,
       pingedAt: now,
       status: pingStatus,
@@ -104,7 +103,7 @@ export const POST: RequestHandler = async ({ params, cookies }) => {
 
 
     await db.insert(workerMetrics).values({
-      id: uuidv4(),
+      id: crypto.randomUUID(),
       workerId: params.id,
       collectedAt: now,
       cpuPercent: hostCpu,

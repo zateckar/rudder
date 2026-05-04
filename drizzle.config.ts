@@ -4,6 +4,7 @@ export default defineConfig({
   schema: './src/lib/db/schema.ts',
   out: './drizzle',
   dialect: 'sqlite',
+  driver: 'bun-sqlite',
   dbCredentials: {
     url: './data/rudder.db',
   },

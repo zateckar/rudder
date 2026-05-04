@@ -2,7 +2,6 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { applications, workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { v4 as uuidv4 } from 'uuid';
 import { requireAuth } from '$lib/server/auth';
 
 export async function POST({ request, cookies }: { request: Request; cookies: any }) {
@@ -46,7 +45,7 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
     }
   }
 
-  const appId = uuidv4();
+  const appId = crypto.randomUUID();
 
   await db.insert(applications).values({
     id: appId,

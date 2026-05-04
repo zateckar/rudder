@@ -2,7 +2,6 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { containers, workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { v4 as uuid } from 'uuid';
 import { storeTerminalToken } from '$lib/server/terminal-tokens';
 
 export async function POST({ request, cookies }: { request: Request; cookies: any }) {
@@ -34,7 +33,7 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
 
   // Generate a short-lived token (5 minutes) for terminal WebSocket handshake.
   // The WebSocket server validates and immediately consumes the token (single-use).
-  const tokenId = uuid();
+  const tokenId = crypto.randomUUID();
   const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
 
   storeTerminalToken(tokenId, {

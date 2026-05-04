@@ -1,11 +1,9 @@
-import Database from 'better-sqlite3';
-import { drizzle } from 'drizzle-orm/better-sqlite3';
-import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
+import { Database } from 'bun:sqlite';
+import { drizzle } from 'drizzle-orm/bun-sqlite';
+import { migrate } from 'drizzle-orm/bun-sqlite/migrator';
 import { existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { v4 as uuid } from 'uuid';
-import { hash } from 'bcrypt';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const dbDir = join(__dirname, '../data');
@@ -16,7 +14,7 @@ if (!existsSync(dbDir)) {
 }
 
 const sqlite = new Database(dbPath);
-sqlite.pragma('journal_mode = WAL');
+sqlite.run('PRAGMA journal_mode = WAL');
 const db = drizzle(sqlite);
 
 console.log('Running migrations...');
@@ -43,10 +41,10 @@ if (!process.env.ADMIN_PASSWORD) {
 }
 
 const adminPassword = process.env.ADMIN_PASSWORD || 'admin123';
-const hashedPassword = await hash(adminPassword, 12);
+const hashedPassword = await Bun.password.hash(adminPassword, { algorithm: 'bcrypt', cost: 12 });
 
-const adminId = uuid();
-sqlite.prepare(`
+const adminId = crypto.randomUUID();
+sqlite.query(`
   INSERT OR IGNORE INTO users (id, username, email, password_hash, full_name, role, created_at, updated_at)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 `).run(

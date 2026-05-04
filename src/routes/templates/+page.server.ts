@@ -94,10 +94,8 @@ export const actions = {
       return fail(400, { error: `Template "${name}" already exists for your team` });
     }
 
-    const { v4: uuidv4 } = await import('uuid');
-
     await db.insert(applicationTemplates).values({
-      id: uuidv4(),
+      id: crypto.randomUUID(),
       name,
       description,
       sourceAppId: app.id,
@@ -287,8 +285,7 @@ export const actions = {
     if (!worker.baseDomain) return fail(400, { error: 'Worker must have a base domain configured' });
 
     const domain = `${name}.${worker.baseDomain}`;
-    const { v4: uuidv4 } = await import('uuid');
-    const appId = uuidv4();
+    const appId = crypto.randomUUID();
 
     await db.insert(applications).values({
       id: appId,

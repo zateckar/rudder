@@ -1,5 +1,3 @@
-import { hash, compare } from 'bcrypt';
-import { v4 as uuid } from 'uuid';
 import { eq } from 'drizzle-orm';
 import { db } from '../db';
 import { users, sessions } from '../db/schema';
@@ -9,24 +7,24 @@ import type { Cookies } from '@sveltejs/kit';
 const SESSION_COOKIE_NAME = 'session_id';
 
 export async function hashPassword(password: string): Promise<string> {
-  return hash(password, 12);
+  return await Bun.password.hash(password, { algorithm: 'bcrypt', cost: 12 });
 }
 
 export async function verifyPassword(password: string, hash: string): Promise<boolean> {
-  return compare(password, hash);
+  return await Bun.password.verify(password, hash);
 }
 
 export async function createSession(userId: string): Promise<string> {
-  const sessionId = uuid();
+  const sessionId = crypto.randomUUID();
   const expiresAt = new Date(Date.now() + env.SESSION_MAX_AGE * 1000);
-  
+
   await db.insert(sessions).values({
     id: sessionId,
     userId,
     expiresAt,
     createdAt: new Date(),
   });
-  
+
   return sessionId;
 }
 

@@ -4,8 +4,6 @@ import { db } from '$lib/db';
 import { users, auditLogs, apiKeys } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { getSessionIdFromCookies, validateSession } from '$lib/auth';
-import { v4 as uuid } from 'uuid';
-import { initializeTerminalServer } from '$lib/server/terminal';
 import { env } from '$env/dynamic/private';
 import { hashKey } from '$lib/server/encryption';
 
@@ -98,7 +96,7 @@ const authentication: Handle = async ({ event, resolve }) => {
 
         try {
           await db.insert(auditLogs).values({
-            id: uuid(),
+            id: crypto.randomUUID(),
             userId: userId || null,
             teamId: null,
             action,

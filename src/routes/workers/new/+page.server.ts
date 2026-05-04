@@ -48,8 +48,7 @@ export const actions = {
       return fail(400, { error: 'Missing required fields' });
     }
 
-    const { v4: uuidv4 } = await import('uuid');
-    const workerId = uuidv4();
+    const workerId = crypto.randomUUID();
 
     // Derive podman API URL from base domain or fall back to IP-based
     const podmanApiUrl = baseDomain

@@ -22,7 +22,7 @@ export const GET: RequestHandler = async ({ params }) => {
     const ext = filePath.slice(filePath.lastIndexOf('.'));
     const contentType = MIME_TYPES[ext] || 'application/octet-stream';
 
-    return new Response(content, {
+    return new Response(new Uint8Array(content), {
       headers: {
         'Content-Type': contentType,
         'Cache-Control': 'public, max-age=31536000, immutable',

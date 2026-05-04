@@ -246,8 +246,7 @@ export const actions = {
       }
     }
 
-    const { v4: uuidv4 } = await import('uuid');
-    const appId = uuidv4();
+    const appId = crypto.randomUUID();
 
     await db.insert(applications).values({
       id: appId,
