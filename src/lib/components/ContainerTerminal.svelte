@@ -113,7 +113,6 @@
 
   onMount(async () => {
     await initTerminal();
-    startStreamingLogs();
   });
 
   async function initTerminal() {
@@ -267,7 +266,7 @@
   function switchTab(tab: string) {
     activeTab = tab;
     if (tab === 'logs') {
-      startStreamingLogs();
+      // Manual start only
     } else if (tab === 'terminal') {
       stopStreaming();
       if (term) {
@@ -542,7 +541,7 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
-    height: 500px;
+    height: 800px;
     margin-top: 16px;
     width: 100%;
     max-width: 100%;

@@ -1679,7 +1679,7 @@
     border: 1px solid var(--border-subtle); border-radius: var(--radius-sm);
     padding: 14px 18px; font-family: var(--font-mono); font-size: 11px;
     overflow-x: auto; white-space: pre-wrap; line-height: 1.6;
-    max-height: 500px; overflow-y: auto; margin: 0;
+    max-height: 800px; overflow-y: auto; margin: 0;
   }
 
   .dynamic-config { margin-bottom: 12px; }
@@ -1721,7 +1721,7 @@
   }
 
   .terminal-wrapper {
-    width: 100%; height: 500px;
+    width: 100%; height: 800px;
   }
 
   .terminal-status {
