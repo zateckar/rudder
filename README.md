@@ -51,27 +51,26 @@ Container orchestration platform built with SvelteKit, Drizzle ORM, and SQLite. 
 
 ### Prerequisites
 
-- Node.js 22+
-- npm
+- Bun 1.0+
 
 ### Development
 
 ```sh
 # Install dependencies
-npm install
+bun install
 
 # Copy environment file
 cp .env.example .env
 # Edit .env with your secrets
 
 # Initialize database
-npm run db:init
+bun run db:init
 
 # Run database migrations
-npm run db:migrate
+bun run db:migrate
 
 # Start development server
-npm run dev
+bun run dev
 ```
 
 ### Create Admin User
@@ -125,7 +124,7 @@ The GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatical
 Browser (Svelte 5 + xterm.js + Monaco Editor)
     |
     v
-SvelteKit Server (Node.js adapter)
+SvelteKit Server (Bun runtime with Node adapter)
     |-- Security headers, session auth, audit logging
     |-- REST API + WebSocket (terminal)
     |-- K8s-compatible API (/k8s/) for kubectl access
@@ -240,9 +239,10 @@ spec:
 
 | Component | Technology |
 |-----------|------------|
+| Runtime | Bun |
 | Frontend | Svelte 5, xterm.js, Monaco Editor |
 | Backend | SvelteKit (Node adapter) |
-| Database | SQLite (better-sqlite3, WAL mode) |
+| Database | SQLite (bun:sqlite, WAL mode) |
 | ORM | Drizzle ORM |
 | Container runtime | Podman |
 | Reverse proxy | Traefik |
