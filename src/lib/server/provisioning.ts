@@ -36,10 +36,10 @@ experimental:
   plugins:
     bouncer:
       moduleName: github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
-      version: v1.5.1
+      version: v1.6.0
     traefikoidc:
       moduleName: github.com/lukaszraczylo/traefikoidc
-      version: v0.8.24
+      version: v1.0.1
 
 log:
   level: INFO
@@ -370,6 +370,10 @@ podman stop crowdsec 2>/dev/null || true
 podman rm -f crowdsec 2>/dev/null || true
 fuser -k 8080/tcp 2>/dev/null || true
 sleep 3
+  # Clean CrowdSec database so the bouncer key gets freshly registered on startup
+  rm -f /var/lib/crowdsec/data/crowdsec.db 2>/dev/null || true
+  rm -f /etc/crowdsec/local_api_credentials.yaml 2>/dev/null || true
+  echo "CrowdSec state cleaned for fresh bouncer registration"
 '
 
 step "mtls-certs" bash -c '
@@ -491,6 +495,54 @@ systemctl start traefik-container.service
 echo "Services started - images will be pulled by systemd"
 '
 
+
+# ── CrowdSec bouncer key registration (runs after container is ready) ──────────
+cat > /usr/local/bin/rudder-crowdsec-register.sh << 'CROWDSEC_REG'
+#!/bin/bash
+BOUNCER_KEY="${bouncerKey}"
+echo "[rudder-crowdsec] Waiting for CrowdSec LAPI on port 8081 (image may still be pulling)..."
+for i in $(seq 1 90); do
+  if curl -sf http://127.0.0.1:8081/health > /dev/null 2>&1; then
+    echo "[rudder-crowdsec] CrowdSec LAPI is ready"
+    break
+  fi
+  if [ "$i" -eq 90 ]; then
+    echo "[rudder-crowdsec] ERROR: Timed out waiting for CrowdSec LAPI after 15 minutes"
+    exit 1
+  fi
+  sleep 10
+done
+# Remove any stale bouncer registration (different key from previous provisioning)
+podman exec crowdsec cscli bouncers delete traefik 2>/dev/null || true
+if podman exec crowdsec cscli bouncers add traefik --key "$BOUNCER_KEY" 2>&1; then
+  echo "[rudder-crowdsec] Bouncer key registered successfully"
+  sleep 5
+  systemctl restart traefik-container.service
+  echo "[rudder-crowdsec] Traefik restarted with valid CrowdSec connection"
+else
+  echo "[rudder-crowdsec] ERROR: Failed to register bouncer key via cscli"
+  exit 1
+fi
+CROWDSEC_REG
+chmod +x /usr/local/bin/rudder-crowdsec-register.sh
+
+cat > /etc/systemd/system/rudder-crowdsec-register.service << 'CROWDSEC_REG_SVC'
+[Unit]
+Description=Register CrowdSec bouncer key for Traefik
+After=crowdsec-container.service
+Requires=crowdsec-container.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rudder-crowdsec-register.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rudder-crowdsec-register
+CROWDSEC_REG_SVC
+systemctl daemon-reload
+systemctl start --no-block rudder-crowdsec-register.service
+echo "CrowdSec bouncer registration started in background (will restart Traefik once LAPI is ready)"
 echo "=== Checking service status (images pulling in background) ==="
 # Quick check for Podman API (should be ready immediately)
 for i in {1..5}; do
