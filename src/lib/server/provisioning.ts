@@ -305,24 +305,31 @@ echo "--- 1. Installing Podman, openssl, and socat ---"
 if [ "$OS" = "debian" ]; then
     if command -v podman &> /dev/null; then
         echo "Podman already installed: $(podman --version)"
-        # Ensure socat is installed even if podman exists
-        apt-get install -y socat 2>&1 | tail -2
     else
         rm -f /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list 2>/dev/null
         apt-get update -q
-        apt-get install -y podman curl openssl socat 2>&1 | tail -5
+        apt-get install -y podman curl openssl 2>&1 | tail -5
         if ! command -v podman &> /dev/null; then
             add-apt-repository -y universe
             apt-get update -q
-            apt-get install -y podman curl openssl socat 2>&1 | tail -5
+            apt-get install -y podman curl openssl 2>&1 | tail -5
         fi
+    fi
+    # Ensure socat is installed (needed for metrics HTTP endpoint)
+    if ! command -v socat &> /dev/null; then
+        apt-get update -q
+        apt-get install -y socat 2>&1 | tail -3
     fi
 elif [ "$OS" = "rhel" ]; then
     dnf -y module enable podman
     dnf -y install podman curl openssl socat
 fi
 podman --version || { echo "ERROR: Podman not installed"; exit 1; }
-command -v socat &> /dev/null || { echo "ERROR: socat not installed"; exit 1; }
+if command -v socat &> /dev/null; then
+    echo "socat installed: $(socat -V 2>&1 | head -1)"
+else
+    echo "WARNING: socat not installed - metrics HTTP endpoint will not work"
+fi
 '
 
 echo "--- 2. Configuring Podman registries ---"
@@ -493,15 +500,45 @@ systemctl enable traefik-container.service
 systemctl enable crowdsec-container.service
 '
 
-sleep 5
+echo "=== Waiting for services to be ready ==="
+# Wait for Podman API (localhost only)
+for i in {1..10}; do
+  if curl -sf http://127.0.0.1:8080/_ping > /dev/null 2>&1; then
+    echo "Podman API: READY"
+    break
+  fi
+  echo "Waiting for Podman API... ($i/10)"
+  sleep 2
+done
+
+# Wait for Traefik to bind port 443
+for i in {1..15}; do
+  if ss -tlnp | grep -q ':443'; then
+    echo "Traefik: Port 443 READY"
+    break
+  fi
+  echo "Waiting for Traefik port 443... ($i/15)"
+  sleep 2
+done
+
+# Wait for metrics HTTP endpoint (needed for monitoring)
+for i in {1..10}; do
+  if curl -sf http://127.0.0.1:9100/ > /dev/null 2>&1; then
+    echo "Metrics HTTP: READY"
+    break
+  fi
+  echo "Waiting for metrics HTTP endpoint... ($i/10)"
+  sleep 2
+done
 
 echo "=== Provisioning status ==="
 podman ps --filter name=traefik --format "Traefik: {{.Status}}"
 podman ps --filter name=crowdsec --format "CrowdSec: {{.Status}}"
-curl -sf http://127.0.0.1:8080/_ping && echo "Podman API: READY" || echo "Warning: Podman API not yet ready"
-ss -tlnp | grep ':443' || echo "Warning: port 443 not yet bound"
-ss -tlnp | grep ':8081' && echo "CrowdSec LAPI: READY" || echo "Warning: CrowdSec LAPI not yet ready"
-ss -tlnp | grep ':7422' && echo "CrowdSec AppSec: READY" || echo "Warning: CrowdSec AppSec not yet ready"
+curl -sf http://127.0.0.1:8080/_ping && echo "Podman API: ONLINE" || echo "Warning: Podman API not responding"
+ss -tlnp | grep ':443' && echo "Traefik HTTPS: ONLINE" || echo "Warning: port 443 not bound"
+curl -sf http://127.0.0.1:9100/ > /dev/null && echo "Metrics HTTP: ONLINE" || echo "Warning: metrics endpoint not responding"
+ss -tlnp | grep ':8081' && echo "CrowdSec LAPI: ONLINE" || echo "Warning: CrowdSec LAPI not ready"
+ss -tlnp | grep ':7422' && echo "CrowdSec AppSec: ONLINE" || echo "Warning: CrowdSec AppSec not ready"
 
 echo ""
 if [ \$FAILURES -gt 0 ]; then
@@ -660,7 +697,10 @@ echo "Internal: 8080 (Podman API, localhost only)"
 echo "Security: Podman API secured with mTLS client certificate authentication"
 echo "WAF: CrowdSec AppSec enabled on all applications via Traefik plugin"
 ${baseDomain ? `echo "Podman API URL: https://podman-api.${baseDomain}"
-echo "Traefik dashboard: https://traefik.${baseDomain}/dashboard/"` : `echo "Podman API URL: https://\${WORKER_IP}"`}
+echo "Traefik dashboard: https://traefik.${baseDomain}/dashboard/"
+echo ""
+echo "NOTE: Let's Encrypt TLS certificates may take 30-60 seconds to obtain on first provision."
+echo "      HTTPS endpoints will return errors until certificates are ready."` : `echo "Podman API URL: https://\${WORKER_IP}"`}
 echo ""
 echo "=== CERTS_BEGIN ==="
 echo "CA_CERT_B64=$(cat /etc/traefik/certs/ca.crt | base64 -w 0)"

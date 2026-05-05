@@ -192,11 +192,14 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
           try {
             const { createPodmanClient } = await import('$lib/server/podman');
 
-            // Retry up to 5 times with exponential backoff (total ~31 seconds)
+            // Retry up to 8 times with exponential backoff (total ~2 minutes)
+            // Traefik needs time to start and obtain Let's Encrypt certificates
             let apiReady = false;
-            for (let attempt = 1; attempt <= 5; attempt++) {
-              const waitTime = Math.min(1000 * Math.pow(2, attempt - 1), 10000); // 1s, 2s, 4s, 8s, 10s
-              console.log(`[app-discovery] Waiting ${waitTime}ms for Podman API to be ready (attempt ${attempt}/5)...`);
+            console.log(`[app-discovery] Testing Podman API at ${newPodmanApiUrl} (mTLS: ${hasCerts})`);
+
+            for (let attempt = 1; attempt <= 8; attempt++) {
+              const waitTime = Math.min(1000 * Math.pow(2, attempt - 1), 15000); // 1s, 2s, 4s, 8s, 15s, 15s, 15s, 15s
+              console.log(`[app-discovery] Waiting ${waitTime}ms before attempt ${attempt}/8...`);
               await new Promise(resolve => setTimeout(resolve, waitTime));
 
               try {
@@ -209,16 +212,18 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
                     })
                   : createPodmanClient({ apiUrl: newPodmanApiUrl });
 
-                const canPing = await testClient.ping();
+                // Use request() directly instead of ping() to see actual errors
+                await (testClient as any).request('/_ping');
                 testClient.destroy();
 
-                if (canPing) {
-                  apiReady = true;
-                  console.log('[app-discovery] Podman API is ready');
-                  break;
-                }
+                apiReady = true;
+                console.log(`[app-discovery] Podman API is ready (attempt ${attempt})`);
+                break;
               } catch (e: any) {
-                console.log(`[app-discovery] Attempt ${attempt} failed: ${e.message}`);
+                const errorMsg = e.message || String(e);
+                const errorCode = e.code || e.errno || 'unknown';
+                const errorStatus = e.response?.status || '';
+                console.log(`[app-discovery] Attempt ${attempt} failed: [${errorCode}${errorStatus ? ` HTTP ${errorStatus}` : ''}] ${errorMsg}`);
               }
             }
 
