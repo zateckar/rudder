@@ -49,7 +49,7 @@ export async function executeSSHCommand(
       // Use stdin for script input
       const result = execSync(
         `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i "${tempKeyPath}" -p ${config.port} ${config.username}@${config.host} ${command}`,
-        { encoding: 'utf8', timeout: 300000, input: stdinInput }
+        { encoding: 'utf8', timeout: 900000, input: stdinInput }
       );
       stdout = result;
       stderr = '';

@@ -111,21 +111,22 @@ tls:
           - url: "http://127.0.0.1:8080"
 `;
 
-  // Podman API HTTP systemd service (localhost only)
+  // Podman API HTTP systemd service (listens on both Unix socket and TCP)
+  // This replaces both podman.socket and a separate TCP service
   const podmanApiServiceUnit = `[Unit]
-Description=Podman REST API (localhost only)
+Description=Podman REST API (Unix socket + TCP)
 Documentation=man:podman-system-service(1)
-After=network.target podman.socket
+After=network.target
 Wants=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/podman system service --time=0 tcp://127.0.0.1:8080
+ExecStart=/usr/bin/podman system service --time=0 unix:///run/podman/podman.sock tcp://127.0.0.1:8080
 Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=podman-api-http
+SyslogIdentifier=podman-api
 
 [Install]
 WantedBy=multi-user.target
@@ -199,9 +200,9 @@ source: appsec
   // Traefik container systemd service - mounts log dir for CrowdSec
   const traefikServiceUnit = `[Unit]
 Description=Traefik reverse proxy (Podman container)
-After=network-online.target podman.socket podman-api-http.service
+After=network-online.target podman-api.service
 Wants=network-online.target
-Requires=podman-api-http.service
+Requires=podman-api.service
 
 [Service]
 Type=simple
@@ -222,9 +223,9 @@ WantedBy=multi-user.target
   // CrowdSec container systemd service
   const crowdsecServiceUnit = `[Unit]
 Description=CrowdSec WAF and IPS (Podman container)
-After=network-online.target podman.socket podman-api-http.service
+After=network-online.target podman-api.service
 Wants=network-online.target
-Requires=podman-api-http.service
+Requires=podman-api.service
 
 [Service]
 Type=simple
@@ -335,11 +336,11 @@ echo "${registriesB64}" | base64 -d > /etc/containers/registries.conf
 echo "Registries configured"
 '
 
-echo "--- 3. Enabling Podman socket ---"
+echo "--- 3. Disabling default Podman socket (we use a custom service) ---"
 step "podman-socket" bash -c '
-systemctl enable podman.socket
-systemctl start podman.socket
-sleep 2
+systemctl stop podman.socket 2>/dev/null || true
+systemctl disable podman.socket 2>/dev/null || true
+echo "Default podman.socket disabled"
 '
 
 step "cleanup-old" bash -c '
@@ -358,6 +359,7 @@ echo "--- 5. Stopping existing containerized services ---"
 systemctl stop traefik-container.service 2>/dev/null || true
 systemctl stop crowdsec-container.service 2>/dev/null || true
 systemctl stop podman-api-http.service 2>/dev/null || true
+systemctl stop podman-api.service 2>/dev/null || true
 podman stop traefik 2>/dev/null || true
 podman rm -f traefik 2>/dev/null || true
 podman stop crowdsec 2>/dev/null || true
@@ -396,13 +398,26 @@ echo "mTLS certificates generated"
 '
 
 step "podman-api" bash -c '
-echo "--- 7. Setting up Podman REST API (localhost:8080 only) ---"
-echo "${podmanApiServiceB64}" | base64 -d > /etc/systemd/system/podman-api-http.service
+echo "--- 7. Setting up Podman REST API (Unix socket + TCP:8080) ---"
+echo "${podmanApiServiceB64}" | base64 -d > /etc/systemd/system/podman-api.service
 systemctl daemon-reload
-systemctl enable podman-api-http.service
-systemctl restart podman-api-http.service
-sleep 3
-curl -sf http://127.0.0.1:8080/_ping && echo "Podman API: OK" || echo "Warning: Podman API not ready"
+systemctl enable podman-api.service
+systemctl restart podman-api.service
+sleep 5
+# Wait for both socket and TCP to be ready
+for i in {1..10}; do
+  if curl -sf http://127.0.0.1:8080/_ping > /dev/null 2>&1; then
+    echo "Podman API TCP: OK"
+    break
+  fi
+  echo "Waiting for Podman API TCP... ($i/10)"
+  sleep 2
+done
+if [ -S /run/podman/podman.sock ]; then
+  echo "Podman API Unix socket: OK"
+else
+  echo "Warning: Podman Unix socket not found"
+fi
 '
 
 step "traefik-config" bash -c '
