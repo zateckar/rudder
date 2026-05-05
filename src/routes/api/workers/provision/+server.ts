@@ -1,6 +1,6 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
-import { workers, applications } from '$lib/db/schema';
+import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { executeSSHCommand, createTempKeyFile, deleteTempKeyFile, testSSHConnection } from '$lib/server/ssh';
 import { generateProvisioningScript } from '$lib/server/provisioning';
@@ -169,22 +169,6 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
             provisionedAt: new Date(),
             lastSeenAt: new Date(),
           }).where(eq(workers.id, workerId));
-
-          // Auto-redeploy all applications assigned to this worker
-          const workerApps = await db.select().from(applications).where(eq(applications.workerId, workerId)).all();
-          const { executeApplicationDeploy } = await import('$lib/server/deploy');
-          const redeployResults: string[] = [];
-          for (const app of workerApps) {
-            try {
-              const result = await executeApplicationDeploy(app.id, userId);
-              redeployResults.push(`${app.name}: ${result.success ? 'ok' : result.message}`);
-            } catch (e: any) {
-              redeployResults.push(`${app.name}: ${e.message}`);
-            }
-          }
-          if (redeployResults.length > 0) {
-            console.log(`Auto-redeploy after provisioning: ${redeployResults.join(', ')}`);
-          }
 
           // Discover and import existing applications
           // Skip discovery during initial provisioning - Let's Encrypt certificates take 30-60s to obtain
