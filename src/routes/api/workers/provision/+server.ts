@@ -186,10 +186,30 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
             console.log(`Auto-redeploy after provisioning: ${redeployResults.join(', ')}`);
           }
 
-          return json({ 
-            success: true, 
+          // Discover and import existing applications
+          let discoveryResults = { appsDiscovered: 0, teamsCreated: 0, stacksCreated: 0 };
+          try {
+            const { discoverApplicationsOnWorker } = await import('$lib/server/app-discovery');
+            discoveryResults = await discoverApplicationsOnWorker(workerId, userId);
+
+            if (discoveryResults.appsDiscovered > 0) {
+              console.log(
+                `Discovered ${discoveryResults.appsDiscovered} existing applications, ` +
+                `${discoveryResults.teamsCreated} teams, and ${discoveryResults.stacksCreated} stacks`
+              );
+            }
+          } catch (error: any) {
+            console.error('Application discovery failed (non-fatal):', error.message);
+            // Don't fail provisioning if discovery fails
+          }
+
+          return json({
+            success: true,
             message: 'Worker provisioned successfully',
             mtlsEnabled: hasCerts,
+            appsDiscovered: discoveryResults.appsDiscovered,
+            teamsCreated: discoveryResults.teamsCreated,
+            stacksCreated: discoveryResults.stacksCreated,
           });
         } catch (error: any) {
           console.error('Provisioning error:', error);

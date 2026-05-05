@@ -67,7 +67,15 @@ export interface ParsedContainer {
   networks?: string[];
 }
 
-export function parseCompose(manifest: string, appName: string, teamSlug?: string, baseDomain?: string, appId?: string): ParsedContainer[] {
+export function parseCompose(
+  manifest: string,
+  appName: string,
+  teamSlug?: string,
+  baseDomain?: string,
+  appId?: string,
+  team?: { name: string; id: string },
+  stack?: { name: string; id: string }
+): ParsedContainer[] {
   const config = Bun.YAML.parse(manifest) as ComposeConfig;
   
   if (!config || !config.services) {
@@ -143,6 +151,15 @@ export function parseCompose(manifest: string, appName: string, teamSlug?: strin
 
     if (teamSlug) {
       labels.team = teamSlug;
+      if (team) {
+        labels['rudder.team.name'] = team.name;
+        labels['rudder.team.id'] = team.id;
+      }
+    }
+
+    if (stack) {
+      labels['rudder.stack.name'] = stack.name;
+      labels['rudder.stack.id'] = stack.id;
     }
 
     if (service.labels) {

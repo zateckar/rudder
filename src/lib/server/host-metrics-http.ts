@@ -34,7 +34,7 @@ function resolveCert(value: string): string | Buffer {
  */
 export async function getHostStatsHttp(worker: MetricsWorker): Promise<HostStats | null> {
   const metricsUrl = worker.baseDomain
-    ? `https://metrics.${worker.baseDomain}/stats`
+    ? `https://metrics.${worker.baseDomain}/`
     : null;
 
   if (!metricsUrl) return null;

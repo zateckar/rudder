@@ -325,7 +325,7 @@ systemctl reset-failed traefik.service 2>/dev/null || true
 pkill -f "/usr/local/bin/traefik" 2>/dev/null || true
 rm -f /usr/local/bin/traefik 2>/dev/null || true
 rm -f /etc/systemd/system/traefik.service 2>/dev/null || true
-systemctl daemon-reload
+systemctl daemon-reload || true
 sleep 2
 echo "Old host Traefik removed"
 
@@ -391,7 +391,7 @@ echo "podman-api.yml (mTLS-secured Podman API route) written"
 
 # Metrics endpoint route — secured with same mTLS as Podman API
 if [ -n "${baseDomain}" ]; then
-cat > /etc/traefik/dynamic/metrics.yml << METRICSYMLEOF
+cat > /etc/traefik/dynamic/metrics.yml << 'METRICSYMLEOF'
 http:
   routers:
     rudder-metrics:
@@ -588,7 +588,7 @@ mem_free=$(awk '/^MemFree:/{print $2*1024}' /proc/meminfo)
 mem_available=$(awk '/^MemAvailable:/{print $2*1024}' /proc/meminfo)
 mem_used=$((mem_total - mem_available))
 if [ "$mem_total" -gt 0 ] 2>/dev/null; then
-  mem_percent=$(awk "BEGIN{printf \"%.1f\", 100*$mem_used/$mem_total}")
+  mem_percent=$(awk -v used="$mem_used" -v total="$mem_total" 'BEGIN{printf "%.1f", 100*used/total}')
 else
   mem_percent=0
 fi

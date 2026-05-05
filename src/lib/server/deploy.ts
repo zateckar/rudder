@@ -2,7 +2,7 @@
  * Shared deploy logic — used by both the deploy API endpoint and the webhook trigger.
  */
 import { db } from '$lib/db';
-import { applications, workers, containers, teams, volumes, secrets, deployments } from '$lib/db/schema';
+import { applications, workers, containers, teams, stacks, volumes, secrets, deployments } from '$lib/db/schema';
 import { eq, inArray, or, desc } from 'drizzle-orm';
 import { getRestPodmanClient } from '$lib/server/podman-client';
 import { parseCompose, validateCompose } from '$lib/server/compose';
@@ -250,9 +250,15 @@ export async function executeApplicationDeploy(
     }
 
     let teamSlug: string | undefined;
+    let team: typeof teams.$inferSelect | undefined;
     if (app.teamId) {
-      const team = await db.select().from(teams).where(eq(teams.id, app.teamId)).get();
+      team = await db.select().from(teams).where(eq(teams.id, app.teamId)).get();
       if (team) teamSlug = team.slug;
+    }
+
+    let stack: typeof stacks.$inferSelect | undefined;
+    if (app.stackId) {
+      stack = await db.select().from(stacks).where(eq(stacks.id, app.stackId)).get();
     }
 
     if (app.type === 'compose') {
@@ -262,7 +268,15 @@ export async function executeApplicationDeploy(
       }
 
       const baseDomain = process.env.TRAEFIK_BASE_DOMAIN || worker.baseDomain || worker.hostname;
-      const parsedContainers = parseCompose(app.manifest, app.name, teamSlug, baseDomain, app.id);
+      const parsedContainers = parseCompose(
+        app.manifest,
+        app.name,
+        teamSlug,
+        baseDomain,
+        app.id,
+        team ? { name: team.name, id: team.id } : undefined,
+        stack ? { name: stack.name, id: stack.id } : undefined
+      );
 
       // Create isolated network for this app/stack
       const networkName = await ensureAppNetwork(podmanClient, app.id, app.stackId);
@@ -458,7 +472,17 @@ export async function executeApplicationDeploy(
         // Only the first replica gets the router labels. All replicas define their own
         // loadbalancer.server.url pointing to their own port.
         const labels: Record<string, string> = { app: app.name };
-        if (teamSlug) labels.team = teamSlug;
+        if (teamSlug) {
+          labels.team = teamSlug;
+          if (team) {
+            labels['rudder.team.name'] = team.name;
+            labels['rudder.team.id'] = team.id;
+          }
+        }
+        if (stack) {
+          labels['rudder.stack.name'] = stack.name;
+          labels['rudder.stack.id'] = stack.id;
+        }
 
         if (replicaCount === 1) {
           // Standard single-container: full Traefik labels
@@ -539,7 +563,17 @@ export async function executeApplicationDeploy(
       for (const container of parsedContainers) {
         try {
           let labels: Record<string, string> = { ...container.labels, app: app.name };
-          if (teamSlug) labels.team = teamSlug;
+          if (teamSlug) {
+            labels.team = teamSlug;
+            if (team) {
+              labels['rudder.team.name'] = team.name;
+              labels['rudder.team.id'] = team.id;
+            }
+          }
+          if (stack) {
+            labels['rudder.stack.name'] = stack.name;
+            labels['rudder.stack.id'] = stack.id;
+          }
 
           const portKeys = Object.keys(container.ports);
           if (portKeys.length > 0) {
