@@ -23,6 +23,9 @@ FROM oven/bun:1-alpine AS production
 
 WORKDIR /app
 
+# Install runtime dependencies
+RUN apk add --no-cache openssh-client
+
 # Create non-root user
 RUN addgroup -g 1001 -S rudder && \
     adduser -S rudder -u 1001 -G rudder
