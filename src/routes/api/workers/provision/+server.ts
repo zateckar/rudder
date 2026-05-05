@@ -187,16 +187,37 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
           }
 
           // Discover and import existing applications
+          // Wait a few seconds for Podman API to stabilize after provisioning
+          await new Promise(resolve => setTimeout(resolve, 3000));
+
           let discoveryResults = { appsDiscovered: 0, teamsCreated: 0, stacksCreated: 0 };
           try {
-            const { discoverApplicationsOnWorker } = await import('$lib/server/app-discovery');
-            discoveryResults = await discoverApplicationsOnWorker(workerId, userId);
+            // Verify Podman API is accessible before running discovery
+            const { createPodmanClient } = await import('$lib/server/podman');
+            const testClient = hasCerts
+              ? createPodmanClient({
+                  apiUrl: newPodmanApiUrl,
+                  caCert: certs.caCert!,
+                  clientCert: certs.clientCert!,
+                  clientKey: certs.clientKey!,
+                })
+              : createPodmanClient({ apiUrl: newPodmanApiUrl });
 
-            if (discoveryResults.appsDiscovered > 0) {
-              console.log(
-                `Discovered ${discoveryResults.appsDiscovered} existing applications, ` +
-                `${discoveryResults.teamsCreated} teams, and ${discoveryResults.stacksCreated} stacks`
-              );
+            const canPing = await testClient.ping();
+            testClient.destroy();
+
+            if (!canPing) {
+              console.warn('[app-discovery] Skipping - Podman API not responding to ping');
+            } else {
+              const { discoverApplicationsOnWorker } = await import('$lib/server/app-discovery');
+              discoveryResults = await discoverApplicationsOnWorker(workerId, userId);
+
+              if (discoveryResults.appsDiscovered > 0) {
+                console.log(
+                  `Discovered ${discoveryResults.appsDiscovered} existing applications, ` +
+                  `${discoveryResults.teamsCreated} teams, and ${discoveryResults.stacksCreated} stacks`
+                );
+              }
             }
           } catch (error: any) {
             console.error('Application discovery failed (non-fatal):', error.message);

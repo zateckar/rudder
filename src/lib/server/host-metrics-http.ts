@@ -56,7 +56,8 @@ export async function getHostStatsHttp(worker: MetricsWorker): Promise<HostStats
 
       const req = reqModule.get(metricsUrl, { agent, timeout: 10000 }, (res) => {
         if (res.statusCode !== 200) {
-          reject(new Error(`Metrics endpoint returned ${res.statusCode}`));
+          // Silently reject on 404 - metrics endpoint may not be ready yet on newly provisioned workers
+          reject(new Error(`${res.statusCode}`));
           return;
         }
         let data = '';
@@ -68,7 +69,7 @@ export async function getHostStatsHttp(worker: MetricsWorker): Promise<HostStats
       req.on('error', reject);
       req.on('timeout', () => {
         req.destroy();
-        reject(new Error('Metrics request timed out'));
+        reject(new Error('timeout'));
       });
     });
 
@@ -90,8 +91,11 @@ export async function getHostStatsHttp(worker: MetricsWorker): Promise<HostStats
       netRxBytes: stats.net_rx_bytes ?? null,
       netTxBytes: stats.net_tx_bytes ?? null,
     };
-  } catch (e) {
-    console.warn(`[host-metrics-http] Failed to fetch metrics from ${metricsUrl}:`, e);
+  } catch (e: any) {
+    // Only log non-404 errors - 404 is expected on workers not yet fully provisioned
+    if (!e.message?.includes('404')) {
+      console.warn(`[host-metrics-http] Failed to fetch metrics from ${metricsUrl}:`, e);
+    }
     return null;
   }
 }

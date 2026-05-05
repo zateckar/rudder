@@ -178,6 +178,24 @@ source: appsec
     listen_uri: 0.0.0.0:8081
 `;
 
+  // Metrics endpoint routing - only created if baseDomain is provided
+  const metricsRoutingYml = baseDomain ? `http:
+  routers:
+    rudder-metrics:
+      rule: "Host(\`metrics.${baseDomain}\`)"
+      entryPoints:
+        - websecure
+      service: rudder-metrics
+      tls:
+        certResolver: letsencrypt
+        options: podman-mtls
+  services:
+    rudder-metrics:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:9100"
+` : '';
+
   // Traefik container systemd service - mounts log dir for CrowdSec
   const traefikServiceUnit = `[Unit]
 Description=Traefik reverse proxy (Podman container)
@@ -236,6 +254,7 @@ registries = []
   // Base64 encode all configs
   const traefikYmlB64 = Buffer.from(traefikYml).toString('base64');
   const podmanApiRoutingYmlB64 = Buffer.from(podmanApiRoutingYml).toString('base64');
+  const metricsRoutingYmlB64 = baseDomain ? Buffer.from(metricsRoutingYml).toString('base64') : '';
   const crowdsecMiddlewareYmlB64 = Buffer.from(crowdsecMiddlewareYml).toString('base64');
   const crowdsecAcquisYmlB64 = Buffer.from(crowdsecAcquisYml).toString('base64');
   const crowdsecAppsecAcquisYmlB64 = Buffer.from(crowdsecAppsecAcquisYml).toString('base64');
@@ -390,25 +409,9 @@ echo "${podmanApiRoutingYmlB64}" | base64 -d > /etc/traefik/dynamic/podman-api.y
 echo "podman-api.yml (mTLS-secured Podman API route) written"
 
 # Metrics endpoint route — secured with same mTLS as Podman API
-if [ -n "${baseDomain}" ]; then
-cat > /etc/traefik/dynamic/metrics.yml << 'METRICSYMLEOF'
-http:
-  routers:
-    rudder-metrics:
-      rule: "Host(\`metrics.${baseDomain}\`)"
-      entryPoints:
-        - websecure
-      service: rudder-metrics
-      tls:
-        certResolver: letsencrypt
-        options: podman-mtls
-  services:
-    rudder-metrics:
-      loadBalancer:
-        servers:
-          - url: "http://127.0.0.1:9100"
-METRICSYMLEOF
-echo "metrics.yml (mTLS-secured host metrics route) written"
+if [ -n "${metricsRoutingYmlB64}" ]; then
+  echo "${metricsRoutingYmlB64}" | base64 -d > /etc/traefik/dynamic/metrics.yml
+  echo "metrics.yml (mTLS-secured host metrics route) written"
 fi
 
 echo "${crowdsecMiddlewareYmlB64}" | base64 -d > /etc/traefik/dynamic/crowdsec.yml
