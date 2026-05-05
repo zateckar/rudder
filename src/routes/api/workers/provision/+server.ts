@@ -187,27 +187,43 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
           }
 
           // Discover and import existing applications
-          // Wait a few seconds for Podman API to stabilize after provisioning
-          await new Promise(resolve => setTimeout(resolve, 3000));
-
+          // Retry Podman API connection with exponential backoff (Traefik needs time to start)
           let discoveryResults = { appsDiscovered: 0, teamsCreated: 0, stacksCreated: 0 };
           try {
-            // Verify Podman API is accessible before running discovery
             const { createPodmanClient } = await import('$lib/server/podman');
-            const testClient = hasCerts
-              ? createPodmanClient({
-                  apiUrl: newPodmanApiUrl,
-                  caCert: certs.caCert!,
-                  clientCert: certs.clientCert!,
-                  clientKey: certs.clientKey!,
-                })
-              : createPodmanClient({ apiUrl: newPodmanApiUrl });
 
-            const canPing = await testClient.ping();
-            testClient.destroy();
+            // Retry up to 5 times with exponential backoff (total ~31 seconds)
+            let apiReady = false;
+            for (let attempt = 1; attempt <= 5; attempt++) {
+              const waitTime = Math.min(1000 * Math.pow(2, attempt - 1), 10000); // 1s, 2s, 4s, 8s, 10s
+              console.log(`[app-discovery] Waiting ${waitTime}ms for Podman API to be ready (attempt ${attempt}/5)...`);
+              await new Promise(resolve => setTimeout(resolve, waitTime));
 
-            if (!canPing) {
-              console.warn('[app-discovery] Skipping - Podman API not responding to ping');
+              try {
+                const testClient = hasCerts
+                  ? createPodmanClient({
+                      apiUrl: newPodmanApiUrl,
+                      caCert: certs.caCert!,
+                      clientCert: certs.clientCert!,
+                      clientKey: certs.clientKey!,
+                    })
+                  : createPodmanClient({ apiUrl: newPodmanApiUrl });
+
+                const canPing = await testClient.ping();
+                testClient.destroy();
+
+                if (canPing) {
+                  apiReady = true;
+                  console.log('[app-discovery] Podman API is ready');
+                  break;
+                }
+              } catch (e: any) {
+                console.log(`[app-discovery] Attempt ${attempt} failed: ${e.message}`);
+              }
+            }
+
+            if (!apiReady) {
+              console.warn('[app-discovery] Skipping - Podman API not ready after retries (will retry on next metrics collection)');
             } else {
               const { discoverApplicationsOnWorker } = await import('$lib/server/app-discovery');
               discoveryResults = await discoverApplicationsOnWorker(workerId, userId);

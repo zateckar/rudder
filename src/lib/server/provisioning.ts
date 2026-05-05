@@ -301,25 +301,28 @@ else
 fi
 
 step "podman" bash -c '
-echo "--- 1. Installing Podman and openssl ---"
+echo "--- 1. Installing Podman, openssl, and socat ---"
 if [ "$OS" = "debian" ]; then
     if command -v podman &> /dev/null; then
         echo "Podman already installed: $(podman --version)"
+        # Ensure socat is installed even if podman exists
+        apt-get install -y socat 2>&1 | tail -2
     else
         rm -f /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list 2>/dev/null
         apt-get update -q
-        apt-get install -y podman curl openssl 2>&1 | tail -5
+        apt-get install -y podman curl openssl socat 2>&1 | tail -5
         if ! command -v podman &> /dev/null; then
             add-apt-repository -y universe
             apt-get update -q
-            apt-get install -y podman curl openssl 2>&1 | tail -5
+            apt-get install -y podman curl openssl socat 2>&1 | tail -5
         fi
     fi
 elif [ "$OS" = "rhel" ]; then
     dnf -y module enable podman
-    dnf -y install podman curl openssl
+    dnf -y install podman curl openssl socat
 fi
 podman --version || { echo "ERROR: Podman not installed"; exit 1; }
+command -v socat &> /dev/null || { echo "ERROR: socat not installed"; exit 1; }
 '
 
 echo "--- 2. Configuring Podman registries ---"

@@ -92,8 +92,13 @@ export async function getHostStatsHttp(worker: MetricsWorker): Promise<HostStats
       netTxBytes: stats.net_tx_bytes ?? null,
     };
   } catch (e: any) {
-    // Only log non-404 errors - 404 is expected on workers not yet fully provisioned
-    if (!e.message?.includes('404')) {
+    // Suppress expected startup errors (404, 502) - these are normal on newly provisioned workers
+    // 404 = Traefik route not configured yet
+    // 502 = Traefik is up but backend service (localhost:9100) not ready
+    const expectedErrors = ['404', '502', 'ECONNREFUSED', 'ENOTFOUND', 'timeout'];
+    const isExpectedError = expectedErrors.some(err => e.message?.includes(err));
+
+    if (!isExpectedError) {
       console.warn(`[host-metrics-http] Failed to fetch metrics from ${metricsUrl}:`, e);
     }
     return null;
