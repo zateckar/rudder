@@ -111,22 +111,42 @@ tls:
           - url: "http://127.0.0.1:8080"
 `;
 
-  // Podman API HTTP systemd service (listens on both Unix socket and TCP)
-  // This replaces both podman.socket and a separate TCP service
-  const podmanApiServiceUnit = `[Unit]
-Description=Podman REST API (Unix socket + TCP)
+  // Podman API Unix socket service (for Traefik)
+  const podmanApiSocketServiceUnit = `[Unit]
+Description=Podman REST API (Unix socket for Traefik)
 Documentation=man:podman-system-service(1)
 After=network.target
 Wants=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/podman system service --time=0 unix:///run/podman/podman.sock tcp://127.0.0.1:8080
+ExecStart=/usr/bin/podman system service --time=0 unix:///run/podman/podman.sock
 Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=podman-api
+SyslogIdentifier=podman-api-socket
+
+[Install]
+WantedBy=multi-user.target
+`;
+
+  // Podman API TCP service (for control plane access via Traefik)
+  const podmanApiTcpServiceUnit = `[Unit]
+Description=Podman REST API (TCP for control plane)
+Documentation=man:podman-system-service(1)
+After=network.target podman-api-socket.service
+Wants=network.target
+Requires=podman-api-socket.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/podman system service --time=0 tcp://127.0.0.1:8080
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=podman-api-tcp
 
 [Install]
 WantedBy=multi-user.target
@@ -200,9 +220,9 @@ source: appsec
   // Traefik container systemd service - mounts log dir for CrowdSec
   const traefikServiceUnit = `[Unit]
 Description=Traefik reverse proxy (Podman container)
-After=network-online.target podman-api.service
+After=network-online.target podman-api-socket.service podman-api-tcp.service
 Wants=network-online.target
-Requires=podman-api.service
+Requires=podman-api-socket.service
 
 [Service]
 Type=simple
@@ -223,9 +243,9 @@ WantedBy=multi-user.target
   // CrowdSec container systemd service
   const crowdsecServiceUnit = `[Unit]
 Description=CrowdSec WAF and IPS (Podman container)
-After=network-online.target podman-api.service
+After=network-online.target podman-api-socket.service podman-api-tcp.service
 Wants=network-online.target
-Requires=podman-api.service
+Requires=podman-api-socket.service
 
 [Service]
 Type=simple
@@ -260,7 +280,8 @@ registries = []
   const crowdsecAcquisYmlB64 = Buffer.from(crowdsecAcquisYml).toString('base64');
   const crowdsecAppsecAcquisYmlB64 = Buffer.from(crowdsecAppsecAcquisYml).toString('base64');
   const crowdsecConfigLocalYmlB64 = Buffer.from(crowdsecConfigLocalYml).toString('base64');
-  const podmanApiServiceB64 = Buffer.from(podmanApiServiceUnit).toString('base64');
+  const podmanApiSocketServiceB64 = Buffer.from(podmanApiSocketServiceUnit).toString('base64');
+  const podmanApiTcpServiceB64 = Buffer.from(podmanApiTcpServiceUnit).toString('base64');
   const traefikServiceB64 = Buffer.from(traefikServiceUnit).toString('base64');
   const crowdsecServiceB64 = Buffer.from(crowdsecServiceUnit).toString('base64');
   const registriesB64 = Buffer.from(registriesConf).toString('base64');
@@ -360,6 +381,8 @@ systemctl stop traefik-container.service 2>/dev/null || true
 systemctl stop crowdsec-container.service 2>/dev/null || true
 systemctl stop podman-api-http.service 2>/dev/null || true
 systemctl stop podman-api.service 2>/dev/null || true
+systemctl stop podman-api-socket.service 2>/dev/null || true
+systemctl stop podman-api-tcp.service 2>/dev/null || true
 podman stop traefik 2>/dev/null || true
 podman rm -f traefik 2>/dev/null || true
 podman stop crowdsec 2>/dev/null || true
@@ -399,10 +422,13 @@ echo "mTLS certificates generated"
 
 step "podman-api" bash -c '
 echo "--- 7. Setting up Podman REST API (Unix socket + TCP:8080) ---"
-echo "${podmanApiServiceB64}" | base64 -d > /etc/systemd/system/podman-api.service
+echo "${podmanApiSocketServiceB64}" | base64 -d > /etc/systemd/system/podman-api-socket.service
+echo "${podmanApiTcpServiceB64}" | base64 -d > /etc/systemd/system/podman-api-tcp.service
 systemctl daemon-reload
-systemctl enable podman-api.service
-systemctl restart podman-api.service
+systemctl enable podman-api-socket.service
+systemctl enable podman-api-tcp.service
+systemctl restart podman-api-socket.service
+systemctl restart podman-api-tcp.service
 sleep 5
 # Wait for both socket and TCP to be ready
 for i in {1..10}; do
@@ -509,11 +535,13 @@ echo "Note: Traefik and CrowdSec are pulling images in background via systemd"
 echo "Port 443 will be available once image pulls complete (check with: systemctl status traefik-container)"
 
 echo "=== Provisioning status ==="
-systemctl is-active podman-api.service && echo "Podman API service: ACTIVE" || echo "Podman API service: starting"
+systemctl is-active podman-api-socket.service && echo "Podman API Unix socket service: ACTIVE" || echo "Podman API Unix socket service: starting"
+systemctl is-active podman-api-tcp.service && echo "Podman API TCP service: ACTIVE" || echo "Podman API TCP service: starting"
 systemctl is-active traefik-container.service && echo "Traefik service: ACTIVE" || echo "Traefik service: starting (pulling image)"
 systemctl is-active crowdsec-container.service && echo "CrowdSec service: ACTIVE" || echo "CrowdSec service: starting (pulling image)"
 systemctl is-active rudder-metrics-http.service && echo "Metrics HTTP service: ACTIVE" || echo "Metrics HTTP service: starting"
-curl -sf http://127.0.0.1:8080/_ping > /dev/null 2>&1 && echo "Podman API: ONLINE" || echo "Podman API: not ready"
+curl -sf http://127.0.0.1:8080/_ping > /dev/null 2>&1 && echo "Podman API TCP: ONLINE" || echo "Podman API TCP: not ready"
+[ -S /run/podman/podman.sock ] && echo "Podman API Unix socket: EXISTS" || echo "Podman API Unix socket: not ready"
 curl -sf http://127.0.0.1:9100/ | grep -q cpu_percent && echo "Metrics HTTP: ONLINE" || echo "Metrics HTTP: not ready"
 podman ps --filter name=traefik --format "Traefik container: {{.Status}}" 2>/dev/null || echo "Traefik container: image pulling"
 podman ps --filter name=crowdsec --format "CrowdSec container: {{.Status}}" 2>/dev/null || echo "CrowdSec container: image pulling"
