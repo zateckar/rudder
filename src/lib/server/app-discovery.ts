@@ -7,7 +7,7 @@
  */
 
 import { db } from '$lib/db';
-import { applications, containers, teams, stacks, workers } from '$lib/db/schema';
+import { applications, containers, teams, stacks, workers, deployments } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { getRestPodmanClient } from '$lib/server/podman-client';
 import type { Container, ContainerInspect } from '$lib/server/podman';
@@ -467,6 +467,21 @@ export async function discoverApplicationsOnWorker(
           createdBy: app.createdBy,
           createdAt: app.createdAt,
           updatedAt: app.updatedAt,
+        });
+
+        // Record an initial 'succeeded' deployment — app is already running, no redeploy needed
+        await db.insert(deployments).values({
+          id: crypto.randomUUID(),
+          applicationId: app.id,
+          version: 1,
+          manifest: app.manifest,
+          environment: app.environment,
+          volumes: app.volumes,
+          image: app.containerInfo.image,
+          status: 'succeeded',
+          deployedBy: userId,
+          createdAt: new Date(),
+          finishedAt: new Date(),
         });
 
         // Insert container record
