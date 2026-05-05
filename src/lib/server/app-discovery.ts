@@ -46,7 +46,7 @@ interface DiscoveredApp {
   gitBranch: string | null;
   gitDockerfile: string | null;
   healthcheck: string | null;
-  createdBy: string;
+  createdBy: string | null;
   createdAt: Date;
   updatedAt: Date;
   containerInfo: {
