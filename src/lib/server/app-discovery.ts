@@ -140,7 +140,7 @@ function containerToApplication(
   workerId: string,
   teamId: string | null,
   stackId: string | null,
-  userId: string
+  userId: string | null
 ): DiscoveredApp {
   const traefikConfig = parseTraefikLabels(container.Config.Labels || {});
 
@@ -222,7 +222,7 @@ function containerToApplication(
  */
 async function discoverAndCreateTeams(
   containers: Container[],
-  userId: string
+  userId: string | null
 ): Promise<Map<string, string>> {
   const teamsMap = new Map<string, string>(); // slug -> teamId
   const uniqueTeams = new Map<string, { name: string; id: string }>();
@@ -275,7 +275,7 @@ async function discoverAndCreateTeams(
 async function discoverAndCreateStacks(
   containers: Container[],
   teamsMap: Map<string, string>,
-  userId: string
+  userId: string | null
 ): Promise<Map<string, string>> {
   const stacksMap = new Map<string, string>(); // stackId (from label) -> stackId (in DB)
   const uniqueStacks = new Map<string, { name: string; id: string; teamId: string | null }>();
@@ -328,7 +328,7 @@ async function discoverAndCreateStacks(
 /**
  * Get or create default team for apps without team labels
  */
-async function getOrCreateDefaultTeam(userId: string): Promise<string> {
+async function getOrCreateDefaultTeam(userId: string | null): Promise<string> {
   const defaultTeamName = 'Imported Applications';
   const defaultTeamSlug = 'imported-apps';
 
@@ -359,7 +359,7 @@ async function getOrCreateDefaultTeam(userId: string): Promise<string> {
  */
 export async function discoverApplicationsOnWorker(
   workerId: string,
-  userId: string
+  userId: string | null
 ): Promise<{ appsDiscovered: number; teamsCreated: number; stacksCreated: number }> {
   console.log(`[app-discovery] Starting discovery on worker ${workerId}`);
 

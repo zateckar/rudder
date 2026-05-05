@@ -4,7 +4,7 @@
  * Call startMetricsCollection() once at server startup (guarded by globalThis flag).
  */
 import { db } from '$lib/db';
-import { containers, workers, containerMetrics, workerMetrics, workerPings, systemSettings, applications } from '$lib/db/schema';
+import { containers, workers, containerMetrics, workerMetrics, workerPings, systemSettings, applications, users } from '$lib/db/schema';
 import { eq, lt } from 'drizzle-orm';
 import { getRestPodmanClient } from './podman-client';
 import { createPodmanClient } from './podman';
@@ -206,7 +206,10 @@ async function collectWorkerMetrics(): Promise<void> {
             console.log(`[metrics] Worker ${worker.name} is online for the first time after provisioning - running app discovery`);
             try {
               const { discoverApplicationsOnWorker } = await import('./app-discovery');
-              const results = await discoverApplicationsOnWorker(worker.id, worker.id); // Use worker ID as user ID
+              // Find an admin user to attribute discovered resources to
+              const adminUser = await db.select().from(users).where(eq(users.role, 'admin')).limit(1).get();
+              const discoveryUserId = adminUser?.id ?? null;
+              const results = await discoverApplicationsOnWorker(worker.id, discoveryUserId);
               console.log(
                 `[metrics] Discovery complete: ${results.appsDiscovered} apps, ` +
                 `${results.teamsCreated} teams, ${results.stacksCreated} stacks`
