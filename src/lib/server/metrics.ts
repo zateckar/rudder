@@ -4,7 +4,7 @@
  * Call startMetricsCollection() once at server startup (guarded by globalThis flag).
  */
 import { db } from '$lib/db';
-import { containers, workers, containerMetrics, workerMetrics, workerPings, systemSettings } from '$lib/db/schema';
+import { containers, workers, containerMetrics, workerMetrics, workerPings, systemSettings, applications } from '$lib/db/schema';
 import { eq, lt } from 'drizzle-orm';
 import { getRestPodmanClient } from './podman-client';
 import { createPodmanClient } from './podman';
@@ -184,11 +184,38 @@ async function collectWorkerMetrics(): Promise<void> {
         error: pingStatus !== 'online' ? 'Unreachable' : null,
       });
 
+      const previousStatus = worker.status;
+
       // Update worker status
       await db.update(workers).set({
         status: pingStatus,
         lastSeenAt: pingStatus === 'online' ? now : worker.lastSeenAt,
       }).where(eq(workers.id, worker.id));
+
+      // Run app discovery when worker first comes online after provisioning
+      if (pingStatus === 'online' && previousStatus !== 'online' && worker.provisionedAt) {
+        const timeSinceProvisioning = now.getTime() - new Date(worker.provisionedAt).getTime();
+        const recentlyProvisioned = timeSinceProvisioning < 3600000; // Within last hour
+
+        if (recentlyProvisioned) {
+          // Check if discovery has already run (worker has applications)
+          const appCount = await db.select().from(applications).where(eq(applications.workerId, worker.id)).all();
+
+          if (appCount.length === 0) {
+            console.log(`[metrics] Worker ${worker.name} is online for the first time after provisioning - running app discovery`);
+            try {
+              const { discoverApplicationsOnWorker } = await import('./app-discovery');
+              const results = await discoverApplicationsOnWorker(worker.id, worker.id); // Use worker ID as user ID
+              console.log(
+                `[metrics] Discovery complete: ${results.appsDiscovered} apps, ` +
+                `${results.teamsCreated} teams, ${results.stacksCreated} stacks`
+              );
+            } catch (e: any) {
+              console.error(`[metrics] App discovery failed for ${worker.name}:`, e.message);
+            }
+          }
+        }
+      }
 
       if (pingStatus !== 'online' || !sysInfo) continue;
 

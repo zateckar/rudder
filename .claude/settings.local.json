@@ -6,7 +6,9 @@
       "PowerShell(bun run db:init)",
       "PowerShell(bun check)",
       "PowerShell(Stop-Process -Name \"bun\" -Force -ErrorAction SilentlyContinue)",
-      "PowerShell(bun run dev)"
+      "PowerShell(bun run dev)",
+      "PowerShell(ssh -o StrictHostKeyChecking=no gamma.northeurope.cloudapp.azure.com \"apt-cache search socat\")",
+      "PowerShell(ssh azureuser@gamma.northeurope.cloudapp.azure.com \"sudo podman ps && sudo curl -s http://127.0.0.1:8080/_ping && echo 'Podman API local: OK'\")"
     ]
   }
 }

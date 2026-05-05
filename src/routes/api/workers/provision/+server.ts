@@ -187,63 +187,13 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
           }
 
           // Discover and import existing applications
-          // Retry Podman API connection with exponential backoff (Traefik needs time to start)
+          // Skip discovery during initial provisioning - Let's Encrypt certificates take 30-60s to obtain
+          // Discovery will run automatically on the next metrics collection cycle (every 5 minutes)
           let discoveryResults = { appsDiscovered: 0, teamsCreated: 0, stacksCreated: 0 };
-          try {
-            const { createPodmanClient } = await import('$lib/server/podman');
-
-            // Retry up to 8 times with exponential backoff (total ~2 minutes)
-            // Traefik needs time to start and obtain Let's Encrypt certificates
-            let apiReady = false;
-            console.log(`[app-discovery] Testing Podman API at ${newPodmanApiUrl} (mTLS: ${hasCerts})`);
-
-            for (let attempt = 1; attempt <= 8; attempt++) {
-              const waitTime = Math.min(1000 * Math.pow(2, attempt - 1), 15000); // 1s, 2s, 4s, 8s, 15s, 15s, 15s, 15s
-              console.log(`[app-discovery] Waiting ${waitTime}ms before attempt ${attempt}/8...`);
-              await new Promise(resolve => setTimeout(resolve, waitTime));
-
-              try {
-                const testClient = hasCerts
-                  ? createPodmanClient({
-                      apiUrl: newPodmanApiUrl,
-                      caCert: certs.caCert!,
-                      clientCert: certs.clientCert!,
-                      clientKey: certs.clientKey!,
-                    })
-                  : createPodmanClient({ apiUrl: newPodmanApiUrl });
-
-                // Use request() directly instead of ping() to see actual errors
-                await (testClient as any).request('/_ping');
-                testClient.destroy();
-
-                apiReady = true;
-                console.log(`[app-discovery] Podman API is ready (attempt ${attempt})`);
-                break;
-              } catch (e: any) {
-                const errorMsg = e.message || String(e);
-                const errorCode = e.code || e.errno || 'unknown';
-                const errorStatus = e.response?.status || '';
-                console.log(`[app-discovery] Attempt ${attempt} failed: [${errorCode}${errorStatus ? ` HTTP ${errorStatus}` : ''}] ${errorMsg}`);
-              }
-            }
-
-            if (!apiReady) {
-              console.warn('[app-discovery] Skipping - Podman API not ready after retries (will retry on next metrics collection)');
-            } else {
-              const { discoverApplicationsOnWorker } = await import('$lib/server/app-discovery');
-              discoveryResults = await discoverApplicationsOnWorker(workerId, userId);
-
-              if (discoveryResults.appsDiscovered > 0) {
-                console.log(
-                  `Discovered ${discoveryResults.appsDiscovered} existing applications, ` +
-                  `${discoveryResults.teamsCreated} teams, and ${discoveryResults.stacksCreated} stacks`
-                );
-              }
-            }
-          } catch (error: any) {
-            console.error('Application discovery failed (non-fatal):', error.message);
-            // Don't fail provisioning if discovery fails
-          }
+          console.log(
+            '[app-discovery] Skipping during provisioning - Traefik needs time to obtain Let\'s Encrypt certificates. ' +
+            'Discovery will run on the next metrics collection cycle.'
+          );
 
           return json({
             success: true,

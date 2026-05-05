@@ -301,35 +301,31 @@ else
 fi
 
 step "podman" bash -c '
-echo "--- 1. Installing Podman, openssl, and socat ---"
+echo "--- 1. Installing Podman, openssl, and netcat ---"
 if [ "$OS" = "debian" ]; then
     if command -v podman &> /dev/null; then
         echo "Podman already installed: $(podman --version)"
     else
         rm -f /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list 2>/dev/null
         apt-get update -q
-        apt-get install -y podman curl openssl 2>&1 | tail -5
+        apt-get install -y podman curl openssl netcat-openbsd 2>&1 | tail -5
         if ! command -v podman &> /dev/null; then
             add-apt-repository -y universe
             apt-get update -q
-            apt-get install -y podman curl openssl 2>&1 | tail -5
+            apt-get install -y podman curl openssl netcat-openbsd 2>&1 | tail -5
         fi
     fi
-    # Ensure socat is installed (needed for metrics HTTP endpoint)
-    if ! command -v socat &> /dev/null; then
+    # Ensure netcat is available
+    if ! command -v nc &> /dev/null; then
         apt-get update -q
-        apt-get install -y socat 2>&1 | tail -3
+        apt-get install -y netcat-openbsd 2>&1 | tail -3
     fi
 elif [ "$OS" = "rhel" ]; then
     dnf -y module enable podman
-    dnf -y install podman curl openssl socat
+    dnf -y install podman curl openssl nc
 fi
 podman --version || { echo "ERROR: Podman not installed"; exit 1; }
-if command -v socat &> /dev/null; then
-    echo "socat installed: $(socat -V 2>&1 | head -1)"
-else
-    echo "WARNING: socat not installed - metrics HTTP endpoint will not work"
-fi
+command -v nc &> /dev/null && echo "netcat installed: $(nc -h 2>&1 | head -1)" || echo "WARNING: netcat not found"
 '
 
 echo "--- 2. Configuring Podman registries ---"
@@ -522,13 +518,13 @@ for i in {1..15}; do
 done
 
 # Wait for metrics HTTP endpoint (needed for monitoring)
-for i in {1..10}; do
-  if curl -sf http://127.0.0.1:9100/ > /dev/null 2>&1; then
+for i in {1..15}; do
+  if curl -sf http://127.0.0.1:9100/ | grep -q cpu_percent; then
     echo "Metrics HTTP: READY"
     break
   fi
-  echo "Waiting for metrics HTTP endpoint... ($i/10)"
-  sleep 2
+  echo "Waiting for metrics HTTP endpoint... ($i/15)"
+  sleep 3
 done
 
 echo "=== Provisioning status ==="
@@ -536,7 +532,7 @@ podman ps --filter name=traefik --format "Traefik: {{.Status}}"
 podman ps --filter name=crowdsec --format "CrowdSec: {{.Status}}"
 curl -sf http://127.0.0.1:8080/_ping && echo "Podman API: ONLINE" || echo "Warning: Podman API not responding"
 ss -tlnp | grep ':443' && echo "Traefik HTTPS: ONLINE" || echo "Warning: port 443 not bound"
-curl -sf http://127.0.0.1:9100/ > /dev/null && echo "Metrics HTTP: ONLINE" || echo "Warning: metrics endpoint not responding"
+curl -sf http://127.0.0.1:9100/ | grep -q cpu_percent && echo "Metrics HTTP: ONLINE" || echo "Warning: metrics endpoint not responding"
 ss -tlnp | grep ':8081' && echo "CrowdSec LAPI: ONLINE" || echo "Warning: CrowdSec LAPI not ready"
 ss -tlnp | grep ':7422' && echo "CrowdSec AppSec: ONLINE" || echo "Warning: CrowdSec AppSec not ready"
 
@@ -669,25 +665,47 @@ AccuracySec=5s
 WantedBy=timers.target
 MTIMEREOF
 
-# Serve metrics JSON via a simple socat HTTP listener on localhost:9100
+# Serve metrics JSON via simple shell script (no containers needed - served via Traefik)
+cat > /usr/local/bin/rudder-metrics-http.sh << 'MHTTPSCRIPT'
+#!/bin/bash
+# Simple HTTP server using netcat to serve metrics JSON on localhost:9100
+while true; do
+  {
+    echo -ne "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
+    cat /tmp/rudder-metrics.json 2>/dev/null || echo '{}'
+  } | nc -l -p 9100 -q 1 || sleep 1
+done
+MHTTPSCRIPT
+chmod +x /usr/local/bin/rudder-metrics-http.sh
+
 cat > /etc/systemd/system/rudder-metrics-http.service << 'MHTTPEOF'
 [Unit]
-Description=Rudder metrics HTTP endpoint
+Description=Rudder metrics HTTP endpoint (shell script)
 After=network.target
 [Service]
-ExecStart=/bin/bash -c 'while true; do socat TCP-LISTEN:9100,reuseaddr,fork SYSTEM:"echo HTTP/1.1 200 OK; echo Content-Type: application/json; echo Connection: close; echo; cat /tmp/rudder-metrics.json 2>/dev/null || echo {}"; done'
+Type=simple
+ExecStart=/usr/local/bin/rudder-metrics-http.sh
 Restart=always
 RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rudder-metrics-http
 [Install]
 WantedBy=multi-user.target
 MHTTPEOF
 
 systemctl daemon-reload
-systemctl enable --now rudder-metrics.timer
-systemctl enable --now rudder-metrics-http.service
-# Run initial collection
+systemctl enable rudder-metrics.timer
+systemctl enable rudder-metrics-http.service
+
+# Run initial metrics collection
 /usr/local/bin/rudder-metrics.sh
-echo "Host metrics HTTP service installed (port 9100, collected every 30s)"
+
+# Start metrics services
+systemctl start rudder-metrics.timer
+systemctl start rudder-metrics-http.service
+
+echo "Host metrics HTTP service installed (shell-only, port 9100, collected every 30s)"
 
 WORKER_IP=$(hostname -I | awk '{print \$1}')
 echo "=== Provisioning complete for ${workerName} ==="
