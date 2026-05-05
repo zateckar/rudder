@@ -9,7 +9,6 @@ export function generateProvisioningScript(
   const bouncerKey = bouncerKeyParam || '';
   // Pre-compute all config files as base64 to avoid heredoc stdin issues
   const podmanApiDomain = baseDomain ? `podman-api.${baseDomain}` : '';
-  const traefikDashboardDomain = baseDomain ? `traefik.${baseDomain}` : '';
   const acmeEmail = baseDomain ? `admin@${baseDomain}` : `admin@${workerName}.local`;
 
   // Traefik static config - port 443 only, TLS-ALPN-01, CrowdSec bouncer plugin
@@ -25,9 +24,6 @@ providers:
   file:
     directory: /etc/traefik/dynamic
     watch: true
-
-api:
-  dashboard: true
 
 certificatesResolvers:
   letsencrypt:
@@ -70,18 +66,6 @@ accessLog:
         - crowdsec
         - security-headers
       service: podman-api
-    traefik-dashboard:
-      rule: "Host(\`${traefikDashboardDomain}\`) && (PathPrefix(\`/api\`) || PathPrefix(\`/dashboard\`))"
-      priority: 100
-      entrypoints:
-        - websecure
-      tls:
-        certResolver: letsencrypt
-        options: podman-mtls
-      middlewares:
-        - crowdsec
-        - security-headers
-      service: api@internal
   services:
     podman-api:
       loadBalancer:
@@ -160,9 +144,9 @@ WantedBy=multi-user.target
         bouncer:
           enabled: true
           crowdsecAppsecEnabled: true
-          crowdsecAppsecHost: "localhost:7422"
-          crowdsecLapiHost: "localhost:8081"
-          crowdsecLapiKey: "${bouncerKey}"
+          crowdsecAppsecHost: localhost:7422
+          crowdsecLapiHost: localhost:8081
+          crowdsecLapiKey: ${bouncerKey}
           crowdsecMode: stream
     security-headers:
       headers:
