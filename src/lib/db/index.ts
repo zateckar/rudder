@@ -1,5 +1,4 @@
 import { drizzle } from 'drizzle-orm/bun-sqlite';
-import { migrate } from 'drizzle-orm/bun-sqlite/migrator';
 import { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync } from 'fs';
 import { fileURLToPath } from 'url';
@@ -432,20 +431,6 @@ sqlite.run(`
 `);
 
 const db = drizzle(sqlite);
-
-// Auto-run drizzle migrations when the migrations folder is bundled with the
-// image (Dockerfile copies ./drizzle → /app/drizzle).  The inline
-// CREATE TABLE IF NOT EXISTS statements above handle fresh deployments where
-// the folder may be absent, so this is belt-and-suspenders for schema changes.
-const migrationsFolder = join(__dirname, '../../../drizzle');
-if (existsSync(migrationsFolder)) {
-  try {
-    migrate(db, { migrationsFolder });
-  } catch (e) {
-    // Log but don't crash — inline DDL above already ensures the schema exists.
-    console.error('[db] Migration warning (non-fatal):', e);
-  }
-}
 
 export { db };
 
