@@ -15,10 +15,18 @@ metadata:
     app.kubernetes.io/name: rudder
 type: Opaque
 stringData:
-  SESSION_SECRET: "CHANGE_ME_TO_A_RANDOM_64_CHAR_STRING"
-  ENCRYPTION_KEY: "CHANGE_ME_TO_A_RANDOM_32_CHAR_STRING"
+  # Set ADMIN_PASSWORD to auto-create the admin account on first boot.
+  # Username is always "admin". Once the user exists this var is ignored.
+  ADMIN_PASSWORD: "CHANGE_ME_TO_A_STRONG_PASSWORD"
+
+  # Optional — the app auto-generates these on first boot and persists them in
+  # the data volume.  Set them explicitly here if you want secrets that survive
+  # a PVC replacement or a move to a different cluster.
+  # SESSION_SECRET: ""
+  # ENCRYPTION_KEY: ""
+
+  # Optional: shared secret for worker self-registration
   WORKER_REGISTRATION_SECRET: ""
-  SEED_TOKEN: ""
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -32,7 +40,11 @@ data:
   PORT: "3000"
   DATABASE_URL: "file:/app/data/rudder.db"
   SESSION_MAX_AGE: "604800"
+  # Set to the external URL users reach the app on.
   PUBLIC_URL: "https://rudder.example.com"
+  # PROTOCOL_HEADER and HOST_HEADER are already baked into the Docker image
+  # (ENV PROTOCOL_HEADER=X-Forwarded-Proto / HOST_HEADER=X-Forwarded-Host).
+  # Override here only if your ingress uses non-standard header names.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -152,6 +164,7 @@ metadata:
     app.kubernetes.io/name: rudder
   annotations:
     nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
 spec:
   ingressClassName: nginx
   rules:

@@ -10,12 +10,6 @@
     loading = true;
   }
 
-  const providerStyles: Record<string, { icon: string; name: string }> = {
-    google: { icon: '🔵', name: 'Google' },
-    github: { icon: '⚫', name: 'GitHub' },
-    okta: { icon: '🔷', name: 'Okta' },
-    auth0: { icon: '🟠', name: 'Auth0' },
-  };
 </script>
 
 <div class="login-container">
@@ -60,26 +54,16 @@
       </button>
     </form>
 
-    {#if (data?.oidcProviders && data.oidcProviders.length > 0) || data?.genericOidc}
+    {#if data?.genericOidc}
       <div class="divider">
         <span>or continue with</span>
       </div>
 
       <div class="oidc-buttons">
-        {#each (data.oidcProviders ?? []) as provider}
-          {@const style = providerStyles[provider] || { icon: '🔐', name: provider }}
-          <a href="/api/auth/oidc/{provider}" class="oidc-button">
-            <span class="icon">{style.icon}</span>
-            <span>{style.name}</span>
-          </a>
-        {/each}
-
-        {#if data?.genericOidc}
-          <a href="/api/auth/oidc/generic" class="oidc-button oidc-generic">
-            <span class="icon">🔐</span>
-            <span>Login with {data.genericOidc.providerName}</span>
-          </a>
-        {/if}
+        <a href="/api/auth/oidc/generic" class="oidc-button oidc-generic">
+          <span class="icon">🔐</span>
+          <span>Login with {data.genericOidc.providerName}</span>
+        </a>
       </div>
     {/if}
 

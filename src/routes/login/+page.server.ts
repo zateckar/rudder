@@ -3,11 +3,8 @@ import { eq } from 'drizzle-orm';
 import { db } from '$lib/db';
 import { users, oidcConfig } from '$lib/db/schema';
 import { verifyPassword, createSession, setSessionCookie } from '$lib/auth';
-import { getEnabledProviders } from '$lib/auth/oidc';
 
 export const load = async ({ url }: { url: URL }) => {
-  const enabledProviders = getEnabledProviders();
-
   // Check if generic OIDC is enabled in DB
   const genericOidc = await db.select({
     enabled: oidcConfig.enabled,
@@ -16,7 +13,6 @@ export const load = async ({ url }: { url: URL }) => {
 
   return {
     error: url.searchParams.get('error'),
-    oidcProviders: enabledProviders,
     genericOidc: (genericOidc?.enabled) ? { providerName: genericOidc.providerName } : null,
   };
 };

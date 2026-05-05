@@ -70,10 +70,13 @@ export function getSessionIdFromCookies(cookies: Cookies): string | undefined {
 }
 
 export function setSessionCookie(cookies: Cookies, sessionId: string): void {
+  // Do not hard-code `secure` here — SvelteKit derives it from event.url.protocol,
+  // which the node adapter sets correctly when PROTOCOL_HEADER=X-Forwarded-Proto
+  // is present (baked into the Docker image).  This way it is always true behind
+  // an HTTPS reverse proxy and false during plain-HTTP local development.
   cookies.set(SESSION_COOKIE_NAME, sessionId, {
     path: '/',
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
     maxAge: env.SESSION_MAX_AGE,
   });

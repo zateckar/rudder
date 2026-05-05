@@ -1,4 +1,5 @@
 import { drizzle } from 'drizzle-orm/bun-sqlite';
+import { migrate } from 'drizzle-orm/bun-sqlite/migrator';
 import { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync } from 'fs';
 import { fileURLToPath } from 'url';
@@ -16,7 +17,152 @@ const sqlite = new Database(dbPath);
 sqlite.run('PRAGMA journal_mode = WAL');
 sqlite.run('PRAGMA foreign_keys = ON');
 
-// Ensure new tables exist (idempotent — safe to run on every startup)
+// ── Core tables (idempotent — migrations may not have run on fresh deploys) ──
+// These were previously only created via drizzle-kit migrations; inlining them
+// here ensures a fresh database always has the schema it needs on first boot.
+sqlite.run(`
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY NOT NULL,
+    username TEXT NOT NULL,
+    email TEXT NOT NULL,
+    password_hash TEXT,
+    full_name TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS users_username_unique ON users (username);
+  CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique ON users (email);
+
+  CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY NOT NULL,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS teams (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    created_by TEXT REFERENCES users(id),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS teams_name_unique ON teams (name);
+  CREATE UNIQUE INDEX IF NOT EXISTS teams_slug_unique ON teams (slug);
+
+  CREATE TABLE IF NOT EXISTS team_members (
+    team_id TEXT NOT NULL REFERENCES teams(id),
+    user_id TEXT NOT NULL REFERENCES users(id),
+    role TEXT NOT NULL DEFAULT 'member',
+    joined_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS workers (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    hostname TEXT NOT NULL,
+    ssh_port INTEGER NOT NULL DEFAULT 22,
+    ssh_user TEXT NOT NULL,
+    podman_api_url TEXT NOT NULL,
+    podman_ca_cert TEXT,
+    podman_client_cert TEXT,
+    podman_client_key TEXT,
+    base_domain TEXT,
+    crowdsec_bouncer_key TEXT,
+    status TEXT NOT NULL DEFAULT 'provisioning',
+    labels TEXT,
+    created_at INTEGER NOT NULL,
+    provisioned_at INTEGER,
+    last_seen_at INTEGER
+  );
+
+  CREATE TABLE IF NOT EXISTS applications (
+    id TEXT PRIMARY KEY NOT NULL,
+    team_id TEXT REFERENCES teams(id),
+    worker_id TEXT REFERENCES workers(id),
+    name TEXT NOT NULL,
+    description TEXT,
+    domain TEXT,
+    type TEXT NOT NULL DEFAULT 'single',
+    deployment_format TEXT NOT NULL DEFAULT 'compose',
+    manifest TEXT,
+    environment TEXT,
+    volumes TEXT,
+    restart_policy TEXT NOT NULL DEFAULT 'always',
+    rate_limit_avg INTEGER,
+    rate_limit_burst INTEGER,
+    auth_type TEXT NOT NULL DEFAULT 'none',
+    auth_config TEXT,
+    stack_id TEXT,
+    replicas INTEGER NOT NULL DEFAULT 1,
+    git_repo TEXT,
+    git_branch TEXT,
+    git_dockerfile TEXT,
+    healthcheck TEXT,
+    created_by TEXT REFERENCES users(id),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS containers (
+    id TEXT PRIMARY KEY NOT NULL,
+    application_id TEXT REFERENCES applications(id),
+    worker_id TEXT REFERENCES workers(id),
+    container_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    image TEXT NOT NULL,
+    status TEXT NOT NULL,
+    ports TEXT,
+    exposed_port INTEGER,
+    labels TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS volumes (
+    id TEXT PRIMARY KEY NOT NULL,
+    team_id TEXT REFERENCES teams(id),
+    worker_id TEXT REFERENCES workers(id),
+    name TEXT NOT NULL,
+    container_path TEXT NOT NULL,
+    size_limit INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS api_keys (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    key_hash TEXT NOT NULL,
+    team_id TEXT REFERENCES teams(id),
+    expires_at INTEGER,
+    last_used_at INTEGER,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS audit_logs (
+    id TEXT PRIMARY KEY NOT NULL,
+    user_id TEXT REFERENCES users(id),
+    team_id TEXT REFERENCES teams(id),
+    action TEXT NOT NULL,
+    resource_type TEXT NOT NULL,
+    resource_id TEXT,
+    details TEXT,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS user_oidc (
+    id TEXT PRIMARY KEY NOT NULL,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    provider TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    last_synced_at INTEGER
+  );
+`);
+
+// ── Additional tables added over time (idempotent) ───────────────────────────
 sqlite.run(`
   CREATE TABLE IF NOT EXISTS container_metrics (
     id TEXT PRIMARY KEY NOT NULL,
@@ -285,4 +431,53 @@ sqlite.run(`
   );
 `);
 
-export const db = drizzle(sqlite);
+const db = drizzle(sqlite);
+
+// Auto-run drizzle migrations when the migrations folder is bundled with the
+// image (Dockerfile copies ./drizzle → /app/drizzle).  The inline
+// CREATE TABLE IF NOT EXISTS statements above handle fresh deployments where
+// the folder may be absent, so this is belt-and-suspenders for schema changes.
+const migrationsFolder = join(__dirname, '../../../drizzle');
+if (existsSync(migrationsFolder)) {
+  try {
+    migrate(db, { migrationsFolder });
+  } catch (e) {
+    // Log but don't crash — inline DDL above already ensures the schema exists.
+    console.error('[db] Migration warning (non-fatal):', e);
+  }
+}
+
+export { db };
+
+// ── Auto-bootstrap admin user ─────────────────────────────────────────────────
+// Creates the admin user on first boot — no manual db:init required.
+//
+//   Production: set ADMIN_PASSWORD (required; app skips creation if not set)
+//   Development: defaults to password "admin" so the app is usable immediately
+{
+  const isProduction = process.env.NODE_ENV === 'production';
+  const password = process.env.ADMIN_PASSWORD ?? (isProduction ? null : 'admin');
+
+  if (password) {
+    const existingAdmin = sqlite
+      .query("SELECT id FROM users WHERE role = 'admin' LIMIT 1")
+      .get() as { id: string } | null;
+
+    if (!existingAdmin) {
+      const hashed = await Bun.password.hash(password, { algorithm: 'bcrypt', cost: 12 });
+      const now = Math.floor(Date.now() / 1000); // Unix seconds (Drizzle timestamp mode)
+      sqlite.run(
+        `INSERT INTO users (id, username, email, password_hash, full_name, role, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [crypto.randomUUID(), 'admin', 'admin@localhost', hashed, 'Administrator', 'admin', now, now]
+      );
+      if (isProduction) {
+        console.log('[db] Admin user "admin" created from ADMIN_PASSWORD.');
+      } else {
+        console.warn('[db] Created default admin user (username: admin, password: admin). Set ADMIN_PASSWORD for production.');
+      }
+    }
+  } else {
+    console.warn('[db] ADMIN_PASSWORD not set — skipping admin user creation. Set it to auto-create the admin account.');
+  }
+}

@@ -47,58 +47,94 @@ Container orchestration platform built with SvelteKit, Drizzle ORM, and SQLite. 
 - **Audit logging** -- full trail of all create/update/delete operations
 - **Azure backup/restore** -- automated daily backup to Azure Blob Storage with restore
 
+---
+
 ## Quick Start
 
 ### Prerequisites
 
-- Bun 1.0+
+- [Bun](https://bun.sh) 1.0+
 
-### Development
+### Local development
 
 ```sh
-# Install dependencies
 bun install
-
-# Copy environment file
-cp .env.example .env
-# Edit .env with your secrets
-
-# Initialize database
-bun run db:init
-
-# Run database migrations
-bun run db:migrate
-
-# Start development server
 bun run dev
 ```
 
-### Create Admin User
+On first start the app creates the database, runs all migrations, and bootstraps a default admin account:
 
-After first start, seed the admin user via the API (requires `SEED_TOKEN`):
+| Field | Value |
+|-------|-------|
+| Username | `admin` |
+| Password | `admin` |
 
-```sh
-curl -X POST http://localhost:7244/api/seed \
-  -H "Content-Type: application/json" \
-  -d '{"token": "your-seed-token-here"}'
-```
+Open <http://localhost:5173> and log in.
+
+> **Tip:** set `ADMIN_PASSWORD=yourpassword` in a `.env` file before the first start to use a custom password instead of the default.
+
+---
 
 ## Deployment
 
-### Docker
+Rudder is designed to run **always behind an HTTPS reverse proxy** (nginx, Caddy, Traefik, …). The Docker image has `X-Forwarded-Proto` / `X-Forwarded-Host` support baked in — no extra configuration needed for TLS termination.
+
+The database schema, secrets, and admin user are all initialised automatically on first boot.
+
+### Docker Compose
+
+**1. Create a `.env` file:**
+
+```env
+ADMIN_PASSWORD=yourpassword
+PUBLIC_URL=https://your-domain.example.com
+```
+
+**2. Start:**
 
 ```sh
-cp .env.example .env
-# Edit .env with production secrets
 docker compose up -d
+```
+
+That's it. The app is running and the admin account is ready.
+
+**Optional `.env` settings:**
+
+```env
+# Pin secrets to survive volume replacement (auto-generated otherwise)
+SESSION_SECRET=<64-char-random-string>
+ENCRYPTION_KEY=<64-char-random-string>
+
+# Session lifetime (default 7 days)
+SESSION_MAX_AGE=604800
+
+# OIDC providers
+OIDC_GOOGLE_CLIENT_ID=...
+OIDC_GOOGLE_CLIENT_SECRET=...
 ```
 
 ### Kubernetes
 
+**1. Copy and edit the manifest:**
+
 ```sh
-# Edit k8s/ manifests with your secrets, settings, and domain
-kubectl apply -f k8s/
+cp k8s/deployment.yaml my-deployment.yaml
 ```
+
+At minimum, update:
+- `ADMIN_PASSWORD` in the `rudder-secrets` Secret
+- `PUBLIC_URL` in the `rudder-config` ConfigMap
+- The `host:` field in the Ingress rule
+
+**2. Apply:**
+
+```sh
+kubectl apply -f my-deployment.yaml
+```
+
+The app initialises itself on first boot — no init jobs or manual steps required.
+
+> **Secrets persistence:** `SESSION_SECRET` and `ENCRYPTION_KEY` are auto-generated and stored in the PVC (`/app/data/.secrets.json`). Uncomment the corresponding fields in `rudder-secrets` if you want to pin them explicitly (recommended when moving data between clusters).
 
 ### CI/CD
 
@@ -106,17 +142,31 @@ The GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatical
 - Runs type checks on PRs
 - Builds and pushes Docker images to GHCR on merge to `main` or version tags
 
+---
+
 ## Environment Variables
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `SESSION_SECRET` | Yes | Random string (min 32 chars) for session signing |
-| `ENCRYPTION_KEY` | Yes | Random string (min 32 chars) for data encryption |
-| `PUBLIC_URL` | Yes | Public URL of the application |
-| `DATABASE_URL` | No | SQLite path (default: `file:./data/rudder.db`) |
-| `SESSION_MAX_AGE` | No | Session duration in seconds (default: 604800 = 7 days) |
-| `WORKER_REGISTRATION_SECRET` | For workers | Shared secret for worker self-registration |
-| `SEED_TOKEN` | For initial setup | Token to create first admin user |
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `ADMIN_PASSWORD` | **Yes** (production) | `admin` (dev only) | Password for the auto-created `admin` account. Set before first boot; ignored once the user exists. |
+| `PUBLIC_URL` | **Yes** | `http://localhost:5173` | External URL of the app — used in OIDC redirects and links. |
+| `SESSION_SECRET` | No | auto-generated | Min 32-char string for session integrity. Auto-generated and persisted in the data volume on first boot. |
+| `ENCRYPTION_KEY` | No | auto-generated | Min 32-char string for secret encryption (AES-256-GCM). Auto-generated and persisted on first boot. |
+| `SESSION_MAX_AGE` | No | `604800` (7 days) | Session lifetime in seconds. |
+| `DATABASE_URL` | No | `file:./data/rudder.db` | SQLite database path. |
+| `WORKER_REGISTRATION_SECRET` | No | — | Shared secret for worker self-registration. |
+| `OIDC_GOOGLE_CLIENT_ID` | No | — | Google OAuth client ID. |
+| `OIDC_GOOGLE_CLIENT_SECRET` | No | — | Google OAuth client secret. |
+| `OIDC_GITHUB_CLIENT_ID` | No | — | GitHub OAuth client ID. |
+| `OIDC_GITHUB_CLIENT_SECRET` | No | — | GitHub OAuth client secret. |
+| `OIDC_OKTA_CLIENT_ID` | No | — | Okta OIDC client ID. |
+| `OIDC_OKTA_CLIENT_SECRET` | No | — | Okta OIDC client secret. |
+| `OIDC_OKTA_DOMAIN` | No | — | Okta domain (e.g. `company.okta.com`). |
+| `OIDC_AUTH0_CLIENT_ID` | No | — | Auth0 client ID. |
+| `OIDC_AUTH0_CLIENT_SECRET` | No | — | Auth0 client secret. |
+| `OIDC_AUTH0_DOMAIN` | No | — | Auth0 domain (e.g. `company.auth0.com`). |
+
+---
 
 ## Architecture
 
@@ -129,13 +179,15 @@ SvelteKit Server (Bun runtime with Node adapter)
     |-- REST API + WebSocket (terminal)
     |-- K8s-compatible API (/k8s/) for kubectl access
     |
-    +-- SQLite (Drizzle ORM, 26 tables)
+    +-- SQLite (Drizzle ORM, WAL mode)
     |
     +-- Worker Nodes (via SSH + Podman REST API)
         |-- Traefik (reverse proxy, Let's Encrypt, CrowdSec plugin, OIDC plugin)
         |-- CrowdSec (WAF + IPS, behavioral banning)
         |-- Podman containers (user applications)
 ```
+
+---
 
 ## Security
 
@@ -149,6 +201,8 @@ SvelteKit Server (Bun runtime with Node adapter)
 - User-provided container labels sanitized to prevent Traefik route hijacking
 - Access logs rotated daily (logrotate, 14-day retention)
 - Traefik dashboard protected with mTLS (same as Podman API)
+
+---
 
 ## kubectl Integration
 
@@ -174,13 +228,13 @@ kubectl delete pod <pod-name>       # Remove container
 
 ```sh
 # Team-scoped access
-curl -X POST http://localhost:7244/api/kubeconfig \
+curl -X POST https://your-rudder/api/kubeconfig \
   -H "Content-Type: application/json" \
   -H "Cookie: session_id=YOUR_SESSION" \
   -d '{"teamId": "your-team-id"}'
 
 # Global admin access
-curl -X POST http://localhost:7244/api/kubeconfig \
+curl -X POST https://your-rudder/api/kubeconfig \
   -H "Content-Type: application/json" \
   -H "Cookie: session_id=YOUR_SESSION" \
   -d '{}'
@@ -188,7 +242,7 @@ curl -X POST http://localhost:7244/api/kubeconfig \
 
 2. Save the returned `kubeconfig` field to `~/.kube/config` (or use `KUBECONFIG` env var).
 
-3. Use kubectl:
+3. Use kubectl normally:
 
 ```sh
 kubectl get deployments
@@ -234,6 +288,7 @@ spec:
         - containerPort: 80
 ```
 
+---
 
 ## Tech Stack
 
