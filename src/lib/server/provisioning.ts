@@ -62,9 +62,6 @@ accessLog:
       tls:
         certResolver: letsencrypt
         options: podman-mtls
-      middlewares:
-        - crowdsec
-        - security-headers
       service: podman-api
   services:
     podman-api:

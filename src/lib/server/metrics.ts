@@ -193,7 +193,8 @@ async function collectWorkerMetrics(): Promise<void> {
       }).where(eq(workers.id, worker.id));
 
       // Run app discovery when worker first comes online after provisioning
-      if (pingStatus === 'online' && previousStatus !== 'online' && worker.provisionedAt) {
+      // Run app discovery when worker is online and recently provisioned but has no apps yet
+      if (pingStatus === 'online' && worker.provisionedAt) {
         const timeSinceProvisioning = now.getTime() - new Date(worker.provisionedAt).getTime();
         const recentlyProvisioned = timeSinceProvisioning < 3600000; // Within last hour
 
