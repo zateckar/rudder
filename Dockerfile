@@ -35,10 +35,6 @@ COPY --from=builder --chown=rudder:rudder /app/package.json ./
 # Copy drizzle migrations so the app can auto-migrate on startup
 COPY --from=builder --chown=rudder:rudder /app/drizzle ./drizzle
 
-# Copy init scripts so `bun run db:init` can be run from inside the pod
-# to seed the initial admin user on a fresh database.
-COPY --from=builder --chown=rudder:rudder /app/scripts ./scripts
-
 # Create data directory for SQLite database
 RUN mkdir -p /app/data && chown rudder:rudder /app/data
 
