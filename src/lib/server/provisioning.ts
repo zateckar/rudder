@@ -462,94 +462,61 @@ chmod 755 /var/lib/crowdsec/data
 echo "${crowdsecAcquisYmlB64}" | base64 -d > /etc/crowdsec/acquis.yaml
 echo "${crowdsecAppsecAcquisYmlB64}" | base64 -d > /etc/crowdsec/acquis.d/appsec.yaml
 echo "${crowdsecConfigLocalYmlB64}" | base64 -d > /etc/crowdsec/config.yaml.local
-echo "CrowdSec config written"
-
-podman stop crowdsec 2>/dev/null || true
-podman rm -f crowdsec 2>/dev/null || true
-podman pull docker.io/crowdsecurity/crowdsec:latest
-podman run -d \\
-  --name crowdsec \\
-  --restart always \\
-  --network host \\
-  -e "COLLECTIONS=crowdsecurity/traefik crowdsecurity/appsec-virtual-patching crowdsecurity/appsec-generic-rules crowdsecurity/base-http-scenarios crowdsecurity/whitelist-good-actors" \\
-  -e CUSTOM_HOSTNAME=crowdsec \\
-  -e "BOUNCER_KEY_traefik=${bouncerKey}" \\
-  -v /var/log/traefik:/var/log/traefik:ro \\
-  -v /etc/crowdsec/acquis.yaml:/etc/crowdsec/acquis.yaml:ro \\
-  -v /etc/crowdsec/acquis.d:/etc/crowdsec/acquis.d:ro \\
-  -v /var/lib/crowdsec/data:/var/lib/crowdsec/data \\
-  -v /etc/crowdsec:/etc/crowdsec \\
-  docker.io/crowdsecurity/crowdsec:latest
-echo "CrowdSec container started (LAPI :8081, AppSec :7422)"
+echo "CrowdSec config written (systemd will pull image and start container)"
 '
 
 step "traefik" bash -c '
-echo "--- 10. Pulling and starting Traefik container ---"
-podman stop traefik 2>/dev/null || true
-podman rm -f traefik 2>/dev/null || true
-podman pull docker.io/traefik:latest
-podman run -d \\
-  --name traefik \\
-  --restart always \\
-  --network host \\
-  -v /run/podman/podman.sock:/var/run/docker.sock:z \\
-  -v /etc/traefik/traefik.yml:/etc/traefik/traefik.yml:ro,z \\
-  -v /etc/traefik/dynamic:/etc/traefik/dynamic:ro,z \\
-  -v /etc/traefik/acme:/etc/traefik/acme:z \\
-  -v /etc/traefik/certs:/etc/traefik/certs:ro,z \\
-  -v /var/log/traefik:/var/log/traefik:z \\
-  docker.io/traefik:latest
-echo "Traefik container started"
+echo "--- 10. Traefik configuration ready ---"
+echo "Traefik config written (systemd will pull image and start container)"
 '
 
 step "systemd-services" bash -c '
-echo "--- 11. Creating systemd services ---"
+echo "--- 11. Starting systemd services ---"
 echo "${traefikServiceB64}" | base64 -d > /etc/systemd/system/traefik-container.service
 echo "${crowdsecServiceB64}" | base64 -d > /etc/systemd/system/crowdsec-container.service
 systemctl daemon-reload
 systemctl enable traefik-container.service
 systemctl enable crowdsec-container.service
+echo "Starting CrowdSec (will pull image in background)..."
+systemctl start crowdsec-container.service
+echo "Starting Traefik (will pull image in background)..."
+systemctl start traefik-container.service
+echo "Services started - images will be pulled by systemd"
 '
 
-echo "=== Waiting for services to be ready ==="
-# Wait for Podman API (localhost only)
-for i in {1..10}; do
+echo "=== Checking service status (images pulling in background) ==="
+# Quick check for Podman API (should be ready immediately)
+for i in {1..5}; do
   if curl -sf http://127.0.0.1:8080/_ping > /dev/null 2>&1; then
     echo "Podman API: READY"
     break
   fi
-  echo "Waiting for Podman API... ($i/10)"
-  sleep 2
+  echo "Waiting for Podman API... ($i/5)"
+  sleep 1
 done
 
-# Wait for Traefik to bind port 443
-for i in {1..15}; do
-  if ss -tlnp | grep -q ':443'; then
-    echo "Traefik: Port 443 READY"
-    break
-  fi
-  echo "Waiting for Traefik port 443... ($i/15)"
-  sleep 2
-done
-
-# Wait for metrics HTTP endpoint (needed for monitoring)
-for i in {1..15}; do
+# Quick check for metrics HTTP endpoint
+for i in {1..3}; do
   if curl -sf http://127.0.0.1:9100/ | grep -q cpu_percent; then
     echo "Metrics HTTP: READY"
     break
   fi
-  echo "Waiting for metrics HTTP endpoint... ($i/15)"
-  sleep 3
+  echo "Waiting for metrics HTTP endpoint... ($i/3)"
+  sleep 1
 done
 
+echo "Note: Traefik and CrowdSec are pulling images in background via systemd"
+echo "Port 443 will be available once image pulls complete (check with: systemctl status traefik-container)"
+
 echo "=== Provisioning status ==="
-podman ps --filter name=traefik --format "Traefik: {{.Status}}"
-podman ps --filter name=crowdsec --format "CrowdSec: {{.Status}}"
-curl -sf http://127.0.0.1:8080/_ping && echo "Podman API: ONLINE" || echo "Warning: Podman API not responding"
-ss -tlnp | grep ':443' && echo "Traefik HTTPS: ONLINE" || echo "Warning: port 443 not bound"
-curl -sf http://127.0.0.1:9100/ | grep -q cpu_percent && echo "Metrics HTTP: ONLINE" || echo "Warning: metrics endpoint not responding"
-ss -tlnp | grep ':8081' && echo "CrowdSec LAPI: ONLINE" || echo "Warning: CrowdSec LAPI not ready"
-ss -tlnp | grep ':7422' && echo "CrowdSec AppSec: ONLINE" || echo "Warning: CrowdSec AppSec not ready"
+systemctl is-active podman-api.service && echo "Podman API service: ACTIVE" || echo "Podman API service: starting"
+systemctl is-active traefik-container.service && echo "Traefik service: ACTIVE" || echo "Traefik service: starting (pulling image)"
+systemctl is-active crowdsec-container.service && echo "CrowdSec service: ACTIVE" || echo "CrowdSec service: starting (pulling image)"
+systemctl is-active rudder-metrics-http.service && echo "Metrics HTTP service: ACTIVE" || echo "Metrics HTTP service: starting"
+curl -sf http://127.0.0.1:8080/_ping > /dev/null 2>&1 && echo "Podman API: ONLINE" || echo "Podman API: not ready"
+curl -sf http://127.0.0.1:9100/ | grep -q cpu_percent && echo "Metrics HTTP: ONLINE" || echo "Metrics HTTP: not ready"
+podman ps --filter name=traefik --format "Traefik container: {{.Status}}" 2>/dev/null || echo "Traefik container: image pulling"
+podman ps --filter name=crowdsec --format "CrowdSec container: {{.Status}}" 2>/dev/null || echo "CrowdSec container: image pulling"
 
 echo ""
 if [ \$FAILURES -gt 0 ]; then

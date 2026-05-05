@@ -48,7 +48,7 @@ export async function executeSSHCommand(
     if (stdinInput) {
       // Use stdin for script input
       const result = execSync(
-        `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i "${tempKeyPath}" -p ${config.port} ${config.username}@${config.host} ${command}`,
+        `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=60 -i "${tempKeyPath}" -p ${config.port} ${config.username}@${config.host} ${command}`,
         { encoding: 'utf8', timeout: 900000, input: stdinInput }
       );
       stdout = result;
