@@ -428,7 +428,31 @@ export async function discoverApplicationsOnWorker(
           .get();
 
         if (existing) {
-          console.log(`[app-discovery] Application "${app.name}" already exists, skipping`);
+          // Ensure existing app has a succeeded deployment record so UI treats it as deployed
+          const hasDeployment = await db.select({ id: deployments.id })
+            .from(deployments)
+            .where(and(
+              eq(deployments.applicationId, existing.id),
+              eq(deployments.status, 'succeeded')
+            ))
+            .get();
+
+          if (!hasDeployment) {
+            await db.insert(deployments).values({
+              id: crypto.randomUUID(),
+              applicationId: existing.id,
+              version: 1,
+              manifest: existing.manifest,
+              environment: existing.environment,
+              volumes: existing.volumes,
+              image: app.containerInfo.image,
+              status: 'succeeded',
+              deployedBy: userId,
+              createdAt: new Date(),
+              finishedAt: new Date(),
+            });
+            console.log(`[app-discovery] Added deployment record for existing app "${existing.name}"`);
+          }
           continue;
         }
 
