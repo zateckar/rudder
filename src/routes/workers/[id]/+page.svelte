@@ -706,7 +706,7 @@
     </div>
     <div class="stat">
       <div class="stat-value">{data.containers.length}</div>
-      <div class="stat-label">Containers</div>
+      <div class="stat-label">Managed</div>
     </div>
     <div class="stat">
       <div class="stat-value">{data.metrics.length > 0 ? timeAgo(data.metrics[0]?.collectedAt) : '—'}</div>
@@ -747,7 +747,7 @@
         <div class="metric-value">{data.metrics[0]?.memPercent?.toFixed(1) ?? '—'}%</div>
       </div>
       <div class="metric-card">
-        <div class="metric-label">Containers</div>
+        <div class="metric-label">Running</div>
         {@html sparkline(data.metrics.map(m => m.containersRunning), 200, 40, '#38bdf8')}
         <div class="metric-value">{data.metrics[0]?.containersRunning ?? '—'}</div>
       </div>
@@ -831,7 +831,7 @@
           <h3>Podman Disk Usage</h3>
           <div class="stat-row compact">
             <div class="stat"><div class="stat-value">{formatBytes(systemInfo.disk.images)}</div><div class="stat-label">Images</div></div>
-            <div class="stat"><div class="stat-value">{formatBytes(systemInfo.disk.containers)}</div><div class="stat-label">Containers</div></div>
+            <div class="stat"><div class="stat-value">{formatBytes(systemInfo.disk.containers)}</div><div class="stat-label">Storage</div></div>
             <div class="stat"><div class="stat-value">{formatBytes(systemInfo.disk.volumes)}</div><div class="stat-label">Volumes</div></div>
             <div class="stat"><div class="stat-value">{formatBytes(systemInfo.disk.total)}</div><div class="stat-label">Podman Total</div></div>
           </div>

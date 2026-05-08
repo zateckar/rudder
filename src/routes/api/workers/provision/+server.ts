@@ -110,7 +110,7 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
             return json({ error: 'SSH connection failed' }, { status: 500 });
           }
 
-          const bouncerKey = randomBytes(20).toString('hex');
+          const bouncerKey = worker.crowdsecBouncerKey || randomBytes(20).toString('hex');
 
           const script = generateProvisioningScript(
             worker.name,

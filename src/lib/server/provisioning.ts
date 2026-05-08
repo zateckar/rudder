@@ -44,10 +44,10 @@ experimental:
   plugins:
     bouncer:
       moduleName: github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
-      version: v1.6.0
+      version: BOUNCER_VERSION_PLACEHOLDER
     traefikoidc:
       moduleName: github.com/lukaszraczylo/traefikoidc
-      version: v1.0.1
+      version: OIDC_VERSION_PLACEHOLDER
 
 log:
   level: INFO
@@ -149,8 +149,8 @@ WantedBy=multi-user.target
         bouncer:
           enabled: true
           crowdsecAppsecEnabled: true
-          crowdsecAppsecHost: localhost:7422
-          crowdsecLapiHost: localhost:8081
+          crowdsecAppsecHost: 127.0.0.1:7422
+          crowdsecLapiHost: 127.0.0.1:8081
           crowdsecLapiKey: ${bouncerKey}
           crowdsecMode: stream
     security-headers:
@@ -267,7 +267,7 @@ Requires=podman-api-socket.service
 Type=simple
 ExecStartPre=-/usr/bin/podman stop crowdsec
 ExecStartPre=-/usr/bin/podman rm -f crowdsec
-ExecStart=/usr/bin/podman run --name crowdsec --rm --network host -e "COLLECTIONS=crowdsecurity/traefik crowdsecurity/appsec-virtual-patching crowdsecurity/appsec-generic-rules crowdsecurity/base-http-scenarios crowdsecurity/whitelist-good-actors" -e CUSTOM_HOSTNAME=crowdsec -e "BOUNCER_KEY_traefik=${bouncerKey}" -v /var/log/traefik:/var/log/traefik:ro -v /etc/crowdsec/acquis.yaml:/etc/crowdsec/acquis.yaml:ro -v /etc/crowdsec/acquis.d:/etc/crowdsec/acquis.d:ro -v /var/lib/crowdsec/data:/var/lib/crowdsec/data -v /etc/crowdsec:/etc/crowdsec docker.io/crowdsecurity/crowdsec:latest
+ExecStart=/usr/bin/podman run --name crowdsec --rm --network host -e "COLLECTIONS=crowdsecurity/traefik crowdsecurity/appsec-default crowdsecurity/appsec-virtual-patching crowdsecurity/appsec-generic-rules crowdsecurity/base-http-scenarios crowdsecurity/whitelist-good-actors" -e CUSTOM_HOSTNAME=crowdsec -e "BOUNCER_KEY_traefik=${bouncerKey}" -v /var/log/traefik:/var/log/traefik:ro,z -v /etc/crowdsec/acquis.yaml:/etc/crowdsec/acquis.yaml:ro,z -v /etc/crowdsec/acquis.d:/etc/crowdsec/acquis.d:ro,z -v /etc/crowdsec/config.yaml.local:/etc/crowdsec/config.yaml.local:ro,z -v /var/lib/crowdsec/data:/var/lib/crowdsec/data:z docker.io/crowdsecurity/crowdsec:latest
 ExecStop=/usr/bin/podman stop crowdsec
 Restart=always
 RestartSec=10
@@ -406,15 +406,20 @@ podman stop crowdsec 2>/dev/null || true
 podman rm -f crowdsec 2>/dev/null || true
 fuser -k 8080/tcp 2>/dev/null || true
 sleep 3
-  # Clean CrowdSec database so the bouncer key gets freshly registered on startup
-  rm -f /var/lib/crowdsec/data/crowdsec.db 2>/dev/null || true
-  rm -f /etc/crowdsec/local_api_credentials.yaml 2>/dev/null || true
-  echo "CrowdSec state cleaned for fresh bouncer registration"
+  # We no longer wipe the CrowdSec DB on every provisioning to preserve decisions and state.
+  # The registration script will handle updating the bouncer key if it changed.
+  echo "CrowdSec state preserved"
 '
 
 step "mtls-certs" bash -c '
 echo "--- 6. Generating mTLS certificates for Podman API security ---"
 mkdir -p /etc/traefik/certs
+chmod 700 /etc/traefik/certs
+
+# Skip generation if CA key already exists
+if [ -f /etc/traefik/certs/ca.key ]; then
+    echo "mTLS certificates already exist, skipping generation"
+else
 
 # Generate CA key and certificate
 openssl genrsa -out /etc/traefik/certs/ca.key 4096 2>/dev/null
@@ -439,6 +444,7 @@ openssl x509 -req \\
 chmod 600 /etc/traefik/certs/*.key
 chmod 644 /etc/traefik/certs/*.crt
 echo "mTLS certificates generated"
+fi
 '
 
 step "podman-api" bash -c '
@@ -469,9 +475,25 @@ fi
 
 step "traefik-config" bash -c '
 echo "--- 8. Writing Traefik configuration ---"
+echo "Detecting latest plugin versions..."
+get_latest_github_tag() {
+  local repo=$1
+  local default=$2
+  local tag=$(curl -sI "https://github.com/${repo}/releases/latest" | grep -i location | sed 's/.*tag\/\(.*\)/\1/' | tr -d '\r')
+  if [ -z "$tag" ]; then echo "$default"; else echo "$tag"; fi
+}
+BOUNCER_VERSION=$(get_latest_github_tag "maxlerebourg/crowdsec-bouncer-traefik-plugin" "v1.10.1")
+OIDC_VERSION=$(get_latest_github_tag "lukaszraczylo/traefikoidc" "v1.0.1")
+echo "Using bouncer version: ${BOUNCER_VERSION}"
+echo "Using OIDC version: ${OIDC_VERSION}"
+
 mkdir -p /etc/traefik/dynamic /etc/traefik/acme /var/log/traefik
 echo "${traefikYmlB64}" | base64 -d > /etc/traefik/traefik.yml
 echo "traefik.yml written (port 443 only, TLS-ALPN-01, CrowdSec plugin)"
+sed -i "s/BOUNCER_VERSION_PLACEHOLDER/${BOUNCER_VERSION}/g" /etc/traefik/traefik.yml
+sed -i "s/OIDC_VERSION_PLACEHOLDER/${OIDC_VERSION}/g" /etc/traefik/traefik.yml
+echo "traefik.yml updated with latest plugin versions"
+
 
 echo "${podmanApiRoutingYmlB64}" | base64 -d > /etc/traefik/dynamic/podman-api.yml
 echo "podman-api.yml (mTLS-secured Podman API route) written"
