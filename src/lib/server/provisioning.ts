@@ -477,21 +477,21 @@ step "traefik-config" bash -c '
 echo "--- 8. Writing Traefik configuration ---"
 echo "Detecting latest plugin versions..."
 get_latest_github_tag() {
-  local repo=$1
-  local default=$2
-  local tag=$(curl -sI "https://github.com/${repo}/releases/latest" | grep -i location | sed 's/.*tag\/\(.*\)/\1/' | tr -d '\r')
-  if [ -z "$tag" ]; then echo "$default"; else echo "$tag"; fi
+  local repo=\$1
+  local default=\$2
+  local tag=\$(curl -sI "https://github.com/\${repo}/releases/latest" | grep -i location | sed 's/.*tag\/\(.*\)/\\1/' | tr -d '\\r')
+  if [ -z "\$tag" ]; then echo "\$default"; else echo "\$tag"; fi
 }
-BOUNCER_VERSION=$(get_latest_github_tag "maxlerebourg/crowdsec-bouncer-traefik-plugin" "v1.10.1")
-OIDC_VERSION=$(get_latest_github_tag "lukaszraczylo/traefikoidc" "v1.0.1")
-echo "Using bouncer version: ${BOUNCER_VERSION}"
-echo "Using OIDC version: ${OIDC_VERSION}"
+BOUNCER_VERSION=\$(get_latest_github_tag "maxlerebourg/crowdsec-bouncer-traefik-plugin" "v1.10.1")
+OIDC_VERSION=\$(get_latest_github_tag "lukaszraczylo/traefikoidc" "v1.0.1")
+echo "Using bouncer version: \${BOUNCER_VERSION}"
+echo "Using OIDC version: \${OIDC_VERSION}"
 
 mkdir -p /etc/traefik/dynamic /etc/traefik/acme /var/log/traefik
 echo "${traefikYmlB64}" | base64 -d > /etc/traefik/traefik.yml
 echo "traefik.yml written (port 443 only, TLS-ALPN-01, CrowdSec plugin)"
-sed -i "s/BOUNCER_VERSION_PLACEHOLDER/${BOUNCER_VERSION}/g" /etc/traefik/traefik.yml
-sed -i "s/OIDC_VERSION_PLACEHOLDER/${OIDC_VERSION}/g" /etc/traefik/traefik.yml
+sed -i "s/BOUNCER_VERSION_PLACEHOLDER/\${BOUNCER_VERSION}/g" /etc/traefik/traefik.yml
+sed -i "s/OIDC_VERSION_PLACEHOLDER/\${OIDC_VERSION}/g" /etc/traefik/traefik.yml
 echo "traefik.yml updated with latest plugin versions"
 
 
