@@ -62,6 +62,9 @@ const envSchema = z.object({
   SESSION_MAX_AGE: z.coerce.number().default(604800),
   ENCRYPTION_KEY: z.string().min(32),
   PUBLIC_URL: z.string().default('http://localhost:5173'),
+  OIDC_PROVIDER_URL: z.string().url().optional(),
+  OIDC_CLIENT_ID: z.string().optional(),
+  OIDC_CLIENT_SECRET: z.string().optional(),
 });
 
 function loadEnv() {

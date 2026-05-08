@@ -70,7 +70,7 @@ export const applications = sqliteTable('applications', {
   restartPolicy: text('restart_policy', { enum: ['no', 'on-failure', 'always', 'unless-stopped'] }).notNull().default('always'),
   rateLimitAvg: integer('rate_limit_avg'),
   rateLimitBurst: integer('rate_limit_burst'),
-  authType: text('auth_type', { enum: ['none', 'oidc'] }).notNull().default('none'),
+  authType: text('auth_type', { enum: ['none', 'oidc', 'global'] }).notNull().default('global'),
   authConfig: text('auth_config'),
   stackId: text('stack_id').references(() => stacks.id),
   replicas: integer('replicas').notNull().default(1),

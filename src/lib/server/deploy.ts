@@ -10,6 +10,7 @@ import { parseK8sManifest, validateK8sManifest } from '$lib/server/kubernetes';
 import { generateTraefikLabelsForApp, type AppMiddlewareOptions } from '$lib/server/provisioning';
 import { decrypt } from '$lib/server/encryption';
 import { ensureAppNetwork, joinNetwork, connectTraefik, teardownAppNetwork } from '$lib/server/networks';
+import { env } from '$lib/server/env';
 
 /** Parse memory string like "512m", "2g" -> bytes */
 function parseMemory(mem: string): number | undefined {
@@ -43,6 +44,11 @@ function buildMiddlewareOpts(app: any): AppMiddlewareOptions | undefined {
     } catch {
       // Invalid auth config, skip
     }
+  }
+
+  if (app.authType === 'none') {
+    opts.authType = 'none';
+    hasOpts = true;
   }
 
   // Extract health check path for Traefik routing
@@ -180,6 +186,8 @@ export async function executeApplicationDeploy(
 
   const worker = await db.select().from(workers).where(eq(workers.id, app.workerId)).get();
   if (!worker) return { success: false, message: 'Worker not found', statusCode: 404 };
+
+  const globalOidcEnabled = !!(env.OIDC_PROVIDER_URL && env.OIDC_CLIENT_ID && env.OIDC_CLIENT_SECRET && worker.baseDomain);
 
   if (!app.manifest) {
     return { success: false, message: 'No manifest found', statusCode: 400 };
@@ -339,6 +347,7 @@ export async function executeApplicationDeploy(
             .where(eq(containers.containerId, containerResult.Id));
         } catch (e: any) {
           console.error(`Failed to create container ${container.name}:`, e);
+          throw new Error(`Container '${container.name}' failed to deploy: ${e.message}`);
         }
       }
     } else if (app.type === 'single') {
@@ -486,7 +495,7 @@ export async function executeApplicationDeploy(
 
         if (replicaCount === 1) {
           // Standard single-container: full Traefik labels
-          const traefikLabels = generateTraefikLabelsForApp(app.name, appDomain, mainExposedPort ?? 80, true, middlewareOpts);
+          const traefikLabels = generateTraefikLabelsForApp(app.name, appDomain, mainExposedPort ?? 80, true, middlewareOpts, globalOidcEnabled);
           Object.assign(labels, traefikLabels);
         } else {
           // Multi-replica: each container advertises its own server URL under the same service name.
@@ -496,7 +505,7 @@ export async function executeApplicationDeploy(
 
           if (replicaIdx === 1) {
             // First replica carries router + middleware definitions
-            const traefikLabels = generateTraefikLabelsForApp(app.name, appDomain, mainExposedPort ?? 80, true, middlewareOpts);
+            const traefikLabels = generateTraefikLabelsForApp(app.name, appDomain, mainExposedPort ?? 80, true, middlewareOpts, globalOidcEnabled);
             Object.assign(labels, traefikLabels);
           }
         }
@@ -581,7 +590,7 @@ export async function executeApplicationDeploy(
             const portNum = parseInt(firstPort.split('/')[0]);
             const appDomain = app.domain || `${container.name}.${baseDomain}`;
             const k8sMiddlewareOpts = buildMiddlewareOpts(app);
-            const traefikLabels = generateTraefikLabelsForApp(container.name, appDomain, portNum, true, k8sMiddlewareOpts);
+            const traefikLabels = generateTraefikLabelsForApp(container.name, appDomain, portNum, true, k8sMiddlewareOpts, globalOidcEnabled);
             labels = { ...labels, ...traefikLabels };
           }
 
@@ -635,6 +644,7 @@ export async function executeApplicationDeploy(
             .where(eq(containers.containerId, containerResult.Id));
         } catch (e: any) {
           console.error(`Failed to create container ${container.name}:`, e);
+          throw new Error(`Container '${container.name}' failed to deploy: ${e.message}`);
         }
       }
     }

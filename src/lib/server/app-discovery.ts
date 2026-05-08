@@ -19,7 +19,7 @@ interface ParsedTraefikConfig {
   healthCheckPath: string | null;
   rateLimitAvg: number | null;
   rateLimitBurst: number | null;
-  authType: 'none' | 'oidc';
+  authType: 'none' | 'oidc' | 'global';
   authConfig: any | null;
 }
 
@@ -38,7 +38,7 @@ interface DiscoveredApp {
   restartPolicy: 'no' | 'on-failure' | 'always' | 'unless-stopped';
   rateLimitAvg: number | null;
   rateLimitBurst: number | null;
-  authType: 'none' | 'oidc';
+  authType: 'none' | 'oidc' | 'global';
   authConfig: string | null;
   stackId: string | null;
   replicas: number;
@@ -126,6 +126,15 @@ function parseTraefikLabels(labels: Record<string, string>): ParsedTraefikConfig
       config.authType = 'oidc';
       // Note: We can't recover clientSecret and sessionEncryptionKey from labels
       // so authConfig will remain null, requiring manual reconfiguration
+    }
+  }
+
+  // Detect Global OIDC
+  for (const [key, value] of Object.entries(labels)) {
+    if (key.includes('traefik.http.routers.') && key.endsWith('.middlewares')) {
+      if (value.includes('global-oidc@file')) {
+        config.authType = 'global';
+      }
     }
   }
 

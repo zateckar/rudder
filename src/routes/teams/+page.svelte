@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { enhance } from '$app/forms';
 
   let { data } = $props();
   let showCreateForm = $state(false);
@@ -33,22 +32,30 @@
 {#if showCreateForm}
   <div class="create-form">
     <form
-      method="POST"
-      action="/api/teams"
-      use:enhance={() => {
+      onsubmit={async (e) => {
+        e.preventDefault();
         creating = true;
-        return async ({ result, update }) => {
-          creating = false;
-          showCreateForm = false;
-          if (result.type === 'error' || (result as any).status >= 400) {
-            showMsg('error', 'Failed to create team');
-          } else {
+        const fd = new FormData(e.currentTarget as HTMLFormElement);
+        const name = fd.get('name')?.toString();
+        try {
+          const res = await fetch('/api/teams', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name }),
+          });
+          const body = await res.json();
+          if (res.ok) {
+            showCreateForm = false;
             showMsg('success', 'Team created');
-            await update();
-            // Reload teams from server data after form submission
             window.location.reload();
+          } else {
+            showMsg('error', body.error || 'Failed to create team');
           }
-        };
+        } catch (err: any) {
+          showMsg('error', err.message);
+        } finally {
+          creating = false;
+        }
       }}
     >
       <div class="form-group">

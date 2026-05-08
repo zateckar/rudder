@@ -41,23 +41,28 @@ export const POST = async ({ request, cookies }: { request: Request; cookies: an
     return json({ error: `Template "${name}" already exists for your team` }, { status: 400 });
   }
 
-  await db.insert(applicationTemplates).values({
-    id: crypto.randomUUID(),
-    name,
-    description,
-    sourceAppId: app.id,
-    teamId: app.teamId,
-    shared: false,
-    type: app.type,
-    deploymentFormat: app.deploymentFormat,
-    manifest: app.manifest,
-    environment: app.environment,
-    volumes: app.volumes,
-    restartPolicy: app.restartPolicy,
-    createdBy: userId || undefined,
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  });
+  try {
+    await db.insert(applicationTemplates).values({
+      id: crypto.randomUUID(),
+      name,
+      description,
+      sourceAppId: app.id,
+      teamId: app.teamId,
+      shared: false,
+      type: app.type,
+      deploymentFormat: app.deploymentFormat,
+      manifest: app.manifest,
+      environment: app.environment,
+      volumes: app.volumes,
+      restartPolicy: app.restartPolicy,
+      createdBy: userId || undefined,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  } catch (e: any) {
+    console.error('Failed to save template:', e);
+    return json({ error: `Failed to save template: ${e.message}` }, { status: 500 });
+  }
 
   return json({ success: true, message: `Template "${name}" created` });
 };

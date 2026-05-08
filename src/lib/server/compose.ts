@@ -1,4 +1,5 @@
 import { generateTraefikLabelsForApp } from './provisioning';
+import { env } from './env';
 
 export interface ComposeService {
   image?: string;
@@ -76,6 +77,7 @@ export function parseCompose(
   team?: { name: string; id: string },
   stack?: { name: string; id: string }
 ): ParsedContainer[] {
+  const globalOidcEnabled = !!(env.OIDC_PROVIDER_URL && env.OIDC_CLIENT_ID && env.OIDC_CLIENT_SECRET && baseDomain);
   const config = Bun.YAML.parse(manifest) as ComposeConfig;
   
   if (!config || !config.services) {
@@ -108,12 +110,30 @@ export function parseCompose(
     
     if (service.ports) {
       for (const portEntry of service.ports) {
+        let containerPort: string;
+        let proto = 'tcp';
+
         if (typeof portEntry === 'string') {
-          const [hostPort, containerPort] = portEntry.split(':');
-          ports[`${containerPort}/tcp`] = [{ hostPort }];
-        } else if (portEntry.published && portEntry.target) {
-          ports[`${portEntry.target}/tcp`] = [{ hostPort: String(portEntry.published) }];
+          // Formats: "CONTAINER", "HOST:CONTAINER", "IP:HOST:CONTAINER", "CONTAINER/proto"
+          const parts = portEntry.split(':');
+          // Last segment is always container port (possibly with /proto suffix)
+          const lastPart = parts[parts.length - 1];
+          const [portNum, portProto] = lastPart.split('/');
+          containerPort = portNum;
+          if (portProto) proto = portProto;
+        } else if (portEntry.target) {
+          containerPort = String(portEntry.target);
+          if (portEntry.protocol) proto = portEntry.protocol;
+        } else {
+          continue;
         }
+
+        if (!containerPort || isNaN(parseInt(containerPort))) continue;
+
+        // Always assign a random host port — ignore whatever the compose file specifies.
+        // Traefik handles external routing so host ports are implementation details.
+        const randomHostPort = String(30000 + Math.floor(Math.random() * 10000));
+        ports[`${containerPort}/${proto}`] = [{ hostPort: randomHostPort }];
       }
     }
 
@@ -121,13 +141,42 @@ export function parseCompose(
     
     if (service.volumes) {
       for (const volumeEntry of service.volumes) {
+        let source: string;
+        let target: string;
+        let options = 'rw';
+
         if (typeof volumeEntry === 'string') {
-          const [source, target, options = 'rw'] = volumeEntry.split(':');
-          volumes[source] = { bind: target, options };
-        } else if (volumeEntry.source && volumeEntry.target) {
-          const options = volumeEntry.read_only ? 'ro' : 'rw';
-          volumes[volumeEntry.source] = { bind: volumeEntry.target, options };
+          const parts = volumeEntry.split(':');
+          source = parts[0];
+          target = parts[1];
+          options = parts[2] ?? 'rw';
+        } else if (volumeEntry.target) {
+          source = volumeEntry.source ?? '';
+          target = volumeEntry.target;
+          options = volumeEntry.read_only ? 'ro' : 'rw';
+        } else {
+          continue;
         }
+
+        if (!target) continue;
+
+        // Relative paths (./data, ../data, ~/data) cannot be used as bind mounts on a
+        // remote worker. Convert them to auto-managed named Podman volumes instead.
+        // Named volumes are created automatically by Podman on first use and persist
+        // across redeployments because the name is deterministic (based on appId + service).
+        if (!source || source.startsWith('.') || source.startsWith('~')) {
+          const baseName = (source || target)
+            .replace(/^[.~\/]+/, '')        // strip leading ./ ~/ /
+            .replace(/[^a-zA-Z0-9]+/g, '-') // replace non-alphanumeric with -
+            .replace(/^-+|-+$/g, '')        // strip leading/trailing dashes
+            || 'vol';
+          const prefix = appId ? `rudder-${appId.slice(0, 8)}-` : 'rudder-';
+          source = `${prefix}${serviceName}-${baseName}`;
+        }
+        // Absolute paths (/host/path) are kept as bind mounts (user knows their worker FS).
+        // Named volumes (no '/' prefix, no relative prefix) are kept as-is (Podman auto-creates).
+
+        volumes[source] = { bind: target, options };
       }
     }
 
@@ -186,7 +235,9 @@ export function parseCompose(
           serviceName,
           fullDomain,
           parseInt(firstPortBinding),
-          true // Enable WebSocket for terminals
+          true, // Enable WebSocket for terminals
+          undefined, // middlewareOpts
+          globalOidcEnabled
         );
         
         // Merge Traefik labels with existing labels

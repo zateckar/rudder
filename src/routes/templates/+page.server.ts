@@ -31,14 +31,20 @@ export const load = async ({ cookies }: { cookies: any }) => {
           .where(
             or(
               inArray(applicationTemplates.teamId, teamIds),
-              eq(applicationTemplates.shared, true)
+              eq(applicationTemplates.shared, true),
+              eq(applicationTemplates.createdBy, userId)
             )
           )
           .all()
       : await db
           .select()
           .from(applicationTemplates)
-          .where(eq(applicationTemplates.shared, true))
+          .where(
+            or(
+              eq(applicationTemplates.shared, true),
+              eq(applicationTemplates.createdBy, userId)
+            )
+          )
           .all();
 
   const allTeams = await db.select().from(teams).all();
@@ -94,23 +100,28 @@ export const actions = {
       return fail(400, { error: `Template "${name}" already exists for your team` });
     }
 
-    await db.insert(applicationTemplates).values({
-      id: crypto.randomUUID(),
-      name,
-      description,
-      sourceAppId: app.id,
-      teamId: app.teamId,
-      shared: false,
-      type: app.type,
-      deploymentFormat: app.deploymentFormat,
-      manifest: app.manifest,
-      environment: app.environment,
-      volumes: app.volumes,
-      restartPolicy: app.restartPolicy,
-      createdBy: userId || undefined,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
+    try {
+      await db.insert(applicationTemplates).values({
+        id: crypto.randomUUID(),
+        name,
+        description,
+        sourceAppId: app.id,
+        teamId: app.teamId,
+        shared: false,
+        type: app.type,
+        deploymentFormat: app.deploymentFormat,
+        manifest: app.manifest,
+        environment: app.environment,
+        volumes: app.volumes,
+        restartPolicy: app.restartPolicy,
+        createdBy: userId || undefined,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+    } catch (e: any) {
+      console.error('Failed to save template:', e);
+      return fail(500, { error: `Failed to save template: ${e.message}` });
+    }
 
     return { success: true, message: `Template "${name}" created` };
   },

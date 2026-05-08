@@ -57,7 +57,7 @@
   // Security & Access Control
   let rateLimitAvg = $state('');
   let rateLimitBurst = $state('');
-  let authType = $state('none');
+  let authType = $state('global');
   let oidcProviderURL = $state('');
   let oidcClientID = $state('');
   let oidcClientSecret = $state('');
@@ -115,7 +115,7 @@
       // Security fields
       rateLimitAvg = app.rateLimitAvg ? String(app.rateLimitAvg) : '';
       rateLimitBurst = app.rateLimitBurst ? String(app.rateLimitBurst) : '';
-      authType = app.authType || 'none';
+      authType = app.authType || 'global';
       if (app.authConfig) {
         try {
           const cfg = JSON.parse(app.authConfig);
@@ -238,11 +238,6 @@
       {/if}
 
       <div class="form-row">
-        <div class="form-group">
-          <label for="domain">Domain (optional)</label>
-          <input type="text" id="domain" name="domain" value={app.domain ?? ''} placeholder="myapp.example.com" />
-          <p class="help-text">Leave empty to use auto-generated Traefik subdomain</p>
-        </div>
         <div class="form-group">
           <label for="stackId">Stack (optional)</label>
           <select id="stackId" name="stackId">
@@ -532,8 +527,9 @@
       <div class="form-group">
         <label for="authType">Auth Type</label>
         <select id="authType" bind:value={authType}>
+          <option value="global">Default (Global OIDC if configured)</option>
           <option value="none">None (public access)</option>
-          <option value="oidc">OIDC / OAuth 2.0</option>
+          <option value="oidc">Custom OIDC / OAuth 2.0</option>
         </select>
         <p class="help-text">Require users to authenticate via an identity provider before accessing this application</p>
       </div>

@@ -117,7 +117,13 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
             worker.sshPort,
             env.PUBLIC_URL,
             worker.baseDomain || undefined,
-            bouncerKey
+            bouncerKey,
+            env.OIDC_PROVIDER_URL ? {
+              providerURL: env.OIDC_PROVIDER_URL,
+              clientID: env.OIDC_CLIENT_ID || '',
+              clientSecret: env.OIDC_CLIENT_SECRET || '',
+              encryptionKey: env.ENCRYPTION_KEY
+            } : undefined
           );
           
           const result = await executeSSHCommand(

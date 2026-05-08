@@ -217,7 +217,7 @@ export const actions = {
     const rateLimitBurstStr = formData.get('rateLimitBurst')?.toString();
     const rateLimitAvg = rateLimitAvgStr ? parseInt(rateLimitAvgStr) || null : null;
     const rateLimitBurst = rateLimitBurstStr ? parseInt(rateLimitBurstStr) || null : null;
-    const authType = (formData.get('authType')?.toString() || 'none') as 'none' | 'oidc';
+    const authType = (formData.get('authType')?.toString() || 'global') as 'none' | 'oidc' | 'global';
     const authConfig = authType === 'oidc' ? (formData.get('authConfig')?.toString() || null) : null;
 
     if (authType === 'oidc' && authConfig) {

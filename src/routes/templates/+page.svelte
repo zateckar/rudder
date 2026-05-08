@@ -43,9 +43,9 @@
     showApplyModal = true;
   }
 
-  let myTemplates = $derived(data.templates.filter((t: any) => isOwner(t.teamId)));
+  let myTemplates = $derived(data.templates.filter((t: any) => isOwner(t.teamId) || t.createdBy === data.user?.id));
   let sharedTemplates = $derived(
-    data.templates.filter((t: any) => !isOwner(t.teamId) && t.shared)
+    data.templates.filter((t: any) => !isOwner(t.teamId) && t.shared && t.createdBy !== data.user?.id)
   );
 </script>
 
@@ -176,6 +176,8 @@
             submitting = false;
             if (result.type === 'failure') {
               actionError = (result.data as any)?.error || 'Failed to save template';
+            } else if (result.type === 'error') {
+              actionError = 'An unexpected error occurred';
             } else {
               showSaveModal = false;
               actionSuccess = 'Template saved';
@@ -233,6 +235,8 @@
             submitting = false;
             if (result.type === 'failure') {
               actionError = (result.data as any)?.error || 'Failed to deploy';
+            } else if (result.type === 'error') {
+              actionError = 'An unexpected error occurred';
             } else {
               showApplyModal = false;
               await update();

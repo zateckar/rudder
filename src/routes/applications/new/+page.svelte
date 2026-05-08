@@ -51,7 +51,7 @@
   // Security & Access Control
   let rateLimitAvg = $state('');
   let rateLimitBurst = $state('');
-  let authType = $state('none');
+  let authType = $state('global');
   let oidcProviderURL = $state('');
   let oidcClientID = $state('');
   let oidcClientSecret = $state('');
@@ -700,8 +700,9 @@ spec:
       <div class="form-group">
         <label for="authType">Auth Type</label>
         <select id="authType" bind:value={authType}>
+          <option value="global">Default (Global OIDC if configured)</option>
           <option value="none">None (public access)</option>
-          <option value="oidc">OIDC / OAuth 2.0</option>
+          <option value="oidc">Custom OIDC / OAuth 2.0</option>
         </select>
         <p class="help-text">Require users to authenticate via an identity provider before accessing this application</p>
       </div>

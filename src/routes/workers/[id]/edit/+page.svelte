@@ -173,11 +173,6 @@
     gap: 16px;
   }
 
-  .help-text {
-    font-size: 13px;
-    color: var(--text-secondary);
-  }
-
   .form-actions {
     display: flex;
     gap: 12px;

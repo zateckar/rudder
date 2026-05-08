@@ -1,9 +1,17 @@
+import { env } from './env';
+
 export function generateProvisioningScript(
   workerName: string,
   podmanApiPort: number = 22,
   controlPlaneUrl: string,
   baseDomain?: string,
-  bouncerKeyParam?: string
+  bouncerKeyParam?: string,
+  oidcConfig?: {
+    providerURL: string;
+    clientID: string;
+    clientSecret: string;
+    encryptionKey: string;
+  }
 ): string {
   // Use provided bouncer API key for CrowdSec
   const bouncerKey = bouncerKeyParam || '';
@@ -159,6 +167,33 @@ WantedBy=multi-user.target
           Permissions-Policy: "camera=(), microphone=(), geolocation=()"
 `;
 
+  // Global OIDC middleware (optional)
+  const globalOidcMiddlewareYml = (oidcConfig && baseDomain) ? `http:
+  middlewares:
+    global-oidc:
+      plugin:
+        traefikoidc:
+          providerURL: "${oidcConfig.providerURL}"
+          clientID: "${oidcConfig.clientID}"
+          clientSecret: "${oidcConfig.clientSecret}"
+          sessionEncryptionKey: "${oidcConfig.encryptionKey}"
+          callbackURL: "https://auth.${baseDomain}/oauth2/callback"
+          cookieDomain: ".${baseDomain}"
+          forceHTTPS: "true"
+          enablePKCE: "true"
+          logLevel: "info"
+  routers:
+    global-oidc-callback:
+      rule: "Host(\`auth.${baseDomain}\`) && Path(\`/oauth2/callback\`)"
+      entrypoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      service: noop@internal
+      middlewares:
+        - global-oidc
+` : '';
+
   // CrowdSec acquisition config (traefik access logs)
   const crowdsecAcquisYml = `filenames:
   - /var/log/traefik/access.log
@@ -258,6 +293,7 @@ registries = []
   const podmanApiRoutingYmlB64 = Buffer.from(podmanApiRoutingYml).toString('base64');
   const metricsRoutingYmlB64 = baseDomain ? Buffer.from(metricsRoutingYml).toString('base64') : '';
   const crowdsecMiddlewareYmlB64 = Buffer.from(crowdsecMiddlewareYml).toString('base64');
+  const globalOidcMiddlewareYmlB64 = globalOidcMiddlewareYml ? Buffer.from(globalOidcMiddlewareYml).toString('base64') : '';
   const crowdsecAcquisYmlB64 = Buffer.from(crowdsecAcquisYml).toString('base64');
   const crowdsecAppsecAcquisYmlB64 = Buffer.from(crowdsecAppsecAcquisYml).toString('base64');
   const crowdsecConfigLocalYmlB64 = Buffer.from(crowdsecConfigLocalYml).toString('base64');
@@ -448,6 +484,11 @@ fi
 
 echo "${crowdsecMiddlewareYmlB64}" | base64 -d > /etc/traefik/dynamic/crowdsec.yml
 echo "crowdsec.yml (CrowdSec AppSec middleware) written"
+
+if [ -n "${globalOidcMiddlewareYmlB64}" ]; then
+  echo "${globalOidcMiddlewareYmlB64}" | base64 -d > /etc/traefik/dynamic/global-oidc.yml
+  echo "global-oidc.yml (Global OIDC middleware) written"
+fi
 
 cat > /etc/logrotate.d/traefik << '"'"'LOGROTATEEOF'"'"'
 /var/log/traefik/access.log {
@@ -795,6 +836,7 @@ export interface AppMiddlewareOptions {
     scopes?: string[];
   };
   healthCheckPath?: string;   // Traefik health check endpoint, e.g. /health
+  useGlobalAuth?: boolean;    // whether to apply global OIDC auth (default: true if global OIDC is configured)
 }
 
 export function generateTraefikLabelsForApp(
@@ -802,7 +844,8 @@ export function generateTraefikLabelsForApp(
   domain: string,
   targetPort: number,
   enableWebSocket: boolean = true,
-  middlewareOpts?: AppMiddlewareOptions
+  middlewareOpts?: AppMiddlewareOptions,
+  globalOidcEnabled: boolean = false
 ): Record<string, string> {
   const safeName = appName.replace(/[^a-zA-Z0-9-]/g, '-');
 
@@ -837,6 +880,15 @@ export function generateTraefikLabelsForApp(
     labels[`traefik.http.middlewares.${rlName}.ratelimit.burst`] = String(middlewareOpts.rateLimitBurst || middlewareOpts.rateLimitAvg * 2);
     labels[`traefik.http.middlewares.${rlName}.ratelimit.period`] = '1s';
     middlewares.push(`${rlName}@docker`);
+  }
+
+  // Global OIDC auth (if enabled and not overridden by per-app OIDC or explicitly disabled)
+  const hasPerAppOidc = middlewareOpts?.authType === 'oidc' && middlewareOpts.authConfig;
+  const isPublicApp = middlewareOpts?.authType === 'none';
+  const useGlobalAuth = middlewareOpts?.useGlobalAuth !== false;
+
+  if (globalOidcEnabled && !hasPerAppOidc && !isPublicApp && useGlobalAuth) {
+    middlewares.push('global-oidc@file');
   }
 
   // Per-app OIDC auth (traefik-oidc plugin)
@@ -898,9 +950,10 @@ export function generateTraefikLabelsForApps(
   apps: Array<{ name: string; subdomain: string; port: number; enableWs?: boolean }>
 ): Record<string, string> {
   const allLabels: Record<string, string> = {};
+  const globalOidcEnabled = !!(env.OIDC_PROVIDER_URL && env.OIDC_CLIENT_ID && env.OIDC_CLIENT_SECRET && baseDomain);
   for (const app of apps) {
     const fullDomain = app.subdomain + '.' + baseDomain;
-    const labels = generateTraefikLabelsForApp(app.name, fullDomain, app.port, app.enableWs);
+    const labels = generateTraefikLabelsForApp(app.name, fullDomain, app.port, app.enableWs, undefined, globalOidcEnabled);
     Object.assign(allLabels, labels);
   }
   return allLabels;
