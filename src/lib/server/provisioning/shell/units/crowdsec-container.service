@@ -6,9 +6,9 @@ Requires=podman-api-socket.service
 
 [Service]
 Type=simple
-ExecStartPre=-/usr/bin/podman stop crowdsec
+ExecStartPre=-/usr/bin/podman stop -t 10 crowdsec
 ExecStartPre=-/usr/bin/podman rm -f crowdsec
-ExecStart=/usr/bin/podman run --name crowdsec --rm --network host \
+ExecStart=/usr/bin/podman run --name crowdsec --network host \
   -e "COLLECTIONS=crowdsecurity/traefik crowdsecurity/appsec-default crowdsecurity/appsec-virtual-patching crowdsecurity/appsec-generic-rules crowdsecurity/base-http-scenarios crowdsecurity/whitelist-good-actors" \
   -e CUSTOM_HOSTNAME=crowdsec \
   -e "BOUNCER_KEY_traefik={{BOUNCER_KEY}}" \

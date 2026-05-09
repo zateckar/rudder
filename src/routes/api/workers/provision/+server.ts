@@ -135,7 +135,7 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
             script
           );
 
-          console.log('SSH exec result - exitCode:', result.exitCode, 'stdout:', result.stdout.substring(0, 500), 'stderr:', result.stderr.substring(0, 200));
+          console.log('SSH exec result - exitCode:', result.exitCode, 'stdout (last 2000):', result.stdout.substring(Math.max(0, result.stdout.length - 2000)), 'stderr:', result.stderr.substring(0, 500));
 
           if (result.exitCode !== 0) {
             console.error('Provisioning failed:', result.stderr);

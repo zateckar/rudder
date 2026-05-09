@@ -98,6 +98,8 @@ step_cleanup_old() {
   systemctl reset-failed traefik-container.service 2>/dev/null || true
   systemctl stop crowdsec-container.service 2>/dev/null || true
   systemctl reset-failed crowdsec-container.service 2>/dev/null || true
+  systemctl stop rudder-crowdsec-register.service 2>/dev/null || true
+  systemctl reset-failed rudder-crowdsec-register.service 2>/dev/null || true
   systemctl stop podman-api-http.service 2>/dev/null || true
   systemctl stop podman-api.service 2>/dev/null || true
   systemctl stop podman-api-socket.service 2>/dev/null || true
@@ -107,6 +109,8 @@ step_cleanup_old() {
   podman stop crowdsec 2>/dev/null || true
   podman rm -f crowdsec 2>/dev/null || true
   fuser -k 8080/tcp 2>/dev/null || true
+  fuser -k 8081/tcp 2>/dev/null || true
+  fuser -k 7422/tcp 2>/dev/null || true
   sleep 3
   # We no longer wipe the CrowdSec DB on every provisioning to preserve decisions and state.
   # The registration script will handle updating the bouncer key if it changed.
@@ -262,11 +266,44 @@ step_systemd_services() {
   systemctl daemon-reload
   systemctl enable traefik-container.service
   systemctl enable crowdsec-container.service
-  echo "Starting CrowdSec (will pull image in background)..."
+  echo "Pulling container images..."
+  podman pull docker.io/crowdsecurity/crowdsec:${CROWDSEC_VERSION} 2>&1 || echo "WARNING: Failed to pull CrowdSec image, using cached"
+  podman pull docker.io/traefik:${TRAEFIK_VERSION} 2>&1 || echo "WARNING: Failed to pull Traefik image, using cached"
+  echo "Starting CrowdSec..."
   systemctl start crowdsec-container.service
-  echo "Starting Traefik (will pull image in background)..."
+  sleep 5
+  # Verify CrowdSec is running; if not, clean stale data and retry
+  if ! podman ps --filter name=crowdsec --format "{{.Names}}" 2>/dev/null | grep -q crowdsec; then
+    echo "WARNING: CrowdSec container not running after first attempt"
+    echo "CrowdSec container logs:"
+    podman logs --tail 30 crowdsec 2>&1 || true
+    echo "CrowdSec service journal:"
+    journalctl -u crowdsec-container.service --no-pager -n 20 2>/dev/null || true
+    echo "Cleaning CrowdSec state and retrying..."
+    systemctl stop crowdsec-container.service 2>/dev/null || true
+    systemctl reset-failed crowdsec-container.service 2>/dev/null || true
+    podman rm -f crowdsec 2>/dev/null || true
+    rm -f /var/lib/crowdsec/data/crowdsec.db 2>/dev/null || true
+    rm -f /var/lib/crowdsec/data/crowdsec.db-wal 2>/dev/null || true
+    rm -f /var/lib/crowdsec/data/crowdsec.db-shm 2>/dev/null || true
+    fuser -k 8081/tcp 2>/dev/null || true
+    fuser -k 7422/tcp 2>/dev/null || true
+    sleep 2
+    systemctl start crowdsec-container.service
+    sleep 5
+    if podman ps --filter name=crowdsec --format "{{.Names}}" 2>/dev/null | grep -q crowdsec; then
+      echo "CrowdSec container: running (after retry with clean state)"
+    else
+      echo "WARNING: CrowdSec still not running after retry"
+      podman logs --tail 30 crowdsec 2>&1 || true
+      journalctl -u crowdsec-container.service --no-pager -n 30 2>/dev/null || true
+    fi
+  else
+    echo "CrowdSec container: running"
+  fi
+  echo "Starting Traefik..."
   systemctl start traefik-container.service
-  echo "Services started - images will be pulled by systemd"
+  echo "Services started"
 }
 
 # ── Execute steps ──────────────────────────────────────────────────────
