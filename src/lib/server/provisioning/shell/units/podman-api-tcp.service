@@ -1,0 +1,18 @@
+[Unit]
+Description=Podman REST API (TCP for control plane)
+Documentation=man:podman-system-service(1)
+After=network.target podman-api-socket.service
+Wants=network.target
+Requires=podman-api-socket.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/podman system service --time=0 tcp://127.0.0.1:8080
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=podman-api-tcp
+
+[Install]
+WantedBy=multi-user.target

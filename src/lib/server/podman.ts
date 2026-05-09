@@ -342,11 +342,19 @@ export class PodmanClient {
     }
     params.append('stream', 'false');
     try {
-      return await this.request<any[]>(`/libpod/events?${params}`);
+      const res = await this.request<any>(`/libpod/events?${params}`);
+      if (typeof res === 'string') {
+        return res.split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+      }
+      return Array.isArray(res) ? res : [res];
     } catch (err: any) {
       // Fallback to Docker-compatible endpoint if libpod returns 404
       if (err?.message?.includes('404')) {
-        return await this.request<any[]>(`/events?${params}`);
+        const res = await this.request<any>(`/events?${params}`);
+        if (typeof res === 'string') {
+          return res.split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+        }
+        return Array.isArray(res) ? res : [res];
       }
       throw err;
     }

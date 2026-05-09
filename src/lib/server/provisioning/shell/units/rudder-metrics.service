@@ -1,0 +1,5 @@
+[Unit]
+Description=Rudder host metrics collector
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rudder-metrics.sh

@@ -1,0 +1,5 @@
+[Unit]
+Description=Rudder Netavark stale rule cleanup
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rudder-netavark-cleanup.sh

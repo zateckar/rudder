@@ -1,0 +1,24 @@
+http:
+  middlewares:
+    global-oidc:
+      plugin:
+        traefikoidc:
+          providerURL: "{{OIDC_PROVIDER_URL}}"
+          clientID: "{{OIDC_CLIENT_ID}}"
+          clientSecret: "{{OIDC_CLIENT_SECRET}}"
+          sessionEncryptionKey: "{{OIDC_ENCRYPTION_KEY}}"
+          callbackURL: "https://auth.{{BASE_DOMAIN}}/oauth2/callback"
+          cookieDomain: ".{{BASE_DOMAIN}}"
+          forceHTTPS: "true"
+          enablePKCE: "true"
+          logLevel: "info"
+  routers:
+    global-oidc-callback:
+      rule: "Host(`auth.{{BASE_DOMAIN}}`) && Path(`/oauth2/callback`)"
+      entrypoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      service: noop@internal
+      middlewares:
+        - global-oidc

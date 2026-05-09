@@ -1,0 +1,15 @@
+http:
+  routers:
+    rudder-metrics:
+      rule: "Host(`metrics.{{BASE_DOMAIN}}`)"
+      entryPoints:
+        - websecure
+      service: rudder-metrics
+      tls:
+        certResolver: letsencrypt
+        options: podman-mtls
+  services:
+    rudder-metrics:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:9100"

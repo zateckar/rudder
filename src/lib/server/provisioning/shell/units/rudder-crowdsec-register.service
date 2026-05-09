@@ -1,0 +1,12 @@
+[Unit]
+Description=Register CrowdSec bouncer key for Traefik
+After=crowdsec-container.service
+Requires=crowdsec-container.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rudder-crowdsec-register.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rudder-crowdsec-register

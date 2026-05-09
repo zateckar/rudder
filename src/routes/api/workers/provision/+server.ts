@@ -114,8 +114,6 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
 
           const script = generateProvisioningScript(
             worker.name,
-            worker.sshPort,
-            env.PUBLIC_URL,
             worker.baseDomain || undefined,
             bouncerKey,
             env.OIDC_PROVIDER_URL ? {

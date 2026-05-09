@@ -1,0 +1,24 @@
+http:
+  routers:
+    podman-api:
+      rule: "Host(`{{PODMAN_API_DOMAIN}}`)"
+      priority: 100
+      entrypoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+        options: podman-mtls
+      service: podman-api
+  services:
+    podman-api:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:8080"
+
+tls:
+  options:
+    podman-mtls:
+      clientAuth:
+        caFiles:
+          - /etc/traefik/certs/ca.crt
+        clientAuthType: RequireAndVerifyClientCert

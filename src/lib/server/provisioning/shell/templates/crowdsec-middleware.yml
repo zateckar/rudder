@@ -1,0 +1,23 @@
+http:
+  middlewares:
+    crowdsec:
+      plugin:
+        bouncer:
+          enabled: true
+          crowdsecAppsecEnabled: true
+          crowdsecAppsecHost: 127.0.0.1:7422
+          crowdsecLapiHost: 127.0.0.1:8081
+          crowdsecLapiKey: {{BOUNCER_KEY}}
+          crowdsecMode: stream
+    security-headers:
+      headers:
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        frameDeny: true
+        contentTypeNosniff: true
+        browserXssFilter: true
+        referrerPolicy: "strict-origin-when-cross-origin"
+        customResponseHeaders:
+          X-Robots-Tag: "noindex, nofollow"
+          Permissions-Policy: "camera=(), microphone=(), geolocation=()"

@@ -1,0 +1,13 @@
+[Unit]
+Description=Rudder metrics HTTP endpoint (shell script)
+After=network.target
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/rudder-metrics-http.sh
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rudder-metrics-http
+[Install]
+WantedBy=multi-user.target

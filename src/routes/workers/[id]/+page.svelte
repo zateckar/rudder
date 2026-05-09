@@ -14,6 +14,7 @@
 
   let events = $state<any[]>([]);
   let allSyslogEvents = $state<any[]>([]);
+  let syslogMessage = $state('');
   let eventsLoading = $state(false);
   let eventFilter = $state('');
   let eventSince = $state('24h');
@@ -89,9 +90,14 @@
         };
         const sinceStr = sinceMap[eventSince] || '24 hours ago';
         const sp = new URLSearchParams({ since: sinceStr, lines: '1000' });
-        const res = await fetch(`/api/workers/${workerId}/syslog?${sp}`);
+        const res = await fetch(`/api/workers/${workerId}/syslog?${sp}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sshPrivateKey: terminalSshKey })
+        });
         const body = await res.json();
         allSyslogEvents = body.events || [];
+        syslogMessage = body.message || '';
         applySyslogFilter();
       } else {
         const sinceMap: Record<string, string> = {
@@ -105,6 +111,7 @@
         const res = await fetch(`/api/workers/${workerId}/events?${sp}`);
         const body = await res.json();
         events = body.events || [];
+        syslogMessage = '';
         allSyslogEvents = [];
       }
     } catch {
@@ -934,6 +941,11 @@
   {:else if activeTab === 'events'}
     <div class="section">
       <div class="events-toolbar">
+        {#if eventSource === 'syslog' && terminalSshKey}
+          <button class="btn-tiny" onclick={() => { terminalSshKey = ''; loadEvents(); }} title="Clear SSH key from memory">
+            Clear Key
+          </button>
+        {/if}
         <select bind:value={eventSource} onchange={() => loadEvents()}>
           <option value="podman">Podman Events</option>
           <option value="syslog">System Logs</option>
@@ -969,7 +981,14 @@
       {#if eventsLoading}
         <p class="loading">Loading events…</p>
       {:else if events.length === 0}
-        <p class="empty">No events found</p>
+        <div class="empty-state">
+          <p class="empty">{syslogMessage || 'No events found'}</p>
+          {#if eventSource === 'syslog' && !terminalSshKey}
+            <button class="btn-tiny btn-accent" onclick={() => { showTerminalKeyPrompt = true; }}>
+              Provide SSH Key
+            </button>
+          {/if}
+        </div>
       {:else if eventSource === 'syslog'}
         <div class="events-list">
           {#each events as ev}
@@ -1516,6 +1535,15 @@
     color: var(--text-muted); font-size: 13px; font-style: italic;
     text-align: center; padding: 24px;
   }
+
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 0;
+  }
+  .empty-state .empty { padding: 0 0 16px 0; }
 
   /* ── Config grid ───────────────────────────────── */
 

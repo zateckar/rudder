@@ -1,0 +1,20 @@
+[Unit]
+Description=Traefik reverse proxy (Podman container)
+After=network-online.target podman-api-socket.service podman-api-tcp.service
+Wants=network-online.target
+Requires=podman-api-socket.service
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/podman stop traefik
+ExecStartPre=-/usr/bin/podman rm -f traefik
+ExecStart=/usr/bin/podman run --name traefik --rm --network host -v /run/podman/podman.sock:/var/run/docker.sock:z -v /etc/traefik/traefik.yml:/etc/traefik/traefik.yml:ro,z -v /etc/traefik/dynamic:/etc/traefik/dynamic:ro,z -v /etc/traefik/acme:/etc/traefik/acme:z -v /etc/traefik/certs:/etc/traefik/certs:ro,z -v /var/log/traefik:/var/log/traefik:z docker.io/traefik:latest
+ExecStop=/usr/bin/podman stop traefik
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=traefik
+
+[Install]
+WantedBy=multi-user.target

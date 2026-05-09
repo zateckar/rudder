@@ -5,7 +5,15 @@ import { workers, users } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { executeSSHCommand, type SSHConnectionConfig } from '$lib/server/ssh';
 
-export const GET: RequestHandler = async ({ params, url, cookies }) => {
+export const GET: RequestHandler = async (event) => {
+  return handleRequest(event);
+};
+
+export const POST: RequestHandler = async (event) => {
+  return handleRequest(event);
+};
+
+async function handleRequest({ params, url, cookies, request }: any) {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
 
   const sessionId = getSessionIdFromCookies(cookies);
@@ -18,12 +26,70 @@ export const GET: RequestHandler = async ({ params, url, cookies }) => {
   const worker = await db.select().from(workers).where(eq(workers.id, params.id)).get();
   if (!worker) return json({ error: 'Worker not found' }, { status: 404 });
 
-  return json({
-    events: [],
-    count: 0,
-    message: 'Syslog via SSH is disabled. SSH keys are no longer stored server-side. Use the Terminal feature to run journalctl commands directly on the worker.',
-  });
-};
+  let sshPrivateKey: string | null = null;
+  if (request.method === 'POST') {
+    try {
+      const body = await request.json();
+      sshPrivateKey = body.sshPrivateKey;
+    } catch {
+      // Ignore parse errors
+    }
+  }
+
+  if (!sshPrivateKey) {
+    return json({
+      events: [],
+      count: 0,
+      message: 'SSH key required to fetch system logs. Please provide an SSH key.',
+    });
+  }
+
+  const since = url.searchParams.get('since') || '24 hours ago';
+  const lines = url.searchParams.get('lines') || '1000';
+
+  try {
+    const sshConfig: SSHConnectionConfig = {
+      host: worker.hostname,
+      port: worker.sshPort,
+      username: worker.sshUser,
+      privateKey: sshPrivateKey,
+    };
+
+    // Fetch logs using journalctl in JSON format
+    const command = `journalctl --since "${since}" -n ${lines} --output=json --no-pager`;
+    const result = await executeSSHCommand(sshConfig, command);
+
+    if (result.exitCode !== 0) {
+      throw new Error(result.stderr || `journalctl failed with exit code ${result.exitCode}`);
+    }
+
+    const events = result.stdout
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((l) => {
+        try {
+          const raw = JSON.parse(l);
+          return {
+            timestamp: new Date(parseInt(raw.__REALTIME_TIMESTAMP) / 1000).toLocaleString(),
+            priority: classifyPriority(raw.MESSAGE || ''),
+            message: raw.MESSAGE,
+            unit: raw._SYSTEMD_UNIT,
+            raw,
+          };
+        } catch {
+          return null;
+        }
+      })
+      .filter((e) => e !== null);
+
+    return json({
+      events: events.reverse(), // Newest first
+      count: events.length,
+    });
+  } catch (error: any) {
+    return json({ error: error.message }, { status: 500 });
+  }
+}
 
 function classifyPriority(msg: string): string {
   const lower = msg.toLowerCase();

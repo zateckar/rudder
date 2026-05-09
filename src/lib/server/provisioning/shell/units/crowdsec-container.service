@@ -1,0 +1,20 @@
+[Unit]
+Description=CrowdSec WAF and IPS (Podman container)
+After=network-online.target podman-api-socket.service podman-api-tcp.service
+Wants=network-online.target
+Requires=podman-api-socket.service
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/podman stop crowdsec
+ExecStartPre=-/usr/bin/podman rm -f crowdsec
+ExecStart=/usr/bin/podman run --name crowdsec --rm --network host -e "COLLECTIONS=crowdsecurity/traefik crowdsecurity/appsec-default crowdsecurity/appsec-virtual-patching crowdsecurity/appsec-generic-rules crowdsecurity/base-http-scenarios crowdsecurity/whitelist-good-actors" -e CUSTOM_HOSTNAME=crowdsec -e "BOUNCER_KEY_traefik={{BOUNCER_KEY}}" -v /var/log/traefik:/var/log/traefik:ro,z -v /etc/crowdsec/acquis.yaml:/etc/crowdsec/acquis.yaml:ro,z -v /etc/crowdsec/acquis.d:/etc/crowdsec/acquis.d:ro,z -v /etc/crowdsec/config.yaml.local:/etc/crowdsec/config.yaml.local:ro,z -v /var/lib/crowdsec/data:/var/lib/crowdsec/data:z docker.io/crowdsecurity/crowdsec:latest
+ExecStop=/usr/bin/podman stop crowdsec
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=crowdsec
+
+[Install]
+WantedBy=multi-user.target

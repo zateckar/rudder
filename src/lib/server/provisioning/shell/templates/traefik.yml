@@ -1,0 +1,36 @@
+entryPoints:
+  websecure:
+    address: ":443"
+
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false
+    watch: true
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: {{ACME_EMAIL}}
+      storage: /etc/traefik/acme/acme.json
+      tlsChallenge: {}
+
+experimental:
+  plugins:
+    bouncer:
+      moduleName: github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
+      version: BOUNCER_VERSION_PLACEHOLDER
+    traefikoidc:
+      moduleName: github.com/lukaszraczylo/traefikoidc
+      version: OIDC_VERSION_PLACEHOLDER
+
+log:
+  level: INFO
+
+accessLog:
+  filePath: /var/log/traefik/access.log
+  format: json
+  bufferingSize: 100

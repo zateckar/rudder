@@ -1,0 +1,17 @@
+[Unit]
+Description=Podman REST API (Unix socket for Traefik)
+Documentation=man:podman-system-service(1)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/podman system service --time=0 unix:///run/podman/podman.sock
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=podman-api-socket
+
+[Install]
+WantedBy=multi-user.target

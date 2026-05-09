@@ -1,0 +1,14 @@
+http:
+  routers:
+    podman-api:
+      rule: "PathPrefix(`/`)"
+      priority: 1
+      entrypoints:
+        - websecure
+      tls: {}
+      service: podman-api
+  services:
+    podman-api:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:8080"
