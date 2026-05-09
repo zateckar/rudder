@@ -53,6 +53,11 @@ export const workers = sqliteTable('workers', {
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   provisionedAt: integer('provisioned_at', { mode: 'timestamp' }),
   lastSeenAt: integer('last_seen_at', { mode: 'timestamp' }),
+  oidcEnabled: integer('oidc_enabled', { mode: 'boolean' }).notNull().default(false),
+  oidcProviderUrl: text('oidc_provider_url'),
+  oidcClientId: text('oidc_client_id'),
+  oidcClientSecret: text('oidc_client_secret'),
+  oidcEncryptionKey: text('oidc_encryption_key'),
 });
 
 export const applications = sqliteTable('applications', {

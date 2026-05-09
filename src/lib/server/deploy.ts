@@ -187,7 +187,7 @@ export async function executeApplicationDeploy(
   const worker = await db.select().from(workers).where(eq(workers.id, app.workerId)).get();
   if (!worker) return { success: false, message: 'Worker not found', statusCode: 404 };
 
-  const globalOidcEnabled = !!(env.OIDC_PROVIDER_URL && env.OIDC_CLIENT_ID && env.OIDC_CLIENT_SECRET && worker.baseDomain);
+  const globalOidcEnabled = !!(worker.oidcEnabled && worker.oidcProviderUrl && worker.oidcClientId && worker.oidcClientSecret && worker.baseDomain);
 
   if (!app.manifest) {
     return { success: false, message: 'No manifest found', statusCode: 400 };
@@ -283,7 +283,8 @@ export async function executeApplicationDeploy(
         baseDomain,
         app.id,
         team ? { name: team.name, id: team.id } : undefined,
-        stack ? { name: stack.name, id: stack.id } : undefined
+        stack ? { name: stack.name, id: stack.id } : undefined,
+        globalOidcEnabled
       );
 
       // Create isolated network for this app/stack

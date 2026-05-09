@@ -4,7 +4,7 @@
 
   let { data } = $props();
 
-  let activeTab = $state<'overview' | 'metrics' | 'events' | 'containers' | 'images' | 'networks' | 'traefik' | 'crowdsec' | 'terminal'>('overview');
+  let activeTab = $state<'overview' | 'metrics' | 'events' | 'containers' | 'images' | 'networks' | 'traefik' | 'crowdsec' | 'terminal' | 'settings'>('overview');
   let systemInfo = $state<any>(null);
   let loadingInfo = $state(false);
 
@@ -40,6 +40,20 @@
   let crowdsecLoading = $state(false);
 
   let terminalReady = $state(false);
+
+  // ── OIDC Settings state ──────────────────────────────────────────
+  let oidcEnabled = $state(false);
+  let oidcProviderUrl = $state('');
+  let oidcClientId = $state('');
+  let oidcClientSecret = $state('');
+  let oidcClientSecretSet = $state(false);
+  let oidcEncryptionKeySet = $state(false);
+  let oidcSaving = $state(false);
+  let oidcSaveMsg = $state('');
+  let oidcLoaded = $state(false);
+  let showOidcApplyPrompt = $state(false);
+  let oidcApplying = $state(false);
+  let oidcApplyMsg = $state('');
 
   // Images tab state
   let images = $state<any[]>([]);
@@ -303,6 +317,7 @@
     if (tab === 'networks' && !networksLoaded && !networksLoading) loadNetworks();
     if (tab === 'traefik' && !traefikLoading) loadTraefik();
     if (tab === 'crowdsec' && !crowdsecLoading) loadCrowdsec();
+    if (tab === 'settings' && !oidcLoaded) loadOidcSettings();
     if (tab === 'terminal') {
       if (terminalSshKey) {
         initTerminal();
@@ -376,6 +391,83 @@
       pruning = false;
     }
   }
+
+  // ── OIDC Settings functions ────────────────────────────────
+  async function loadOidcSettings() {
+    if (oidcLoaded) return;
+    try {
+      const res = await fetch(`/api/workers/${workerId}/oidc`);
+      const body = await res.json();
+      oidcEnabled = body.oidcEnabled ?? false;
+      oidcProviderUrl = body.oidcProviderUrl ?? '';
+      oidcClientId = body.oidcClientId ?? '';
+      oidcClientSecretSet = body.oidcClientSecretSet ?? false;
+      oidcEncryptionKeySet = body.oidcEncryptionKeySet ?? false;
+      oidcLoaded = true;
+    } catch { /* ignore */ }
+  }
+
+  async function saveOidcSettings() {
+    oidcSaving = true;
+    oidcSaveMsg = '';
+    try {
+      const payload: Record<string, any> = { oidcEnabled, oidcProviderUrl, oidcClientId };
+      if (oidcClientSecret) payload.oidcClientSecret = oidcClientSecret;
+      const res = await fetch(`/api/workers/${workerId}/oidc`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Save failed');
+      oidcClientSecretSet = data.oidcClientSecretSet;
+      oidcEncryptionKeySet = data.oidcEncryptionKeySet;
+      oidcClientSecret = '';
+      oidcSaveMsg = 'Saved. Redeploy applications or click “Apply to Traefik” to activate immediately.';
+    } catch (e: any) {
+      oidcSaveMsg = 'Error: ' + e.message;
+    } finally {
+      oidcSaving = false;
+    }
+  }
+
+  async function applyOidcToTraefik(sshKey: string) {
+    showOidcApplyPrompt = false;
+    oidcApplying = true;
+    oidcApplyMsg = '';
+    try {
+      const res = await fetch(`/api/workers/${workerId}/oidc/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sshPrivateKey: sshKey }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Apply failed');
+      oidcApplyMsg = data.message || 'Applied successfully.';
+    } catch (e: any) {
+      oidcApplyMsg = 'Error: ' + e.message;
+    } finally {
+      oidcApplying = false;
+    }
+  }
+
+  async function clearOidcSettings() {
+    if (!confirm('Remove all OIDC configuration from this worker? Applications set to "Default" auth will become public.')) return;
+    try {
+      const res = await fetch(`/api/workers/${workerId}/oidc`, { method: 'DELETE' });
+      if (!res.ok) throw new Error((await res.json()).error || 'Delete failed');
+      oidcEnabled = false;
+      oidcProviderUrl = '';
+      oidcClientId = '';
+      oidcClientSecret = '';
+      oidcClientSecretSet = false;
+      oidcEncryptionKeySet = false;
+      oidcSaveMsg = 'OIDC configuration cleared.';
+    } catch (e: any) {
+      oidcSaveMsg = 'Error: ' + e.message;
+    }
+  }
+
 
   async function deleteWorker() {
     if (!confirm(`Delete worker "${data.worker.name}"? This cannot be undone.`)) return;
@@ -772,6 +864,7 @@
     <button class:active={activeTab === 'traefik'} onclick={() => switchTab('traefik')} title="Traefik reverse proxy">Traefik</button>
     <button class:active={activeTab === 'crowdsec'} onclick={() => switchTab('crowdsec')} title="CrowdSec WAF and IPS">CrowdSec</button>
     <button class:active={activeTab === 'terminal'} onclick={() => switchTab('terminal')} title="Interactive host terminal">Terminal</button>
+    <button class:active={activeTab === 'settings'} onclick={() => switchTab('settings')} title="Worker settings and OIDC">Settings</button>
   </div>
 
   <!-- Overview tab -->
@@ -1372,10 +1465,9 @@
         </div>
       {/if}
     {/if}
-  {/if}
 
   <!-- Terminal tab -->
-  {#if activeTab === 'terminal'}
+  {:else if activeTab === 'terminal'}
     {#if showTerminalKeyPrompt}
       <SshKeyPrompt
         workerId={workerId}
@@ -1400,6 +1492,126 @@
         {/if}
         <div bind:this={termEl} class="terminal-wrapper" style:display={termError || termConnecting ? 'none' : 'block'}></div>
       </div>
+    {/if}
+
+  <!-- Settings tab -->
+  {:else if activeTab === 'settings'}
+    <div class="section">
+      <div class="section-header">
+        <h3>Global OIDC Authentication</h3>
+        <span class="section-hint">Protect all applications on this worker via an identity provider</span>
+      </div>
+      <p class="oidc-intro">
+        When enabled, applications with <strong>Auth Type = “Default”</strong> will require users to sign in
+        before they can access them. Register the following callback URL with your identity provider:
+        <code class="mono-inline">https://auth.{data.worker.baseDomain ?? '<base-domain>'}/oauth2/callback</code>
+      </p>
+
+      <div class="settings-form">
+        <div class="form-field">
+          <label class="toggle-label">
+            <input type="checkbox" bind:checked={oidcEnabled} />
+            <span>Enable Global OIDC</span>
+          </label>
+        </div>
+
+        {#if oidcEnabled || oidcProviderUrl}
+          <div class="oidc-fields">
+            <div class="form-field">
+              <label for="oidcProviderUrl">Provider URL <span class="req">*</span></label>
+              <input type="url" id="oidcProviderUrl"
+                placeholder="https://accounts.google.com"
+                bind:value={oidcProviderUrl} />
+              <p class="field-hint">OIDC discovery endpoint (Google, Azure AD, Okta, Keycloak, etc.)</p>
+            </div>
+
+            <div class="form-row-2">
+              <div class="form-field">
+                <label for="oidcClientId">Client ID <span class="req">*</span></label>
+                <input type="text" id="oidcClientId"
+                  placeholder="your-client-id"
+                  bind:value={oidcClientId} />
+              </div>
+              <div class="form-field">
+                <label for="oidcClientSecret">Client Secret</label>
+                <input type="password" id="oidcClientSecret"
+                  placeholder={oidcClientSecretSet ? '••••• (saved — paste to replace)' : 'your-client-secret'}
+                  bind:value={oidcClientSecret} />
+                {#if oidcClientSecretSet && !oidcClientSecret}
+                  <p class="field-hint">A secret is saved. Leave blank to keep it.</p>
+                {/if}
+              </div>
+            </div>
+
+            <div class="form-field">
+              <label for="oidcEncKey">Session Encryption Key</label>
+              <input type="password" id="oidcEncKey" disabled
+                placeholder={oidcEncryptionKeySet ? '••••• (auto-managed)' : 'Will be auto-generated on save'} />
+              <p class="field-hint">Auto-generated 32-byte key for encrypting session cookies. Managed automatically.</p>
+            </div>
+          </div>
+        {/if}
+
+        <div class="form-actions">
+          <button class="btn btn-primary" onclick={saveOidcSettings} disabled={oidcSaving}>
+            {oidcSaving ? 'Saving…' : 'Save Settings'}
+          </button>
+          {#if oidcEnabled && oidcClientSecretSet}
+            <button class="btn btn-secondary" onclick={() => showOidcApplyPrompt = true} disabled={oidcApplying}
+              title="Push OIDC config to Traefik on this worker via SSH (takes effect immediately, no redeploy needed)">
+              {oidcApplying ? 'Applying…' : 'Apply to Traefik'}
+            </button>
+          {/if}
+          {#if oidcClientSecretSet || oidcProviderUrl}
+            <button class="btn btn-outline-danger" onclick={clearOidcSettings}>Clear OIDC</button>
+          {/if}
+        </div>
+
+        {#if oidcSaveMsg}
+          <p class="settings-msg" class:is-error={oidcSaveMsg.startsWith('Error')}>{oidcSaveMsg}</p>
+        {/if}
+        {#if oidcApplyMsg}
+          <p class="settings-msg" class:is-error={oidcApplyMsg.startsWith('Error')}>{oidcApplyMsg}</p>
+        {/if}
+      </div>
+    </div>
+
+    <div class="section">
+      <h3>How It Works</h3>
+      <div class="help-grid">
+        <div class="help-item">
+          <div class="help-icon">🛡️</div>
+          <div>
+            <strong>Auth Type = Default</strong>
+            <p>Protected by this worker’s global OIDC config. Users must sign in.</p>
+          </div>
+        </div>
+        <div class="help-item">
+          <div class="help-icon">🔓</div>
+          <div>
+            <strong>Auth Type = None</strong>
+            <p>Always public. OIDC is bypassed for this application.</p>
+          </div>
+        </div>
+        <div class="help-item">
+          <div class="help-icon">🔑</div>
+          <div>
+            <strong>Auth Type = Custom OIDC</strong>
+            <p>Uses per-app credentials. Independent of this worker setting.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {#if showOidcApplyPrompt}
+      <SshKeyPrompt
+        workerId={workerId}
+        title="Apply OIDC Config to Traefik"
+        description="Provide your SSH private key to push the updated OIDC middleware configuration to this worker. Traefik hot-reloads the change within seconds — no restart or redeploy needed."
+        submitLabel="Apply"
+        onsubmit={(key) => applyOidcToTraefik(key)}
+        oncancel={() => showOidcApplyPrompt = false}
+      />
     {/if}
   {/if}
 </div>
@@ -1851,4 +2063,41 @@
   }
 
   .text-muted { color: var(--text-muted); }
+
+  /* ── Settings tab ────────────────────────────── */
+  .settings-form { display: flex; flex-direction: column; gap: 16px; }
+  .form-field { display: flex; flex-direction: column; gap: 4px; }
+  .form-field label { font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .form-field input[type='text'],
+  .form-field input[type='url'],
+  .form-field input[type='password'] {
+    padding: 8px 10px; background: var(--bg-overlay, rgba(0,0,0,0.2));
+    border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.9rem; width: 100%;
+  }
+  .form-field input:disabled { opacity: 0.55; cursor: not-allowed; }
+  .form-row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .toggle-label { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 0.92rem; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--text); }
+  .toggle-label input[type='checkbox'] { width: 16px; height: 16px; cursor: pointer; }
+  .oidc-fields { display: flex; flex-direction: column; gap: 14px; padding: 16px; background: var(--bg-overlay, rgba(0,0,0,0.1)); border-radius: 8px; border: 1px solid var(--border); }
+  .field-hint { font-size: 11px; color: var(--text-muted); margin: 2px 0 0; }
+  .oidc-intro { font-size: 13px; color: var(--text-secondary); line-height: 1.5; margin-bottom: 4px; }
+  .mono-inline { font-family: var(--font-mono); font-size: 12px; background: var(--bg-overlay, rgba(0,0,0,0.2)); padding: 2px 6px; border-radius: 4px; display: inline-block; margin-top: 4px; word-break: break-all; }
+  .req { color: var(--red, #f87171); }
+  .form-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding-top: 4px; }
+  .btn { padding: 7px 16px; border-radius: 6px; border: 1px solid transparent; cursor: pointer; font-size: 0.88rem; font-weight: 500; transition: all 0.15s; }
+  .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn-primary:hover:not(:disabled) { opacity: 0.88; }
+  .btn-secondary { background: var(--bg-raised); color: var(--text); border-color: var(--border); }
+  .btn-secondary:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .btn-outline-danger { background: transparent; color: var(--red-text, #f87171); border-color: color-mix(in srgb, var(--red, #f87171) 40%, transparent); }
+  .btn-outline-danger:hover { background: var(--red-subtle, rgba(248,113,113,0.1)); border-color: var(--red, #f87171); }
+  .settings-msg { margin-top: 4px; padding: 8px 12px; border-radius: 6px; font-size: 0.87rem; background: rgba(50,200,100,0.08); color: var(--text); border: 1px solid rgba(50,200,100,0.2); }
+  .settings-msg.is-error { background: rgba(200,50,50,0.08); color: var(--red-text, #f87171); border-color: rgba(200,50,50,0.2); }
+  .help-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; margin-top: 4px; }
+  .help-item { display: flex; gap: 12px; align-items: flex-start; }
+  .help-icon { font-size: 20px; flex-shrink: 0; margin-top: 2px; }
+  .help-item strong { display: block; font-size: 13px; margin-bottom: 2px; }
+  .help-item p { font-size: 12px; color: var(--text-muted); margin: 0; line-height: 1.4; }
+
 </style>

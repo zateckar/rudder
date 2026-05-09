@@ -75,9 +75,10 @@ export function parseCompose(
   baseDomain?: string,
   appId?: string,
   team?: { name: string; id: string },
-  stack?: { name: string; id: string }
+  stack?: { name: string; id: string },
+  workerOidcEnabled?: boolean
 ): ParsedContainer[] {
-  const globalOidcEnabled = !!(env.OIDC_PROVIDER_URL && env.OIDC_CLIENT_ID && env.OIDC_CLIENT_SECRET && baseDomain);
+  const globalOidcEnabled = workerOidcEnabled ?? !!(env.OIDC_PROVIDER_URL && env.OIDC_CLIENT_ID && env.OIDC_CLIENT_SECRET && baseDomain);
   const config = Bun.YAML.parse(manifest) as ComposeConfig;
   
   if (!config || !config.services) {

@@ -112,16 +112,20 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
 
           const bouncerKey = worker.crowdsecBouncerKey || randomBytes(20).toString('hex');
 
+          const workerOidcConfig = (worker.oidcEnabled && worker.oidcProviderUrl && worker.oidcClientId && worker.oidcClientSecret)
+            ? {
+                providerURL: worker.oidcProviderUrl,
+                clientID: worker.oidcClientId,
+                clientSecret: worker.oidcClientSecret,
+                encryptionKey: worker.oidcEncryptionKey || '',
+              }
+            : undefined;
+
           const script = generateProvisioningScript(
             worker.name,
             worker.baseDomain || undefined,
             bouncerKey,
-            env.OIDC_PROVIDER_URL ? {
-              providerURL: env.OIDC_PROVIDER_URL,
-              clientID: env.OIDC_CLIENT_ID || '',
-              clientSecret: env.OIDC_CLIENT_SECRET || '',
-              encryptionKey: env.ENCRYPTION_KEY
-            } : undefined
+            workerOidcConfig
           );
           
           const result = await executeSSHCommand(

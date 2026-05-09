@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
-import { workers, applications, containers } from '$lib/db/schema';
+import { workers, applications, containers, volumes, workerMetrics, workerPings } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 
 export const GET: RequestHandler = async ({ params, cookies, locals }) => {
@@ -107,14 +107,20 @@ export const DELETE: RequestHandler = async ({ params, cookies }) => {
   // Check for existing applications/containers
   const workerApps = await db.select().from(applications).where(eq(applications.workerId, params.id)).all();
   const workerContainers = await db.select().from(containers).where(eq(containers.workerId, params.id)).all();
+  const workerVolumes = await db.select().from(volumes).where(eq(volumes.workerId, params.id)).all();
 
-  if (workerApps.length > 0 || workerContainers.length > 0) {
+  if (workerApps.length > 0 || workerContainers.length > 0 || workerVolumes.length > 0) {
     return json({ 
-      error: 'Cannot delete worker with existing applications or containers',
+      error: 'Cannot delete worker with existing applications, containers, or volumes',
       applications: workerApps.length,
-      containers: workerContainers.length
+      containers: workerContainers.length,
+      volumes: workerVolumes.length
     }, { status: 409 });
   }
+
+  // Delete related data that should be cleaned up
+  await db.delete(workerMetrics).where(eq(workerMetrics.workerId, params.id));
+  await db.delete(workerPings).where(eq(workerPings.workerId, params.id));
 
   await db.delete(workers).where(eq(workers.id, params.id));
   
