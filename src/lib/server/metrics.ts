@@ -12,6 +12,9 @@ import { getHostStats } from './host-metrics';
 import { getHostStatsHttp } from './host-metrics-http';
 import { evaluateAlerts } from './alerts';
 
+// Track which provisioning events have already been processed to avoid redundant discovery runs
+const lastProcessedProvisioning = new Map<string, number>();
+
 const DEFAULT_INTERVAL_SECONDS = 300;   // 5 minutes
 const RETENTION_DAYS = 30;
 
@@ -192,31 +195,28 @@ async function collectWorkerMetrics(): Promise<void> {
         lastSeenAt: pingStatus === 'online' ? now : worker.lastSeenAt,
       }).where(eq(workers.id, worker.id));
 
-      // Run app discovery when worker first comes online after provisioning
-      // Run app discovery when worker is online and recently provisioned but has no apps yet
+      // Run app discovery when worker is online and recently provisioned
       if (pingStatus === 'online' && worker.provisionedAt) {
-        const timeSinceProvisioning = now.getTime() - new Date(worker.provisionedAt).getTime();
-        const recentlyProvisioned = timeSinceProvisioning < 3600000; // Within last hour
+        const provTime = new Date(worker.provisionedAt).getTime();
+        const nowTime = now.getTime();
+        const recentlyProvisioned = (nowTime - provTime) < 3600000; // Within last hour
 
-        if (recentlyProvisioned) {
-          // Check if discovery has already run (worker has applications)
-          const appCount = await db.select().from(applications).where(eq(applications.workerId, worker.id)).all();
-
-          if (appCount.length === 0) {
-            console.log(`[metrics] Worker ${worker.name} is online for the first time after provisioning - running app discovery`);
-            try {
-              const { discoverApplicationsOnWorker } = await import('./app-discovery');
-              // Find an admin user to attribute discovered resources to
-              const adminUser = await db.select().from(users).where(eq(users.role, 'admin')).limit(1).get();
-              const discoveryUserId = adminUser?.id ?? null;
-              const results = await discoverApplicationsOnWorker(worker.id, discoveryUserId);
-              console.log(
-                `[metrics] Discovery complete: ${results.appsDiscovered} apps, ` +
-                `${results.teamsCreated} teams, ${results.stacksCreated} stacks`
-              );
-            } catch (e: any) {
-              console.error(`[metrics] App discovery failed for ${worker.name}:`, e.message);
-            }
+        if (recentlyProvisioned && lastProcessedProvisioning.get(worker.id) !== provTime) {
+          console.log(`[metrics] Worker ${worker.name} was recently provisioned - running app discovery`);
+          try {
+            const { discoverApplicationsOnWorker } = await import('./app-discovery');
+            // Find an admin user to attribute discovered resources to
+            const adminUser = await db.select().from(users).where(eq(users.role, 'admin')).limit(1).get();
+            const discoveryUserId = adminUser?.id ?? null;
+            const results = await discoverApplicationsOnWorker(worker.id, discoveryUserId);
+            console.log(
+              `[metrics] Discovery complete: ${results.appsDiscovered} apps, ` +
+              `${results.teamsCreated} teams, ${results.stacksCreated} stacks`
+            );
+            // Mark this provisioning as processed
+            lastProcessedProvisioning.set(worker.id, provTime);
+          } catch (e: any) {
+            console.error(`[metrics] App discovery failed for ${worker.name}:`, e.message);
           }
         }
       }

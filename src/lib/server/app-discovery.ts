@@ -8,7 +8,7 @@
 
 import { db } from '$lib/db';
 import { applications, containers, teams, stacks, workers, deployments } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, desc } from 'drizzle-orm';
 import { getRestPodmanClient } from '$lib/server/podman-client';
 import type { Container, ContainerInspect } from '$lib/server/podman';
 import { randomBytes } from 'crypto';
@@ -437,31 +437,67 @@ export async function discoverApplicationsOnWorker(
           .get();
 
         if (existing) {
-          // Ensure existing app has a succeeded deployment record so UI treats it as deployed
-          const hasDeployment = await db.select({ id: deployments.id })
+          // Get next deployment version
+          const lastDep = await db.select({ version: deployments.version })
             .from(deployments)
+            .where(eq(deployments.applicationId, existing.id))
+            .orderBy(desc(deployments.version))
+            .limit(1)
+            .get();
+          const nextVersion = (lastDep?.version ?? 0) + 1;
+
+          // Record a new 'succeeded' deployment for the current state
+          await db.insert(deployments).values({
+            id: crypto.randomUUID(),
+            applicationId: existing.id,
+            version: nextVersion,
+            manifest: existing.manifest,
+            environment: existing.environment,
+            volumes: existing.volumes,
+            image: app.containerInfo.image,
+            status: 'succeeded',
+            deployedBy: userId,
+            createdAt: new Date(),
+            finishedAt: new Date(),
+          });
+          console.log(`[app-discovery] Added deployment record for existing app "${existing.name}" (v${nextVersion})`);
+
+          // Update or insert container record with new ID
+          const existingContainer = await db.select()
+            .from(containers)
             .where(and(
-              eq(deployments.applicationId, existing.id),
-              eq(deployments.status, 'succeeded')
+              eq(containers.applicationId, existing.id),
+              eq(containers.workerId, workerId)
             ))
             .get();
 
-          if (!hasDeployment) {
-            await db.insert(deployments).values({
+          if (existingContainer) {
+            await db.update(containers)
+              .set({
+                containerId: app.containerInfo.containerId,
+                name: app.containerInfo.name,
+                image: app.containerInfo.image,
+                status: app.containerInfo.status,
+                labels: JSON.stringify(app.containerInfo.labels),
+                updatedAt: new Date(),
+              })
+              .where(eq(containers.id, existingContainer.id));
+          } else {
+            await db.insert(containers).values({
               id: crypto.randomUUID(),
               applicationId: existing.id,
-              version: 1,
-              manifest: existing.manifest,
-              environment: existing.environment,
-              volumes: existing.volumes,
+              workerId: workerId,
+              containerId: app.containerInfo.containerId,
+              name: app.containerInfo.name,
               image: app.containerInfo.image,
-              status: 'succeeded',
-              deployedBy: userId,
+              status: app.containerInfo.status,
+              labels: JSON.stringify(app.containerInfo.labels),
               createdAt: new Date(),
-              finishedAt: new Date(),
+              updatedAt: new Date(),
             });
-            console.log(`[app-discovery] Added deployment record for existing app "${existing.name}"`);
           }
+
+          appsDiscovered++;
           continue;
         }
 
