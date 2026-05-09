@@ -44,6 +44,7 @@ async function collectContainerMetrics(): Promise<void> {
   // Group by worker to minimize API calls
   const byWorker = new Map<string, { worker: typeof workers.$inferSelect; containers: (typeof containers.$inferSelect)[] }>();
   for (const { container, worker } of allContainers) {
+    if (worker.status !== 'online') continue;
     if (!byWorker.has(worker.id)) byWorker.set(worker.id, { worker, containers: [] });
     byWorker.get(worker.id)!.containers.push(container);
   }
@@ -59,7 +60,7 @@ async function collectContainerMetrics(): Promise<void> {
     try {
       podmanContainers = await client.listContainers(true);
     } catch (e) {
-      console.error(`[metrics] Failed to list containers for ${worker.name}:`, e);
+      console.error(`[metrics] Failed to list containers for ${worker.name}:`, e.message || e);
       client.destroy();
       continue;
     }
@@ -288,7 +289,7 @@ async function collectWorkerMetrics(): Promise<void> {
         volumesCount: store.volumeStore?.number ?? null,
       });
     } catch (e) {
-      console.error(`[metrics] Failed to collect metrics for worker ${worker.name}:`, e);
+      console.error(`[metrics] Failed to collect metrics for worker ${worker.name}:`, e.message || e);
     }
   }
 }

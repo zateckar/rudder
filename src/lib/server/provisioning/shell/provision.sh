@@ -15,7 +15,7 @@ step() {
     echo "STEP_DONE:${name}"
   else
     echo "STEP_FAIL:${name}"
-    FAILURES=$((FAILURES + 1))
+    exit 1
   fi
 }
 
@@ -47,17 +47,17 @@ step_podman() {
     else
       rm -f /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list 2>/dev/null
       apt-get update -q
-      apt-get install -y podman curl openssl netcat-openbsd 2>&1 | tail -5
+      apt-get install -y podman curl openssl netcat-openbsd 2>&1
       if ! command -v podman &> /dev/null; then
         add-apt-repository -y universe
         apt-get update -q
-        apt-get install -y podman curl openssl netcat-openbsd 2>&1 | tail -5
+        apt-get install -y podman curl openssl netcat-openbsd 2>&1
       fi
     fi
     # Ensure netcat is available
     if ! command -v nc &> /dev/null; then
       apt-get update -q
-      apt-get install -y netcat-openbsd 2>&1 | tail -3
+      apt-get install -y netcat-openbsd 2>&1
     fi
   elif [ "$OS" = "rhel" ]; then
     dnf -y module enable podman
@@ -157,14 +157,17 @@ step_podman_api() {
   systemctl restart podman-api-tcp.service
   sleep 5
   # Wait for both socket and TCP to be ready
+  local READY=0
   for i in {1..10}; do
     if curl -sf http://127.0.0.1:8080/_ping > /dev/null 2>&1; then
       echo "Podman API TCP: OK"
       break
     fi
+    if [ $i -eq 10 ]; then READY=1; fi
     echo "Waiting for Podman API TCP... ($i/10)"
     sleep 2
   done
+  if [ $READY -ne 0 ]; then echo "ERROR: Podman API TCP failed to start"; exit 1; fi
   if [ -S /run/podman/podman.sock ]; then
     echo "Podman API Unix socket: OK"
   else
@@ -182,8 +185,8 @@ get_latest_github_tag() {
 step_traefik_config() {
   echo "--- 8. Writing Traefik configuration ---"
   echo "Detecting latest plugin versions..."
-  CROWDSEC_VERSION=$(get_latest_github_tag "crowdsecurity/crowdsec" "v1.7.7")
-  TRAEFIK_VERSION=$(get_latest_github_tag "traefik/traefik" "v3.7.0")
+  CROWDSEC_VERSION="latest"
+  TRAEFIK_VERSION="latest"
   echo "Using CrowdSec version: ${CROWDSEC_VERSION}"
   echo "Using Traefik version: ${TRAEFIK_VERSION}"
 
