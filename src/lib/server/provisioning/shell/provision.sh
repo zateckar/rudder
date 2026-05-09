@@ -95,7 +95,9 @@ step_cleanup_old() {
 
   echo "--- 5. Stopping existing containerized services ---"
   systemctl stop traefik-container.service 2>/dev/null || true
+  systemctl reset-failed traefik-container.service 2>/dev/null || true
   systemctl stop crowdsec-container.service 2>/dev/null || true
+  systemctl reset-failed crowdsec-container.service 2>/dev/null || true
   systemctl stop podman-api-http.service 2>/dev/null || true
   systemctl stop podman-api.service 2>/dev/null || true
   systemctl stop podman-api-socket.service 2>/dev/null || true
