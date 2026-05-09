@@ -430,7 +430,7 @@ export class PodmanClient {
       };
     }
 
-    if (config.networkMode) {
+    if (config.networkMode && config.networkMode.trim() !== '') {
       containerConfig.HostConfig.NetworkMode = config.networkMode;
     }
 

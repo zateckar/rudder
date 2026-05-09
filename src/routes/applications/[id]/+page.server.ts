@@ -17,8 +17,11 @@ function extractServiceUrls(appContainers: typeof containers.$inferSelect[]): Ar
           if (match) {
             const url = `https://${match[1]}`;
             if (!urlMap.has(url)) {
-              const routerName = key.replace('traefik.http.routers.', '').replace('.rule', '');
-              urlMap.set(url, { name: routerName, url });
+              let serviceName = labels['service'] || key.replace('traefik.http.routers.', '').replace('.rule', '');
+              if (serviceName.endsWith('-secure')) {
+                serviceName = serviceName.substring(0, serviceName.length - 7);
+              }
+              urlMap.set(url, { name: serviceName, url });
             }
           }
         }

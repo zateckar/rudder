@@ -1,3 +1,7 @@
 api:
   server:
     listen_uri: 0.0.0.0:8081
+
+appsec:
+  enabled: true
+  listen_addr: 0.0.0.0:7422

@@ -182,8 +182,13 @@ get_latest_github_tag() {
 step_traefik_config() {
   echo "--- 8. Writing Traefik configuration ---"
   echo "Detecting latest plugin versions..."
-  BOUNCER_VERSION=$(get_latest_github_tag "maxlerebourg/crowdsec-bouncer-traefik-plugin" "v1.10.1")
-  OIDC_VERSION=$(get_latest_github_tag "lukaszraczylo/traefikoidc" "v1.0.1")
+  CROWDSEC_VERSION=$(get_latest_github_tag "crowdsecurity/crowdsec" "v1.7.7")
+  TRAEFIK_VERSION=$(get_latest_github_tag "traefik/traefik" "v3.7.0")
+  echo "Using CrowdSec version: ${CROWDSEC_VERSION}"
+  echo "Using Traefik version: ${TRAEFIK_VERSION}"
+
+  BOUNCER_VERSION=$(get_latest_github_tag "maxlerebourg/crowdsec-bouncer-traefik-plugin" "v1.6.0")
+  OIDC_VERSION=$(get_latest_github_tag "lukaszraczylo/traefikoidc" "v1.0.7")
   echo "Using bouncer version: ${BOUNCER_VERSION}"
   echo "Using OIDC version: ${OIDC_VERSION}"
 
@@ -193,6 +198,11 @@ step_traefik_config() {
   sed -i "s/BOUNCER_VERSION_PLACEHOLDER/${BOUNCER_VERSION}/g" /etc/traefik/traefik.yml
   sed -i "s/OIDC_VERSION_PLACEHOLDER/${OIDC_VERSION}/g" /etc/traefik/traefik.yml
   echo "traefik.yml updated with latest plugin versions"
+
+  # Update systemd units with discovered versions
+  sed -i "s/CROWDSEC_VERSION_PLACEHOLDER/${CROWDSEC_VERSION}/g" /etc/systemd/system/crowdsec-container.service
+  sed -i "s/TRAEFIK_VERSION_PLACEHOLDER/${TRAEFIK_VERSION}/g" /etc/systemd/system/traefik-container.service
+
 
   echo "{{PODMAN_API_ROUTING_B64}}" | base64 -d > /etc/traefik/dynamic/podman-api.yml
   echo "podman-api.yml (mTLS-secured Podman API route) written"
@@ -368,8 +378,17 @@ systemctl is-active rudder-metrics-http.service && echo "Metrics HTTP service: A
 curl -sf http://127.0.0.1:8080/_ping > /dev/null 2>&1 && echo "Podman API TCP: ONLINE" || echo "Podman API TCP: not ready"
 [ -S /run/podman/podman.sock ] && echo "Podman API Unix socket: EXISTS" || echo "Podman API Unix socket: not ready"
 curl -sf http://127.0.0.1:9100/ | grep -q cpu_percent && echo "Metrics HTTP: ONLINE" || echo "Metrics HTTP: not ready"
-podman ps --filter name=traefik --format "Traefik container: {{.Status}}" 2>/dev/null || echo "Traefik container: image pulling"
-podman ps --filter name=crowdsec --format "CrowdSec container: {{.Status}}" 2>/dev/null || echo "CrowdSec container: image pulling"
+if podman ps --filter name=traefik --format "{{.Status}}" | grep -q .; then
+  podman ps --filter name=traefik --format "Traefik container: {{.Status}}"
+else
+  systemctl is-failed traefik-container.service >/dev/null && echo "Traefik container: FAILED (check logs)" || echo "Traefik container: starting/pulling"
+fi
+
+if podman ps --filter name=crowdsec --format "{{.Status}}" | grep -q .; then
+  podman ps --filter name=crowdsec --format "CrowdSec container: {{.Status}}"
+else
+  systemctl is-failed crowdsec-container.service >/dev/null && echo "CrowdSec container: FAILED (check logs)" || echo "CrowdSec container: starting/pulling"
+fi
 
 echo ""
 if [ $FAILURES -gt 0 ]; then

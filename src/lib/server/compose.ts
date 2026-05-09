@@ -119,10 +119,10 @@ export function parseCompose(
           // Last segment is always container port (possibly with /proto suffix)
           const lastPart = parts[parts.length - 1];
           const [portNum, portProto] = lastPart.split('/');
-          containerPort = portNum;
+          containerPort = portNum.replace(/['"]/g, '').trim();
           if (portProto) proto = portProto;
         } else if (portEntry.target) {
-          containerPort = String(portEntry.target);
+          containerPort = String(portEntry.target).replace(/['"]/g, '').trim();
           if (portEntry.protocol) proto = portEntry.protocol;
         } else {
           continue;
@@ -230,7 +230,9 @@ export function parseCompose(
       const firstPortBinding = ports[firstPortKey]?.[0]?.hostPort;
       
       if (firstPortBinding) {
-        const fullDomain = `${serviceName}.${appName}.${baseDomain}`;
+        const fullDomain = serviceName === appName 
+          ? `${appName}.${baseDomain}`
+          : `${serviceName}.${appName}.${baseDomain}`;
         const traefikLabels = generateTraefikLabelsForApp(
           serviceName,
           fullDomain,
