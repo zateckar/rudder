@@ -201,12 +201,6 @@ step_traefik_config() {
   sed -i "s/BOUNCER_VERSION_PLACEHOLDER/${BOUNCER_VERSION}/g" /etc/traefik/traefik.yml
   sed -i "s/OIDC_VERSION_PLACEHOLDER/${OIDC_VERSION}/g" /etc/traefik/traefik.yml
   echo "traefik.yml updated with latest plugin versions"
-
-  # Update systemd units with discovered versions
-  sed -i "s/CROWDSEC_VERSION_PLACEHOLDER/${CROWDSEC_VERSION}/g" /etc/systemd/system/crowdsec-container.service
-  sed -i "s/TRAEFIK_VERSION_PLACEHOLDER/${TRAEFIK_VERSION}/g" /etc/systemd/system/traefik-container.service
-
-
   echo "{{PODMAN_API_ROUTING_B64}}" | base64 -d > /etc/traefik/dynamic/podman-api.yml
   echo "podman-api.yml (mTLS-secured Podman API route) written"
 
@@ -260,6 +254,9 @@ step_systemd_services() {
   echo "--- 11. Starting systemd services ---"
   echo "{{TRAEFIK_SERVICE_B64}}" | base64 -d > /etc/systemd/system/traefik-container.service
   echo "{{CROWDSEC_SERVICE_B64}}" | base64 -d > /etc/systemd/system/crowdsec-container.service
+  # Replace version placeholders in systemd units (must happen after writing files)
+  sed -i "s/CROWDSEC_VERSION_PLACEHOLDER/${CROWDSEC_VERSION}/g" /etc/systemd/system/crowdsec-container.service
+  sed -i "s/TRAEFIK_VERSION_PLACEHOLDER/${TRAEFIK_VERSION}/g" /etc/systemd/system/traefik-container.service
   systemctl daemon-reload
   systemctl enable traefik-container.service
   systemctl enable crowdsec-container.service
