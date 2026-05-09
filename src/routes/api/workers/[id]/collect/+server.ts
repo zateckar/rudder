@@ -35,8 +35,8 @@ export const POST: RequestHandler = async ({ params, cookies }) => {
       const ok = await client.ping();
       if (ok) {
         pingStatus = 'online';
-        try { sysInfo = await client.info(); } catch (e) { console.error(`[collect] info() failed for ${worker.name}:`, e); }
-        try { systemDf = await client.systemDf(); } catch (e) { console.error(`[collect] systemDf() failed for ${worker.name}:`, e); }
+        try { sysInfo = await client.info(); } catch (e) { console.error(`[collect] info() failed for ${worker.name}:`, (e as any).message || e); }
+        try { systemDf = await client.systemDf(); } catch (e) { console.error(`[collect] systemDf() failed for ${worker.name}:`, (e as any).message || e); }
       }
       client.destroy();
     } else if (worker.podmanApiUrl) {
@@ -45,8 +45,8 @@ export const POST: RequestHandler = async ({ params, cookies }) => {
       const ok = await client.ping();
       if (ok) {
         pingStatus = 'online';
-        try { sysInfo = await client.info(); } catch (e) { console.error(`[collect] info() failed for ${worker.name}:`, e); }
-        try { systemDf = await client.systemDf(); } catch (e) { console.error(`[collect] systemDf() failed for ${worker.name}:`, e); }
+        try { sysInfo = await client.info(); } catch (e) { console.error(`[collect] info() failed for ${worker.name}:`, (e as any).message || e); }
+        try { systemDf = await client.systemDf(); } catch (e) { console.error(`[collect] systemDf() failed for ${worker.name}:`, (e as any).message || e); }
       }
       client.destroy();
     }

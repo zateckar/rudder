@@ -60,7 +60,7 @@ async function collectContainerMetrics(): Promise<void> {
     try {
       podmanContainers = await client.listContainers(true);
     } catch (e) {
-      console.error(`[metrics] Failed to list containers for ${worker.name}:`, e.message || e);
+      console.error(`[metrics] Failed to list containers for ${worker.name}:`, (e as any).message || e);
       client.destroy();
       continue;
     }
@@ -129,7 +129,7 @@ async function collectContainerMetrics(): Promise<void> {
           blockWriteBytes: blockWrite,
         });
       } catch (e) {
-        console.error(`[metrics] Failed to collect stats for container ${container.name}:`, e);
+        console.error(`[metrics] Failed to collect stats for container ${container.name}:`, (e as any).message || e);
       }
     }
 
@@ -160,8 +160,8 @@ async function collectWorkerMetrics(): Promise<void> {
         const ok = await client.ping();
         if (ok) {
           pingStatus = 'online';
-          try { sysInfo = await client.info(); } catch (e) { console.error(`[metrics] info() failed for ${worker.name}:`, e); }
-          try { systemDf = await client.systemDf(); } catch (e) { console.error(`[metrics] systemDf() failed for ${worker.name}:`, e); }
+          try { sysInfo = await client.info(); } catch (e) { console.error(`[metrics] info() failed for ${worker.name}:`, (e as any).message || e); }
+          try { systemDf = await client.systemDf(); } catch (e) { console.error(`[metrics] systemDf() failed for ${worker.name}:`, (e as any).message || e); }
         }
         client.destroy();
       } else if (worker.podmanApiUrl) {
@@ -170,8 +170,8 @@ async function collectWorkerMetrics(): Promise<void> {
         const ok = await client.ping();
         if (ok) {
           pingStatus = 'online';
-          try { sysInfo = await client.info(); } catch (e) { console.error(`[metrics] info() failed for ${worker.name}:`, e); }
-          try { systemDf = await client.systemDf(); } catch (e) { console.error(`[metrics] systemDf() failed for ${worker.name}:`, e); }
+          try { sysInfo = await client.info(); } catch (e) { console.error(`[metrics] info() failed for ${worker.name}:`, (e as any).message || e); }
+          try { systemDf = await client.systemDf(); } catch (e) { console.error(`[metrics] systemDf() failed for ${worker.name}:`, (e as any).message || e); }
         }
         client.destroy();
       }
@@ -266,7 +266,7 @@ async function collectWorkerMetrics(): Promise<void> {
             if (httpStats.memPercent != null) hostMemPercent = httpStats.memPercent;
           }
         } catch (e) {
-          console.warn(`[metrics] HTTP host stats failed for ${worker.name}:`, e);
+          console.warn(`[metrics] HTTP host stats failed for ${worker.name}:`, (e as any).message || e);
         }
       }
 
@@ -289,7 +289,7 @@ async function collectWorkerMetrics(): Promise<void> {
         volumesCount: store.volumeStore?.number ?? null,
       });
     } catch (e) {
-      console.error(`[metrics] Failed to collect metrics for worker ${worker.name}:`, e.message || e);
+      console.error(`[metrics] Failed to collect metrics for worker ${worker.name}:`, (e as any).message || e);
     }
   }
 }
@@ -330,7 +330,7 @@ async function collectAll(): Promise<void> {
   try {
     await evaluateAlerts();
   } catch (e) {
-    console.error('[metrics] Alert evaluation failed:', e);
+    console.error('[metrics] Alert evaluation failed:', (e as any).message || e);
   }
 }
 
@@ -348,7 +348,7 @@ async function runLoop(): Promise<void> {
     await collectAll();
     console.log(`[metrics] Collection done in ${Date.now() - start}ms`);
   } catch (e) {
-    console.error('[metrics] Collection failed:', e);
+    console.error('[metrics] Collection failed:', (e as any).message || e);
   } finally {
     running = false;
   }
