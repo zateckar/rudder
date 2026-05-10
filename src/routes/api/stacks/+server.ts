@@ -4,7 +4,7 @@ import { stacks, applications, teams, teamMembers, users } from '$lib/db/schema'
 import { eq, inArray } from 'drizzle-orm';
 
 /** GET: List stacks for the user's teams */
-export async function GET({ cookies }: { cookies: any }) {
+export async function GET({ cookies, url }: { cookies: any; url: URL }) {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
 
   const sessionId = getSessionIdFromCookies(cookies);
@@ -14,12 +14,23 @@ export async function GET({ cookies }: { cookies: any }) {
   const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
 
   let teamIds: string[];
+  const urlTeam = url.searchParams.get('team');
+
   if (currentUser?.role === 'admin') {
-    const allTeams = await db.select().from(teams).all();
-    teamIds = allTeams.map(t => t.id);
+    if (urlTeam && urlTeam !== 'all') {
+      teamIds = [urlTeam];
+    } else {
+      const allTeams = await db.select().from(teams).all();
+      teamIds = allTeams.map(t => t.id);
+    }
   } else {
     const memberships = await db.select().from(teamMembers).where(eq(teamMembers.userId, userId)).all();
-    teamIds = memberships.map(m => m.teamId);
+    const userTeamIds = memberships.map(m => m.teamId);
+    if (urlTeam && urlTeam !== 'all') {
+      teamIds = userTeamIds.includes(urlTeam) ? [urlTeam] : [];
+    } else {
+      teamIds = userTeamIds;
+    }
   }
 
   if (teamIds.length === 0) return json([]);

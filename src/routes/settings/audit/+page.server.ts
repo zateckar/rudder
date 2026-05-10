@@ -3,7 +3,7 @@ import { db } from '$lib/db';
 import { auditLogs, users } from '$lib/db/schema';
 import { eq, desc } from 'drizzle-orm';
 
-export const load = async ({ cookies }: { cookies: any }) => {
+export const load = async ({ cookies, url }: { cookies: any; url: URL }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
   
   const sessionId = getSessionIdFromCookies(cookies);
@@ -19,12 +19,13 @@ export const load = async ({ cookies }: { cookies: any }) => {
   }
 
   const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
+  const urlTeam = url.searchParams.get('team');
 
   if (currentUser?.role !== 'admin') {
     throw redirect(303, '/dashboard');
   }
 
-  const logs = await db.select({
+  let query = db.select({
     id: auditLogs.id,
     action: auditLogs.action,
     resourceType: auditLogs.resourceType,
@@ -37,7 +38,13 @@ export const load = async ({ cookies }: { cookies: any }) => {
     }
   })
     .from(auditLogs)
-    .leftJoin(users, eq(auditLogs.userId, users.id))
+    .leftJoin(users, eq(auditLogs.userId, users.id));
+
+  if (urlTeam && urlTeam !== 'all') {
+    (query as any) = query.where(eq(auditLogs.teamId, urlTeam));
+  }
+
+  const logs = await query
     .orderBy(desc(auditLogs.createdAt))
     .limit(100)
     .all();

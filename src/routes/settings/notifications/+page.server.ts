@@ -1,9 +1,9 @@
 import { redirect } from '@sveltejs/kit';
 import { db } from '$lib/db';
-import { users, notificationChannels, alertRules, alertEvents } from '$lib/db/schema';
-import { eq, desc } from 'drizzle-orm';
+import { users, notificationChannels, alertRules, alertEvents, teamMembers } from '$lib/db/schema';
+import { eq, desc, inArray } from 'drizzle-orm';
 
-export const load = async ({ cookies }: { cookies: any }) => {
+export const load = async ({ cookies, url }: { cookies: any; url: URL }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
 
   const sessionId = getSessionIdFromCookies(cookies);
@@ -14,12 +14,32 @@ export const load = async ({ cookies }: { cookies: any }) => {
 
   const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
   if (!currentUser) throw redirect(303, '/login');
+  const urlTeam = url.searchParams.get('team');
 
   // Load channels
-  const channels = await db.select().from(notificationChannels).all();
+  let channels: any[] = [];
+  let rules: any[] = [];
 
-  // Load alert rules
-  const rules = await db.select().from(alertRules).all();
+  if (currentUser.role === 'admin' && (!urlTeam || urlTeam === 'all')) {
+    channels = await db.select().from(notificationChannels).all();
+    rules = await db.select().from(alertRules).all();
+  } else {
+    const memberships = await db.select().from(teamMembers).where(eq(teamMembers.userId, userId)).all();
+    const teamIds = memberships.map(m => m.teamId);
+
+    let targetTeamIds = teamIds;
+    if (urlTeam && urlTeam !== 'all') {
+      targetTeamIds = (currentUser.role === 'admin' || teamIds.includes(urlTeam)) ? [urlTeam] : [];
+    }
+
+    if (targetTeamIds.length > 0) {
+      channels = await db.select().from(notificationChannels).where(inArray(notificationChannels.teamId, targetTeamIds)).all();
+      rules = await db.select().from(alertRules).where(inArray(alertRules.teamId, targetTeamIds)).all();
+    } else {
+      channels = [];
+      rules = [];
+    }
+  }
 
   // Load recent alert events (last 20)
   const events = await db.select().from(alertEvents)

@@ -67,13 +67,14 @@
 {#if myTemplates.length > 0}
   <div class="section">
     <h2>My Team Templates</h2>
-    <div class="template-grid">
+    <div class="template-list">
       {#each myTemplates as tpl}
         {@const sourceApp = data.applications.find((a: any) => a.id === tpl.sourceAppId)}
-        <div class="template-card">
-          <div class="tpl-body">
-            <div class="tpl-top">
+        <div class="template-row">
+          <div class="tpl-main">
+            <div class="tpl-identity">
               <span class="tpl-name">{tpl.name}</span>
+              <span class="tpl-type-tag">{tpl.type}</span>
               {#if tpl.shared}
                 <span class="share-badge shared">shared</span>
               {:else}
@@ -84,32 +85,42 @@
               <p class="tpl-desc">{tpl.description}</p>
             {/if}
             <div class="tpl-meta">
-              <span class="tpl-tag">{tpl.type}</span>
               {#if sourceApp}
                 <span class="tpl-source">from <em>{sourceApp.name}</em></span>
               {/if}
               <span class="tpl-team">{getTeamName(tpl.teamId)}</span>
             </div>
           </div>
-          <div class="tpl-footer">
-            <div class="tpl-actions-left">
+          <div class="tpl-actions">
+            <div class="tpl-management">
               {#if tpl.shared}
                 <form method="POST" action="?/unshare" use:enhance={() => { return async ({ update }) => { await update(); }; }}>
                   <input type="hidden" name="templateId" value={tpl.id} />
-                  <button type="submit" class="btn-tiny btn-unshare" title="Make this template private to your team">Unshare</button>
+                  <button type="submit" class="btn-action" title="Make private">
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2.5 8.5C2.5 5.46243 4.96243 3 8 3C11.0376 3 13.5 5.46243 13.5 8.5V13.5H2.5V8.5Z" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 10V11" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    Unshare
+                  </button>
                 </form>
               {:else}
                 <form method="POST" action="?/share" use:enhance={() => { return async ({ update }) => { await update(); }; }}>
                   <input type="hidden" name="templateId" value={tpl.id} />
-                  <button type="submit" class="btn-tiny btn-share" title="Share this template with all teams">Share</button>
+                  <button type="submit" class="btn-action" title="Share with all teams">
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 3L12 7M8 3L4 7M8 3V13" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    Share
+                  </button>
                 </form>
               {/if}
               <form method="POST" action="?/delete" use:enhance={() => { return async ({ update }) => { await update(); }; }}>
                 <input type="hidden" name="templateId" value={tpl.id} />
-                <button type="submit" class="btn-tiny btn-delete" onclick={(e: Event) => { if (!confirm('Delete this template?')) e.preventDefault(); }} title="Permanently delete this template">Delete</button>
+                <button type="submit" class="btn-action btn-danger" onclick={(e: Event) => { if (!confirm('Delete this template?')) e.preventDefault(); }} title="Delete template">
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 4H13M5 4V3C5 2.44772 5.44772 2 6 2H10C10.5523 2 11 2.44772 11 3V4M6 7V11M10 7V11M4 4L4.5 13C4.5 13.5523 4.94772 14 5.5 14H10.5C11.0523 14 11.5 13.5523 11.5 13L12 4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
               </form>
             </div>
-            <button class="btn-apply" onclick={() => openApplyModal(tpl)} title="Deploy a new application from this template">Use Template</button>
+            <button class="btn-use" onclick={() => openApplyModal(tpl)}>
+              Use Template
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3l5 5-5 5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
           </div>
         </div>
       {/each}
@@ -121,24 +132,26 @@
 {#if sharedTemplates.length > 0}
   <div class="section">
     <h2>Shared Templates</h2>
-    <div class="template-grid">
+    <div class="template-list">
       {#each sharedTemplates as tpl}
-        <div class="template-card">
-          <div class="tpl-body">
-            <div class="tpl-top">
+        <div class="template-row shared">
+          <div class="tpl-main">
+            <div class="tpl-identity">
               <span class="tpl-name">{tpl.name}</span>
+              <span class="tpl-type-tag">{tpl.type}</span>
             </div>
             {#if tpl.description}
               <p class="tpl-desc">{tpl.description}</p>
             {/if}
             <div class="tpl-meta">
-              <span class="tpl-tag">{tpl.type}</span>
-              <span class="tpl-team">{getTeamName(tpl.teamId)}</span>
+              <span class="tpl-by">by {getTeamName(tpl.teamId)}</span>
             </div>
           </div>
-          <div class="tpl-footer">
-            <span class="tpl-by">by {getTeamName(tpl.teamId)}</span>
-            <button class="btn-apply" onclick={() => openApplyModal(tpl)} title="Deploy a new application from this template">Use Template</button>
+          <div class="tpl-actions">
+            <button class="btn-use" onclick={() => openApplyModal(tpl)}>
+              Use Template
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3l5 5-5 5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
           </div>
         </div>
       {/each}
@@ -380,39 +393,48 @@
     margin-bottom: 14px;
   }
 
-  /* ── Template Grid ────────────────────────────── */
-
-  .template-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-    gap: 14px;
-  }
-
-  .template-card {
-    background: var(--bg-raised);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-md);
+  /* ── Template List ────────────────────────────── */
+  .template-list {
     display: flex;
     flex-direction: column;
-    justify-content: space-between;
-    transition: border-color 0.15s, box-shadow 0.15s;
-    overflow: hidden;
+    gap: 10px;
   }
 
-  .template-card:hover {
+  .template-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    padding: 16px 20px;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    gap: 20px;
+  }
+
+  .template-row:hover {
+    background: var(--bg-raised);
     border-color: var(--border-default);
-    box-shadow: 0 2px 16px rgba(0, 0, 0, 0.3);
+    transform: translateX(4px);
+    box-shadow: var(--shadow-md);
   }
 
-  .tpl-body {
-    padding: 18px 20px 12px;
+  .template-row.shared {
+    border-left: 3px solid var(--accent);
   }
 
-  .tpl-top {
+  .tpl-main {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .tpl-identity {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    margin-bottom: 4px;
+    gap: 10px;
+    flex-wrap: wrap;
   }
 
   .tpl-name {
@@ -420,6 +442,18 @@
     font-weight: 650;
     color: var(--text-primary);
     letter-spacing: -0.01em;
+  }
+
+  .tpl-type-tag {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    background: var(--bg-overlay);
+    color: var(--text-muted);
+    padding: 2px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--border-subtle);
   }
 
   .share-badge {
@@ -442,129 +476,102 @@
   }
 
   .tpl-desc {
-    font-size: 12.5px;
+    font-size: 13px;
     color: var(--text-secondary);
-    margin: 4px 0;
     line-height: 1.4;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
+    max-width: 600px;
   }
 
   .tpl-meta {
     display: flex;
     align-items: center;
-    gap: 10px;
-    margin-top: 8px;
+    gap: 12px;
     font-size: 12px;
     color: var(--text-muted);
-  }
-
-  .tpl-tag {
-    padding: 2px 8px;
-    background: var(--bg-overlay);
-    border-radius: var(--radius-sm);
-    font-size: 11px;
-    font-weight: 500;
-    color: var(--text-secondary);
+    margin-top: 4px;
   }
 
   .tpl-source em {
     color: var(--text-secondary);
-  }
-
-  .tpl-team {
+    font-style: normal;
     font-weight: 500;
   }
 
-  /* ── Footer ───────────────────────────────────── */
-
-  .tpl-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 20px;
-    background: var(--bg-surface);
-    border-top: 1px solid var(--border-subtle);
+  .tpl-team, .tpl-by {
+    font-weight: 500;
   }
 
-  .tpl-actions-left {
+  .tpl-actions {
     display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .tpl-management {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-right: 16px;
+    border-right: 1px solid var(--border-subtle);
+  }
+
+  .btn-action {
+    display: inline-flex;
     align-items: center;
     gap: 6px;
-  }
-
-  .tpl-by {
-    font-size: 11px;
-    color: var(--text-muted);
-  }
-
-  .btn-tiny {
-    padding: 3px 10px;
+    padding: 6px 10px;
+    background: var(--bg-overlay);
+    border: 1px solid var(--border-subtle);
     border-radius: var(--radius-sm);
-    font-size: 11px;
-    font-weight: 500;
-    cursor: pointer;
-    border: 1px solid var(--border-default);
-    background: var(--bg-raised);
     color: var(--text-secondary);
-    transition: background 0.15s;
+    font-size: 12px;
+    font-weight: 500;
+    transition: all 0.15s;
+    cursor: pointer;
   }
 
-  .btn-tiny:hover {
-    background: var(--bg-hover);
-  }
-
-  .btn-share {
-    color: var(--blue);
-    border-color: var(--blue);
-    background: var(--blue-subtle);
-  }
-
-  .btn-share:hover {
+  .btn-action:hover {
     background: var(--bg-active);
+    color: var(--text-primary);
+    border-color: var(--border-default);
   }
 
-  .btn-unshare {
-    color: var(--yellow);
-    border-color: var(--yellow);
-    background: var(--yellow-subtle);
-  }
-
-  .btn-unshare:hover {
-    background: var(--bg-active);
-  }
-
-  .btn-delete {
+  .btn-action.btn-danger:hover {
+    background: var(--red-subtle);
     color: var(--red-text);
     border-color: var(--red);
-    background: var(--red-subtle);
   }
 
-  .btn-delete:hover {
-    background: var(--bg-active);
-  }
-
-  .btn-apply {
-    padding: 5px 14px;
+  .btn-use {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
     background: var(--accent);
-    color: var(--text-inverse);
+    color: var(--bg-root);
     border: none;
     border-radius: var(--radius-sm);
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
+    transition: all 0.15s;
     cursor: pointer;
-    transition: background 0.15s;
   }
 
-  .btn-apply:hover {
+  .btn-use:hover {
     background: var(--accent-hover);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px var(--accent-subtle);
+  }
+
+  .btn-use svg {
+    transition: transform 0.15s;
+  }
+
+  .btn-use:hover svg {
+    transform: translateX(2px);
   }
 
   /* ── Empty state ──────────────────────────────── */
-
   .empty-state {
     background: var(--bg-surface);
     border: 1px dashed var(--border-default);
@@ -596,7 +603,6 @@
   }
 
   /* ── Modal ────────────────────────────────────── */
-
   .modal-backdrop {
     position: fixed;
     inset: 0;

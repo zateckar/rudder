@@ -2,11 +2,11 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { secrets, users, teams, teamMembers } from '$lib/db/schema';
-import { eq, and, or, isNull } from 'drizzle-orm';
+import { eq, and, or, isNull, inArray } from 'drizzle-orm';
 import { encrypt, decrypt } from '$lib/server/encryption';
 import { parseJsonBody, ValidationError, schemas } from '$lib/server/validation';
 
-export const GET: RequestHandler = async ({ cookies }) => {
+export const GET: RequestHandler = async ({ cookies, url }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
 
   const sessionId = getSessionIdFromCookies(cookies);
@@ -17,19 +17,30 @@ export const GET: RequestHandler = async ({ cookies }) => {
   if (!user) return json({ error: 'User not found' }, { status: 404 });
 
   let rows;
+  const urlTeam = url.searchParams.get('team');
+
   if (user.role === 'admin') {
-    // Admins see all secrets
-    rows = await db.select().from(secrets).all();
+    // Admins see all secrets, but can filter by team
+    if (urlTeam && urlTeam !== 'all') {
+      rows = await db.select().from(secrets).where(or(eq(secrets.scope, 'global'), eq(secrets.teamId, urlTeam))).all();
+    } else {
+      rows = await db.select().from(secrets).all();
+    }
   } else {
     // Regular users see global secrets + secrets from their teams
     const memberships = await db.select({ teamId: teamMembers.teamId }).from(teamMembers).where(eq(teamMembers.userId, userId)).all();
     const teamIds = memberships.map(m => m.teamId);
 
-    if (teamIds.length > 0) {
+    let targetTeamIds = teamIds;
+    if (urlTeam && urlTeam !== 'all') {
+      targetTeamIds = teamIds.includes(urlTeam) ? [urlTeam] : [];
+    }
+
+    if (targetTeamIds.length > 0) {
       rows = await db.select().from(secrets)
         .where(or(
           eq(secrets.scope, 'global'),
-          ...teamIds.map(tid => eq(secrets.teamId, tid))
+          inArray(secrets.teamId, targetTeamIds)
         ))
         .all();
     } else {

@@ -29,7 +29,7 @@
   async function loadStacks() {
     loading = true;
     try {
-      const res = await fetch('/api/stacks');
+      const res = await fetch('/api/stacks' + window.location.search);
       if (res.ok) {
         stacks = await res.json();
       }

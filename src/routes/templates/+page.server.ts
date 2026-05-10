@@ -3,7 +3,7 @@ import { db } from '$lib/db';
 import { applicationTemplates, applications, users, teams, teamMembers, workers } from '$lib/db/schema';
 import { eq, inArray, or } from 'drizzle-orm';
 
-export const load = async ({ cookies }: { cookies: any }) => {
+export const load = async ({ cookies, url }: { cookies: any; url: URL }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
 
   const sessionId = getSessionIdFromCookies(cookies);
@@ -21,31 +21,43 @@ export const load = async ({ cookies }: { cookies: any }) => {
     .where(eq(teamMembers.userId, userId))
     .all();
   const teamIds = memberships.map((m) => m.teamId);
+  const urlTeam = url.searchParams.get('team');
 
   // Visible templates: own team's templates + shared templates from other teams
-  const visibleTemplates =
-    teamIds.length > 0
-      ? await db
-          .select()
-          .from(applicationTemplates)
-          .where(
-            or(
-              inArray(applicationTemplates.teamId, teamIds),
-              eq(applicationTemplates.shared, true),
-              eq(applicationTemplates.createdBy, userId)
-            )
+  let visibleTemplates;
+  if (currentUser?.role === 'admin' && (!urlTeam || urlTeam === 'all')) {
+    visibleTemplates = await db.select().from(applicationTemplates).all();
+  } else {
+    let targetTeamIds = teamIds;
+    if (urlTeam && urlTeam !== 'all') {
+      targetTeamIds = (currentUser?.role === 'admin' || teamIds.includes(urlTeam)) ? [urlTeam] : [];
+    }
+
+    if (targetTeamIds.length > 0) {
+      visibleTemplates = await db
+        .select()
+        .from(applicationTemplates)
+        .where(
+          or(
+            inArray(applicationTemplates.teamId, targetTeamIds),
+            eq(applicationTemplates.shared, true),
+            eq(applicationTemplates.createdBy, userId)
           )
-          .all()
-      : await db
-          .select()
-          .from(applicationTemplates)
-          .where(
-            or(
-              eq(applicationTemplates.shared, true),
-              eq(applicationTemplates.createdBy, userId)
-            )
+        )
+        .all();
+    } else {
+      visibleTemplates = await db
+        .select()
+        .from(applicationTemplates)
+        .where(
+          or(
+            eq(applicationTemplates.shared, true),
+            eq(applicationTemplates.createdBy, userId)
           )
-          .all();
+        )
+        .all();
+    }
+  }
 
   const allTeams = await db.select().from(teams).all();
   const allWorkers = await db.select().from(workers).all();

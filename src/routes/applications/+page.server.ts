@@ -81,9 +81,7 @@ export const load = async ({ url, cookies }: { url: URL; cookies: any }) => {
     
     let targetTeamIds = teamIds;
     if (urlTeam && urlTeam !== 'all') {
-      if (currentUser?.role === 'admin' || teamIds.includes(urlTeam)) {
-        targetTeamIds = [urlTeam];
-      }
+      targetTeamIds = (currentUser?.role === 'admin' || teamIds.includes(urlTeam)) ? [urlTeam] : [];
     }
     
     if (targetTeamIds.length > 0) {

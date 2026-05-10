@@ -161,35 +161,48 @@
       <p>No applications match your search.</p>
     </div>
   {:else}
-  <div class="applications-grid">
+  <div class="applications-list">
     {#each filteredApps as app}
       {@const team = data.teams?.find((t: any) => t.id === app.teamId)}
-      <div class="card {app.status.color}">
-        <div class="card-body">
-          <div class="card-top">
+      <div class="app-row {app.status.color}">
+        <div class="app-status">
+          <span class="status-dot {app.status.color}" title={app.status.label}></span>
+        </div>
+        <div class="app-main">
+          <div class="app-identity">
             <a href="/applications/{app.id}" class="app-name">{app.name}</a>
-            <span class="status-dot {app.status.color}" title={app.status.label}></span>
+            {#if team}
+              <span class="team-tag">{team.name}</span>
+            {/if}
           </div>
-          {#if app.type === 'compose' && app.serviceUrls && app.serviceUrls.length > 0}
-            <div class="service-urls-list">
-              {#each app.serviceUrls as svc}
-                <a href={svc.url} target="_blank" rel="noopener" class="app-url">{svc.name}: {svc.url}</a>
-              {/each}
-            </div>
-          {:else if app.appUrl}
-            <a href={app.appUrl} target="_blank" rel="noopener" class="app-url">{app.appUrl}</a>
-          {:else}
-            <span class="app-url muted">no url</span>
-          {/if}
           {#if app.description}
             <p class="app-desc">{app.description}</p>
           {/if}
         </div>
-        <div class="card-footer">
-          {#if team}
-            <span class="team-tag">{team.name}</span>
+        <div class="app-links">
+          {#if app.type === 'compose' && app.serviceUrls && app.serviceUrls.length > 0}
+            <div class="service-urls-list">
+              {#each app.serviceUrls as svc}
+                <a href={svc.url} target="_blank" rel="noopener" class="app-url" title={svc.url}>
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 8.5V13.5C13 14.0523 12.5523 14.5 12 14.5H2.5C1.94772 14.5 1.5 14.0523 1.5 13.5V4C1.5 3.44772 1.94772 3 2.5 3H7.5M14.5 1.5L8.5 7.5M14.5 1.5H10.5M14.5 1.5V5.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  {svc.name}
+                </a>
+              {/each}
+            </div>
+          {:else if app.appUrl}
+            <a href={app.appUrl} target="_blank" rel="noopener" class="app-url" title={app.appUrl}>
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 8.5V13.5C13 14.0523 12.5523 14.5 12 14.5H2.5C1.94772 14.5 1.5 14.0523 1.5 13.5V4C1.5 3.44772 1.94772 3 2.5 3H7.5M14.5 1.5L8.5 7.5M14.5 1.5H10.5M14.5 1.5V5.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Visit
+            </a>
+          {:else}
+            <span class="app-url muted">no url</span>
           {/if}
-          <a href="/applications/{app.id}" class="detail-link">open &rarr;</a>
+        </div>
+        <div class="app-actions">
+          <a href="/applications/{app.id}" class="btn-open">
+            Manage
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3l5 5-5 5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </a>
         </div>
       </div>
     {/each}
@@ -278,170 +291,200 @@
     font-size: 14px;
   }
 
-  /* ── Grid ────────────────────────────────────── */
-
-  .applications-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-    gap: 14px;
-  }
-
-  /* ── Card ────────────────────────────────────── */
-
-  .card {
-    background: var(--bg-raised);
-    border: 1px solid var(--border-subtle);
-    border-left: 3px solid var(--border-default);
-    border-radius: var(--radius-md);
+  /* ── List ────────────────────────────────────── */
+  .applications-list {
     display: flex;
     flex-direction: column;
-    justify-content: space-between;
-    transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+    gap: 10px;
+  }
+
+  .app-row {
+    display: grid;
+    grid-template-columns: 32px 1fr 1fr 120px;
+    align-items: center;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    padding: 14px 20px;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    position: relative;
     overflow: hidden;
   }
 
-  .card:hover {
-    background: var(--bg-hover);
-    box-shadow: 0 2px 16px rgba(0, 0, 0, 0.25);
+  .app-row:hover {
+    background: var(--bg-raised);
+    border-color: var(--border-default);
+    transform: translateX(4px);
+    box-shadow: var(--shadow-md);
   }
 
-  .card.green  { border-left-color: var(--green); }
-  .card.red    { border-left-color: var(--red); }
-  .card.orange { border-left-color: var(--yellow); }
-  .card.gray   { border-left-color: var(--text-muted); }
-
-  .card-body {
-    padding: 18px 20px 12px;
+  .app-row::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    background: var(--border-default);
+    transition: background 0.2s;
   }
 
-  .card-top {
+  .app-row.green::before  { background: var(--green); }
+  .app-row.red::before    { background: var(--red); }
+  .app-row.orange::before { background: var(--yellow); }
+  .app-row.gray::before   { background: var(--text-muted); }
+
+  .app-status {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    margin-bottom: 6px;
+  }
+
+  .app-main {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .app-identity {
+    display: flex;
+    align-items: center;
+    gap: 10px;
   }
 
   .app-name {
-    font-size: 16px;
-    font-weight: 650;
+    font-size: 15px;
+    font-weight: 600;
     color: var(--text-primary);
     text-decoration: none;
     letter-spacing: -0.01em;
-    transition: color 0.15s;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .app-name:hover {
     color: var(--accent-text);
   }
 
-  /* ── Status dot ──────────────────────────────── */
+  .team-tag {
+    font-size: 10px;
+    color: var(--text-muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    background: var(--bg-overlay);
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border-subtle);
+  }
 
+  .app-desc {
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 400px;
+  }
+
+  .app-links {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .service-urls-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .app-url {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12.5px;
+    color: var(--accent-text);
+    text-decoration: none;
+    font-family: var(--font-mono);
+    padding: 4px 8px;
+    background: var(--accent-subtle);
+    border-radius: var(--radius-sm);
+    transition: all 0.15s;
+  }
+
+  .app-url:hover {
+    background: var(--accent);
+    color: var(--bg-root);
+  }
+
+  .app-url.muted {
+    background: var(--bg-overlay);
+    color: var(--text-muted);
+    font-family: var(--font-sans);
+    font-style: italic;
+  }
+
+  .app-actions {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .btn-open {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    padding: 6px 12px;
+    border-radius: var(--radius-sm);
+    transition: all 0.15s;
+  }
+
+  .btn-open:hover {
+    color: var(--text-primary);
+    background: var(--bg-overlay);
+  }
+
+  .btn-open svg {
+    transition: transform 0.15s;
+  }
+
+  .btn-open:hover svg {
+    transform: translateX(2px);
+  }
+
+  /* ── Status dot ──────────────────────────────── */
   .status-dot {
-    width: 9px;
-    height: 9px;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
     flex-shrink: 0;
   }
 
   .status-dot.green {
     background: var(--green);
-    box-shadow: 0 0 0 3px var(--green-subtle);
+    box-shadow: 0 0 8px var(--green);
   }
 
   .status-dot.red {
     background: var(--red);
-    box-shadow: 0 0 0 3px var(--red-subtle);
+    box-shadow: 0 0 8px var(--red);
   }
 
   .status-dot.orange {
     background: var(--yellow);
-    box-shadow: 0 0 0 3px var(--yellow-subtle);
+    box-shadow: 0 0 8px var(--yellow);
   }
 
   .status-dot.gray {
     background: var(--text-muted);
-    box-shadow: 0 0 0 3px rgba(96, 96, 112, 0.2);
-  }
-
-  /* ── URL ─────────────────────────────────────── */
-
-  .app-url {
-    display: block;
-    font-size: 12.5px;
-    color: var(--accent-text);
-    text-decoration: none;
-    font-family: var(--font-mono);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    transition: color 0.15s;
-  }
-
-  .app-url:hover {
-    color: var(--accent-hover);
-    text-decoration: underline;
-  }
-
-  .app-url.muted {
-    color: var(--text-muted);
-    font-style: italic;
-    font-family: inherit;
-  }
-
-  .service-urls-list {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .app-desc {
-    font-size: 12.5px;
-    color: var(--text-secondary);
-    margin: 4px 0 0;
-    line-height: 1.4;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-
-  /* ── Footer ──────────────────────────────────── */
-
-  .card-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 20px;
-    background: var(--bg-overlay);
-    border-top: 1px solid var(--border-subtle);
-  }
-
-  .team-tag {
-    font-size: 11px;
-    color: var(--accent);
-    font-weight: 500;
-    letter-spacing: 0.02em;
-    text-transform: uppercase;
-    background: var(--accent-subtle);
-    padding: 2px 8px;
-    border-radius: var(--radius-sm);
-  }
-
-  .detail-link {
-    font-size: 12px;
-    color: var(--text-muted);
-    text-decoration: none;
-    font-weight: 500;
-    transition: color 0.15s;
-  }
-
-  .detail-link:hover {
-    color: var(--accent-text);
   }
 
   /* ── Header buttons ─────────────────────────── */
-
   .header-buttons {
     display: flex;
     gap: 8px;
@@ -469,7 +512,6 @@
   }
 
   /* ── Import modal ───────────────────────────── */
-
   .import-error-banner {
     background: var(--red-subtle);
     color: var(--red-text);

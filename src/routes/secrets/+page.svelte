@@ -23,7 +23,7 @@
   async function loadSecrets() {
     loading = true;
     try {
-      const res = await fetch('/api/secrets');
+      const res = await fetch('/api/secrets' + window.location.search);
       if (res.ok) secretsList = await res.json();
     } finally { loading = false; }
   }
