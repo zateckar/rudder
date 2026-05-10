@@ -1,4 +1,5 @@
 import { json } from '@sveltejs/kit';
+import { sql } from 'drizzle-orm';
 import { db } from '$lib/db';
 import { containers, containerMetrics } from '$lib/db/schema';
 import { eq, and, gte, asc } from 'drizzle-orm';
@@ -68,14 +69,19 @@ export async function GET({
     .where(
       and(
         eq(containerMetrics.containerId, params.id),
-        gte(containerMetrics.collectedAt, fromDate)
+        sql`${containerMetrics.collectedAt} >= ${fromMs}`
       )
     )
     .orderBy(asc(containerMetrics.collectedAt))
     .all();
 
   const points = rows.map((r) => ({
-    ts: r.collectedAt instanceof Date ? r.collectedAt.getTime() : r.collectedAt,
+    ts: (() => {
+      const d = new Date(r.collectedAt);
+      const ms = d.getTime();
+      // If the timestamp is in seconds (less than year 2286), convert to ms
+      return ms < 10000000000 ? ms * 1000 : ms;
+    })(),
     cpuPercent:       r.cpuPercent ?? 0,
     memUsageBytes:    r.memUsageBytes ?? 0,
     memLimitBytes:    r.memLimitBytes ?? 0,

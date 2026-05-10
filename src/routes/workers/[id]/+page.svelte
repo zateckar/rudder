@@ -12,6 +12,20 @@
   let terminalSshKey = $state('');
   let showTerminalKeyPrompt = $state(false);
 
+  // Sync SSH key with sessionStorage to persist across reloads during session
+  onMount(() => {
+    const saved = sessionStorage.getItem(`rudder:ssh-key:${workerId}`);
+    if (saved) terminalSshKey = saved;
+  });
+
+  $effect(() => {
+    if (terminalSshKey) {
+      sessionStorage.setItem(`rudder:ssh-key:${workerId}`, terminalSshKey);
+    } else {
+      sessionStorage.removeItem(`rudder:ssh-key:${workerId}`);
+    }
+  });
+
   let events = $state<any[]>([]);
   let allSyslogEvents = $state<any[]>([]);
   let syslogMessage = $state('');
@@ -1471,11 +1485,21 @@
     {#if showTerminalKeyPrompt}
       <SshKeyPrompt
         workerId={workerId}
-        title="SSH Key for Terminal"
-        description="Paste the SSH private key to connect to this worker's terminal. The key is held in memory for this session only."
-        submitLabel="Connect"
-        onsubmit={(key) => { terminalSshKey = key; showTerminalKeyPrompt = false; initTerminal(); }}
-        oncancel={() => { showTerminalKeyPrompt = false; activeTab = 'overview'; }}
+        title={activeTab === 'terminal' ? "SSH Key for Terminal" : "SSH Key for System Logs"}
+        description={activeTab === 'terminal' 
+          ? "Paste the SSH private key to connect to this worker's terminal. The key is held in memory for this session only."
+          : "Paste the SSH private key to fetch system logs. The key is held in memory for this session only."}
+        submitLabel={activeTab === 'terminal' ? "Connect" : "Fetch Logs"}
+        onsubmit={(key) => { 
+          terminalSshKey = key; 
+          showTerminalKeyPrompt = false; 
+          if (activeTab === 'terminal') initTerminal();
+          else if (activeTab === 'events') loadEvents();
+        }}
+        oncancel={() => { 
+          showTerminalKeyPrompt = false; 
+          if (activeTab === 'terminal') activeTab = 'overview';
+        }}
       />
     {:else}
       <div class="terminal-section">

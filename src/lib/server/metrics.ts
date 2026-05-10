@@ -15,7 +15,7 @@ import { evaluateAlerts } from './alerts';
 // Track which provisioning events have already been processed to avoid redundant discovery runs
 const lastProcessedProvisioning = new Map<string, number>();
 
-const DEFAULT_INTERVAL_SECONDS = 300;   // 5 minutes
+const DEFAULT_INTERVAL_SECONDS = 60;    // 1 minute
 const RETENTION_DAYS = 30;
 
 async function getIntervalMs(): Promise<number> {

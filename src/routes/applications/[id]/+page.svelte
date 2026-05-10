@@ -415,7 +415,7 @@
   $effect(() => {
     for (const c of data.containers) {
       if (c.status === 'running') {
-        fetchHealth(c.containerId);
+        fetchHealth(c.id);
       }
     }
   });
