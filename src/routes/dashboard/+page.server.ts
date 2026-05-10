@@ -1,5 +1,5 @@
 import { redirect } from '@sveltejs/kit';
-import { db } from '$lib/db';
+import { db, safeWorkerColumns, safeUserColumns } from '$lib/db';
 import { workers, applications, containers, teams, users, auditLogs, deployments } from '$lib/db/schema';
 import { eq, desc, sql } from 'drizzle-orm';
 import { getAllWorkerResources } from '$lib/server/worker-selector';
@@ -19,7 +19,7 @@ export const load = async ({ url, cookies }: { url: URL; cookies: any }) => {
     throw redirect(303, '/login');
   }
 
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
+  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
   
   // Filter by team if requested
   const urlTeam = url.searchParams.get('team');
@@ -45,7 +45,7 @@ export const load = async ({ url, cookies }: { url: URL; cookies: any }) => {
     }
   }
 
-  const allWorkers = await db.select().from(workers).all();
+  const allWorkers = await db.select(safeWorkerColumns).from(workers).all();
   
   let allApplications: any[] = [];
   let allContainers: any[] = [];

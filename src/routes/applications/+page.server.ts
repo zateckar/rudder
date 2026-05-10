@@ -1,5 +1,5 @@
 import { redirect } from '@sveltejs/kit';
-import { db } from '$lib/db';
+import { db, safeWorkerColumns, safeUserColumns } from '$lib/db';
 import { applications, users, workers, teams, teamMembers, containers } from '$lib/db/schema';
 import { eq, inArray } from 'drizzle-orm';
 
@@ -68,7 +68,7 @@ export const load = async ({ url, cookies }: { url: URL; cookies: any }) => {
   const userId = await validateSession(sessionId);
   if (!userId) throw redirect(303, '/login');
 
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
+  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
   
   let userApps: any[] = [];
   const urlTeam = url.searchParams.get('team');
@@ -91,7 +91,7 @@ export const load = async ({ url, cookies }: { url: URL; cookies: any }) => {
     }
   }
 
-  const allWorkers = await db.select().from(workers).all();
+  const allWorkers = await db.select(safeWorkerColumns).from(workers).all();
   const allTeams = await db.select().from(teams).all();
 
   // Load all containers for these applications

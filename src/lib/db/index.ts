@@ -466,3 +466,32 @@ export { db };
     console.warn('[db] ADMIN_PASSWORD not set — skipping admin user creation. Set it to auto-create the admin account.');
   }
 }
+
+
+// ── Safe column subsets & runtime helpers (sensitive fields excluded) ────────
+// These must be used in every page load() that returns data to the browser.
+import { getTableColumns } from 'drizzle-orm';
+import { workers as _workersTable, users as _usersTable } from './schema';
+
+/**
+ * Worker columns safe to serialise to the browser.
+ * Excludes: podmanCaCert, podmanClientCert, podmanClientKey,
+ *           crowdsecBouncerKey, oidcClientSecret, oidcEncryptionKey.
+ */
+export const safeWorkerColumns = (() => {
+  const {
+    podmanCaCert: _a, podmanClientCert: _b, podmanClientKey: _c,
+    crowdsecBouncerKey: _d, oidcClientSecret: _e, oidcEncryptionKey: _f,
+    ...cols
+  } = getTableColumns(_workersTable);
+  return cols;
+})();
+
+/**
+ * User columns safe to serialise to the browser.
+ * Excludes: passwordHash.
+ */
+export const safeUserColumns = (() => {
+  const { passwordHash: _, ...cols } = getTableColumns(_usersTable);
+  return cols;
+})();

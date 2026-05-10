@@ -1,5 +1,5 @@
 import { redirect, error } from '@sveltejs/kit';
-import { db } from '$lib/db';
+import { db, safeWorkerColumns } from '$lib/db';
 import { applications, workers, containers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { canAccessApplication, requireAuth } from '$lib/server/auth';
@@ -65,7 +65,7 @@ export const load = async ({ params, cookies }: { params: { id: string }; cookie
   const { application } = access;
 
   const worker = application.workerId
-    ? await db.select().from(workers).where(eq(workers.id, application.workerId)).get()
+    ? await db.select(safeWorkerColumns).from(workers).where(eq(workers.id, application.workerId)).get()
     : null;
 
   const appContainers = await db

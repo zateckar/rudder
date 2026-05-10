@@ -1,5 +1,5 @@
 import { redirect } from '@sveltejs/kit';
-import { db } from '$lib/db';
+import { db, safeUserColumns } from '$lib/db';
 import { teams, teamMembers, users } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 
@@ -16,7 +16,7 @@ export const load = async ({ params, cookies }: { params: { id: string }; cookie
     throw redirect(303, '/login');
   }
 
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
+  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
 
   const team = await db.select().from(teams).where(eq(teams.id, params.id)).get();
   

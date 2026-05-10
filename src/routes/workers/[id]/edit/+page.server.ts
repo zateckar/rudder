@@ -1,5 +1,5 @@
 import { redirect, fail, error } from '@sveltejs/kit';
-import { db } from '$lib/db';
+import { db, safeWorkerColumns, safeUserColumns } from '$lib/db';
 import { workers, users } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 
@@ -12,12 +12,12 @@ export const load = async ({ params, cookies }: { params: { id: string }; cookie
   const userId = await validateSession(sessionId);
   if (!userId) throw redirect(303, '/login');
 
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
+  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
   if (!currentUser || currentUser.role !== 'admin') {
     throw redirect(303, '/dashboard');
   }
 
-  const worker = await db.select().from(workers).where(eq(workers.id, params.id)).get();
+  const worker = await db.select(safeWorkerColumns).from(workers).where(eq(workers.id, params.id)).get();
   if (!worker) throw error(404, 'Worker not found');
 
 

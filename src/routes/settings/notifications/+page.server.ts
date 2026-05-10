@@ -1,5 +1,5 @@
 import { redirect } from '@sveltejs/kit';
-import { db } from '$lib/db';
+import { db, safeUserColumns } from '$lib/db';
 import { users, notificationChannels, alertRules, alertEvents, teamMembers } from '$lib/db/schema';
 import { eq, desc, inArray } from 'drizzle-orm';
 
@@ -12,7 +12,7 @@ export const load = async ({ cookies, url }: { cookies: any; url: URL }) => {
   const userId = await validateSession(sessionId);
   if (!userId) throw redirect(303, '/login');
 
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
+  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
   if (!currentUser) throw redirect(303, '/login');
   const urlTeam = url.searchParams.get('team');
 

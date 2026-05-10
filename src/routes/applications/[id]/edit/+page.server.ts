@@ -1,5 +1,5 @@
 import { redirect, fail } from '@sveltejs/kit';
-import { db } from '$lib/db';
+import { db, safeWorkerColumns, safeUserColumns } from '$lib/db';
 import { applications, users, workers, teams, teamMembers, volumes, stacks } from '$lib/db/schema';
 import { eq, inArray, or, isNull } from 'drizzle-orm';
 
@@ -12,7 +12,7 @@ export const load = async ({ params, cookies }: { params: { id: string }; cookie
   const userId = await validateSession(sessionId);
   if (!userId) throw redirect(303, '/login');
 
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
+  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
   const app = await db.select().from(applications).where(eq(applications.id, params.id)).get();
 
   if (!app) throw redirect(303, '/applications');
@@ -33,7 +33,7 @@ export const load = async ({ params, cookies }: { params: { id: string }; cookie
         : [];
   }
 
-  const allWorkers = await db.select().from(workers).all();
+  const allWorkers = await db.select(safeWorkerColumns).from(workers).all();
 
   // Load available volumes for the volume registry dropdown
   let availableVolumes;

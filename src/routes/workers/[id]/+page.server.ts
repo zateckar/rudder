@@ -42,9 +42,10 @@ export const load = async ({ params, cookies }: { params: { id: string }; cookie
     ? Math.round(pings.filter(p => p.latencyMs != null).reduce((s, p) => s + (p.latencyMs || 0), 0) / pings.filter(p => p.latencyMs != null).length)
     : null;
 
+  const { podmanCaCert: _a, podmanClientCert: _b, podmanClientKey: _c, crowdsecBouncerKey: _d, oidcClientSecret: _e, oidcEncryptionKey: _f, ...safeWorker } = worker;
   return {
     user: ctx.user,
-    worker,
+    worker: safeWorker,
     containers: workerContainers,
     pings: pings.map(p => ({
       ...p,

@@ -1,5 +1,5 @@
 import { redirect, fail } from '@sveltejs/kit';
-import { db } from '$lib/db';
+import { db, safeWorkerColumns, safeUserColumns } from '$lib/db';
 import { applicationTemplates, applications, users, teams, teamMembers, workers } from '$lib/db/schema';
 import { eq, inArray, or } from 'drizzle-orm';
 
@@ -12,7 +12,7 @@ export const load = async ({ cookies, url }: { cookies: any; url: URL }) => {
   const userId = await validateSession(sessionId);
   if (!userId) throw redirect(303, '/login');
 
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
+  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
 
   // Get user's team memberships
   const memberships = await db
@@ -60,7 +60,7 @@ export const load = async ({ cookies, url }: { cookies: any; url: URL }) => {
   }
 
   const allTeams = await db.select().from(teams).all();
-  const allWorkers = await db.select().from(workers).all();
+  const allWorkers = await db.select(safeWorkerColumns).from(workers).all();
   const allApps = await db.select().from(applications).all();
 
   return {

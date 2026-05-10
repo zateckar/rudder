@@ -1,6 +1,6 @@
 import { redirect } from '@sveltejs/kit';
 import type { PageServerLoad, Actions } from './$types';
-import { db } from '$lib/db';
+import { db, safeWorkerColumns, safeUserColumns } from '$lib/db';
 import { users, volumes, teams, workers, teamMembers } from '$lib/db/schema';
 import { eq, inArray } from 'drizzle-orm';
 
@@ -17,7 +17,7 @@ export const load: PageServerLoad = async ({ cookies, url }) => {
     throw redirect(303, '/login');
   }
 
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
+  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
   if (!currentUser) {
     throw redirect(303, '/login');
   }
@@ -49,7 +49,7 @@ export const load: PageServerLoad = async ({ cookies, url }) => {
     ? await db.select().from(teams).all()
     : await db.select().from(teams).where(eq(teams.id, teamIds[0] || '')).all();
   
-  const allWorkers = await db.select().from(workers).all();
+  const allWorkers = await db.select(safeWorkerColumns).from(workers).all();
 
   // Enrich volumes with actual disk usage (best-effort, parallel per worker)
   const enrichedVolumes = allVolumes.map(vol => ({ ...vol, actualSizeMB: null as number | null }));

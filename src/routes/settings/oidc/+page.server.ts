@@ -1,5 +1,5 @@
 import { redirect, fail } from '@sveltejs/kit';
-import { db } from '$lib/db';
+import { db, safeUserColumns } from '$lib/db';
 import { users, oidcConfig } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 
@@ -12,7 +12,7 @@ export const load = async ({ cookies, url }: { cookies: any; url: URL }) => {
   const userId = await validateSession(sessionId);
   if (!userId) throw redirect(303, '/login');
 
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
+  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
   if (!currentUser || currentUser.role !== 'admin') throw redirect(303, '/dashboard');
 
   // Load generic OIDC config from DB (take first/only row)
@@ -39,7 +39,7 @@ export const actions = {
     }
 
     const userId = await validateSession(sessionId);
-    const currentUser = await db.select().from(users).where(eq(users.id, userId!)).get();
+    const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId!)).get();
     if (!currentUser || currentUser.role !== 'admin') {
       return fail(403, { error: 'Forbidden' });
     }

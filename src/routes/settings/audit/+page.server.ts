@@ -1,5 +1,5 @@
 import { redirect } from '@sveltejs/kit';
-import { db } from '$lib/db';
+import { db, safeUserColumns } from '$lib/db';
 import { auditLogs, users } from '$lib/db/schema';
 import { eq, desc } from 'drizzle-orm';
 
@@ -18,7 +18,7 @@ export const load = async ({ cookies, url }: { cookies: any; url: URL }) => {
     throw redirect(303, '/login');
   }
 
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
+  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
   const urlTeam = url.searchParams.get('team');
 
   if (currentUser?.role !== 'admin') {

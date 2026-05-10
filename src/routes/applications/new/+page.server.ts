@@ -1,5 +1,5 @@
 import { redirect, fail } from '@sveltejs/kit';
-import { db } from '$lib/db';
+import { db, safeUserColumns } from '$lib/db';
 import { applications, users, workers, teams, teamMembers, volumes, stacks } from '$lib/db/schema';
 import { eq, inArray, or, isNull, and } from 'drizzle-orm';
 import { selectWorker, getAllWorkerResources, getAllEligibleWorkers } from '$lib/server/worker-selector';
@@ -13,7 +13,7 @@ export const load = async ({ cookies }: { cookies: any }) => {
   const userId = await validateSession(sessionId);
   if (!userId) throw redirect(303, '/login');
 
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
+  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
 
   let userTeams;
   if (currentUser?.role === 'admin') {
@@ -54,15 +54,19 @@ export const load = async ({ cookies }: { cookies: any }) => {
     ? await db.select().from(stacks).where(inArray(stacks.teamId, stackTeamIds)).all()
     : [];
 
+  const _stripWorker = (w: typeof workers.$inferSelect) => {
+    const { podmanCaCert: _a, podmanClientCert: _b, podmanClientKey: _c, crowdsecBouncerKey: _d, oidcClientSecret: _e, oidcEncryptionKey: _f, ...safe } = w;
+    return safe;
+  };
   return {
     user: currentUser,
     teams: userTeams,
     volumes: availableVolumes,
     stacks: availableStacks,
-    selectedWorker: selection?.worker ?? null,
+    selectedWorker: selection?.worker ? _stripWorker(selection.worker) : null,
     workerResources: selection?.resources ?? null,
     noWorkersAvailable: selection === null,
-    allWorkers: allEligible,
+    allWorkers: allEligible.map(info => ({ ...info, worker: _stripWorker(info.worker) })),
   };
 };
 
