@@ -169,14 +169,14 @@
           <span class="status-dot {app.status.color}" title={app.status.label}></span>
         </div>
         <div class="app-main">
-          <div class="app-identity">
-            <a href="/applications/{app.id}" class="app-name">{app.name}</a>
-            {#if team}
-              <span class="team-tag">{team.name}</span>
-            {/if}
-          </div>
+          <a href="/applications/{app.id}" class="app-name">{app.name}</a>
           {#if app.description}
             <p class="app-desc">{app.description}</p>
+          {/if}
+        </div>
+        <div class="app-team">
+          {#if team}
+            <span class="team-tag">{team.name}</span>
           {/if}
         </div>
         <div class="app-links">
@@ -184,24 +184,23 @@
             <div class="service-urls-list">
               {#each app.serviceUrls as svc}
                 <a href={svc.url} target="_blank" rel="noopener" class="app-url" title={svc.url}>
-                  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 8.5V13.5C13 14.0523 12.5523 14.5 12 14.5H2.5C1.94772 14.5 1.5 14.0523 1.5 13.5V4C1.5 3.44772 1.94772 3 2.5 3H7.5M14.5 1.5L8.5 7.5M14.5 1.5H10.5M14.5 1.5V5.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                  {svc.name}
+                  <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 8.5V13.5C13 14.0523 12.5523 14.5 12 14.5H2.5C1.94772 14.5 1.5 14.0523 1.5 13.5V4C1.5 3.44772 1.94772 3 2.5 3H7.5M14.5 1.5L8.5 7.5M14.5 1.5H10.5M14.5 1.5V5.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  {svc.url.replace('https://', '').replace('http://', '')}
                 </a>
               {/each}
             </div>
           {:else if app.appUrl}
             <a href={app.appUrl} target="_blank" rel="noopener" class="app-url" title={app.appUrl}>
-              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 8.5V13.5C13 14.0523 12.5523 14.5 12 14.5H2.5C1.94772 14.5 1.5 14.0523 1.5 13.5V4C1.5 3.44772 1.94772 3 2.5 3H7.5M14.5 1.5L8.5 7.5M14.5 1.5H10.5M14.5 1.5V5.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-              Visit
+              <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 8.5V13.5C13 14.0523 12.5523 14.5 12 14.5H2.5C1.94772 14.5 1.5 14.0523 1.5 13.5V4C1.5 3.44772 1.94772 3 2.5 3H7.5M14.5 1.5L8.5 7.5M14.5 1.5H10.5M14.5 1.5V5.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              {app.appUrl.replace('https://', '').replace('http://', '')}
             </a>
           {:else}
             <span class="app-url muted">no url</span>
           {/if}
         </div>
         <div class="app-actions">
-          <a href="/applications/{app.id}" class="btn-open">
-            Manage
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3l5 5-5 5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <a href="/applications/{app.id}" class="btn-open" title="Manage">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
           </a>
         </div>
       </div>
@@ -295,17 +294,17 @@
   .applications-list {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 6px;
   }
 
   .app-row {
     display: grid;
-    grid-template-columns: 32px 1fr 1fr 120px;
+    grid-template-columns: 24px 1fr 120px 1.5fr 40px;
     align-items: center;
     background: var(--bg-surface);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-md);
-    padding: 14px 20px;
+    padding: 8px 16px;
     transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     position: relative;
     overflow: hidden;
@@ -342,18 +341,13 @@
   .app-main {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 0;
     min-width: 0;
   }
 
-  .app-identity {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
 
   .app-name {
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 600;
     color: var(--text-primary);
     text-decoration: none;
@@ -378,9 +372,15 @@
     border-radius: 4px;
     border: 1px solid var(--border-subtle);
   }
+  .app-team {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding-right: 20px;
+  }
 
   .app-desc {
-    font-size: 12.5px;
+    font-size: 12px;
     color: var(--text-secondary);
     white-space: nowrap;
     overflow: hidden;
@@ -405,14 +405,18 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    font-size: 12.5px;
+    font-size: 10px;
     color: var(--accent-text);
     text-decoration: none;
     font-family: var(--font-mono);
-    padding: 4px 8px;
+    padding: 2px 6px;
     background: var(--accent-subtle);
     border-radius: var(--radius-sm);
     transition: all 0.15s;
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .app-url:hover {
@@ -439,7 +443,7 @@
     font-size: 13px;
     font-weight: 600;
     color: var(--text-secondary);
-    padding: 6px 12px;
+    padding: 6px;
     border-radius: var(--radius-sm);
     transition: all 0.15s;
   }
@@ -454,7 +458,7 @@
   }
 
   .btn-open:hover svg {
-    transform: translateX(2px);
+    color: var(--accent);
   }
 
   /* ── Status dot ──────────────────────────────── */
