@@ -490,8 +490,6 @@
           fetchLive(c.id);
           livePolling[c.id] = setInterval(() => fetchLive(c.id), 30_000);
         }
-        // Historical fetch
-        fetchHistorical(c.id, selectedRange);
       }
     } else {
       for (const [id, timer] of Object.entries(livePolling)) {

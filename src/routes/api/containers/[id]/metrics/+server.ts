@@ -69,7 +69,7 @@ export async function GET({
     .where(
       and(
         eq(containerMetrics.containerId, params.id),
-        sql`${containerMetrics.collectedAt} >= ${fromMs}`
+        sql`${containerMetrics.collectedAt} >= ${Math.floor(fromMs / 1000)}`
       )
     )
     .orderBy(asc(containerMetrics.collectedAt))

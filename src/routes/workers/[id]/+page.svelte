@@ -11,6 +11,7 @@
   // SSH key held in memory for terminal session (never persisted server-side)
   let terminalSshKey = $state('');
   let showTerminalKeyPrompt = $state(false);
+  let showSyslogKeyPrompt = $state(false);
 
   // Sync SSH key with sessionStorage to persist across reloads during session
   onMount(() => {
@@ -779,6 +780,21 @@
 />
 {/if}
 
+{#if showSyslogKeyPrompt}
+<SshKeyPrompt
+  workerId={workerId}
+  title="SSH Key for System Logs"
+  description="Paste the SSH private key to fetch system logs. The key is held in memory for this session only and is <strong>never stored</strong> on the server."
+  submitLabel="Fetch Logs"
+  onsubmit={(key) => {
+    terminalSshKey = key;
+    showSyslogKeyPrompt = false;
+    loadEvents();
+  }}
+  oncancel={() => showSyslogKeyPrompt = false}
+/>
+{/if}
+
 <div class="page">
   <div class="header">
     <div class="header-top">
@@ -1091,7 +1107,7 @@
         <div class="empty-state">
           <p class="empty">{syslogMessage || 'No events found'}</p>
           {#if eventSource === 'syslog' && !terminalSshKey}
-            <button class="btn-tiny btn-accent" onclick={() => { showTerminalKeyPrompt = true; }}>
+            <button class="btn-tiny btn-accent" onclick={() => { showSyslogKeyPrompt = true; }}>
               Provide SSH Key
             </button>
           {/if}
