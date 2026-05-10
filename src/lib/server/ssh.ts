@@ -49,14 +49,14 @@ export async function executeSSHCommand(
       // Use stdin for script input
       const result = execSync(
         `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=60 -i "${tempKeyPath}" -p ${config.port} ${config.username}@${config.host} ${command}`,
-        { encoding: 'utf8', timeout: 900000, input: stdinInput }
+        { encoding: 'utf8', timeout: 900000, input: stdinInput, maxBuffer: 50 * 1024 * 1024 }
       );
       stdout = result;
       stderr = '';
     } else {
       stdout = execSync(
         `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -i "${tempKeyPath}" -p ${config.port} ${config.username}@${config.host} "${command.replace(/"/g, '\\"')}"`,
-        { encoding: 'utf8', timeout: 120000 }
+        { encoding: 'utf8', timeout: 120000, maxBuffer: 50 * 1024 * 1024 }
       );
       stderr = '';
     }

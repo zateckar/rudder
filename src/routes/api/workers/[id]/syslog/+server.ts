@@ -55,32 +55,39 @@ async function handleRequest({ params, url, cookies, request }: any) {
       privateKey: sshPrivateKey,
     };
 
-    // Fetch logs using journalctl in JSON format
-    const command = `journalctl --since "${since}" -n ${lines} --output=json --no-pager`;
+    // Fetch logs using journalctl in compact short-iso format (avoids huge JSON output)
+    const command = `journalctl --since "${since}" -n ${lines} --no-pager --output=short-iso`;
     const result = await executeSSHCommand(sshConfig, command);
 
     if (result.exitCode !== 0) {
       throw new Error(result.stderr || `journalctl failed with exit code ${result.exitCode}`);
     }
 
+    // short-iso format: "2025-05-07T12:34:56+0000 hostname process[pid]: message"
     const events = result.stdout
       .split('\n')
-      .filter((l) => l.trim())
-      .map((l) => {
-        try {
-          const raw = JSON.parse(l);
-          return {
-            timestamp: new Date(parseInt(raw.__REALTIME_TIMESTAMP) / 1000).toLocaleString(),
-            priority: classifyPriority(raw.MESSAGE || ''),
-            message: raw.MESSAGE,
-            unit: raw._SYSTEMD_UNIT,
-            raw,
-          };
-        } catch {
-          return null;
-        }
+      .filter(l => l.trim() && !l.startsWith('--'))
+      .map(l => {
+        const spaceIdx = l.indexOf(' ');
+        if (spaceIdx === -1) return null;
+        const timestamp = l.substring(0, spaceIdx);
+        const rest = l.substring(spaceIdx + 1);
+        // rest = "hostname process[pid]: message"
+        const colonIdx = rest.indexOf(': ');
+        if (colonIdx === -1) return null;
+        const message = rest.substring(colonIdx + 2).trim();
+        const unitPart = rest.substring(0, colonIdx);
+        // last token before colon is "process[pid]", strip pid
+        const unitTokens = unitPart.trim().split(/\s+/);
+        const unit = (unitTokens[unitTokens.length - 1] || '').replace(/\[\d+\]$/, '');
+        return {
+          timestamp,
+          priority: classifyPriority(message),
+          message,
+          unit,
+        };
       })
-      .filter((e) => e !== null);
+      .filter((e): e is NonNullable<typeof e> => e !== null);
 
     return json({
       events: events.reverse(), // Newest first
