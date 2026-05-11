@@ -54,12 +54,16 @@ async function collectContainerMetrics(): Promise<void> {
     let client;
     try {
       client = getRestPodmanClient(worker);
-    } catch { continue; }
+    } catch (e) {
+      console.error(`[metrics] Failed to create client for ${worker.name}:`, (e as any).message || e);
+      continue;
+    }
 
     // Fetch all Podman containers in one call — this is the source of truth
     let podmanContainers: any[] = [];
     try {
       podmanContainers = await client.listContainers(true);
+      console.log(`[metrics] ${worker.name}: Podman has ${podmanContainers.length} containers, DB has ${workerContainers.length}`);
     } catch (e) {
       console.error(`[metrics] Failed to list containers for ${worker.name}:`, (e as any).message || e);
       client.destroy();
@@ -78,6 +82,10 @@ async function collectContainerMetrics(): Promise<void> {
       // Sync DB status with Podman source of truth
       const realStatus = podmanState?.state || 'missing';
       const dbStatus = container.status;
+
+      if (!podmanState) {
+        console.warn(`[metrics] ${worker.name}: container ${container.name} (${container.containerId.slice(0, 12)}) not found in Podman — marking missing`);
+      }
 
       if (realStatus !== dbStatus) {
         await db.update(containers)
