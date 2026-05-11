@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { containers, containerMetrics } from '$lib/db/schema';
-import { eq, and, gte, asc } from 'drizzle-orm';
+import { eq, and, asc, sql } from 'drizzle-orm';
 
 const RANGES: Record<string, number> = {
   '1h':  1  * 60 * 60 * 1000,
@@ -68,7 +68,7 @@ export async function GET({
     .where(
       and(
         eq(containerMetrics.containerId, params.id),
-        gte(containerMetrics.collectedAt, new Date(fromMs))
+        sql`${containerMetrics.collectedAt} >= ${Math.floor(fromMs / 1000)}`
       )
     )
     .orderBy(asc(containerMetrics.collectedAt))

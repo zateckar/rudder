@@ -490,6 +490,7 @@
           fetchLive(c.id);
           livePolling[c.id] = setInterval(() => fetchLive(c.id), 30_000);
         }
+        fetchHistorical(c.id, selectedRange);
       }
     } else {
       for (const [id, timer] of Object.entries(livePolling)) {
@@ -502,15 +503,6 @@
     };
   });
 
-  // Re-fetch historical when range changes
-  $effect(() => {
-    const range = selectedRange; // reactive dependency
-    if (activeTab === 'metrics') {
-      for (const c of data.containers) {
-        fetchHistorical(c.id, range);
-      }
-    }
-  });
 
   /** SVG polyline for time-series data */
   function chartPoints(
