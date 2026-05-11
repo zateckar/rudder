@@ -14,9 +14,13 @@
   let metricsInterval = $state(0);
   let savingInterval = $state(false);
   let intervalSaved = $state(false);
+  let metricsRetentionDays = $state(30);
+  let savingRetention = $state(false);
+  let retentionSaved = $state(false);
 
   $effect(() => {
     metricsInterval = data.metricsInterval;
+    metricsRetentionDays = data.metricsRetentionDays;
   });
 
   async function saveInterval() {
@@ -34,6 +38,24 @@
       }
     } finally {
       savingInterval = false;
+    }
+  }
+
+  async function saveRetention() {
+    savingRetention = true;
+    retentionSaved = false;
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ metrics_retention_days: String(metricsRetentionDays) }),
+      });
+      if (res.ok) {
+        retentionSaved = true;
+        setTimeout(() => retentionSaved = false, 2000);
+      }
+    } finally {
+      savingRetention = false;
     }
   }
 
@@ -190,10 +212,19 @@
   <div class="setting-row">
     <div class="setting-info">
       <span class="setting-label">Data retention</span>
-      <span class="setting-hint">Metrics and pings older than this are automatically pruned</span>
+      <span class="setting-hint">Metrics and pings older than this are automatically pruned. Data 7+ days old is down-sampled to 1 row/hour.</span>
     </div>
     <div class="setting-control">
-      <span class="text-muted">30 days</span>
+      <select bind:value={metricsRetentionDays}>
+        <option value={7}>7 days</option>
+        <option value={14}>14 days</option>
+        <option value={30}>30 days</option>
+        <option value={60}>60 days</option>
+        <option value={90}>90 days</option>
+      </select>
+      <button class="btn-tiny btn-save" disabled={savingRetention} onclick={saveRetention} title="Save the data retention period">
+        {savingRetention ? '…' : retentionSaved ? '✓' : 'Save'}
+      </button>
     </div>
   </div>
 </div>

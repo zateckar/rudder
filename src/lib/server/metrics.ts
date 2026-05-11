@@ -3,7 +3,7 @@
  * Polls containers and workers at a configurable interval.
  * Call startMetricsCollection() once at server startup (guarded by globalThis flag).
  */
-import { db } from '$lib/db';
+import { db, sqlite } from '$lib/db';
 import { containers, workers, containerMetrics, workerMetrics, workerPings, systemSettings, applications, users } from '$lib/db/schema';
 import { eq, lt } from 'drizzle-orm';
 import { getRestPodmanClient } from './podman-client';
@@ -16,18 +16,26 @@ import { evaluateAlerts } from './alerts';
 const lastProcessedProvisioning = new Map<string, number>();
 
 const DEFAULT_INTERVAL_SECONDS = 60;    // 1 minute
-const RETENTION_DAYS = 30;
+const DEFAULT_RETENTION_DAYS = 30;
 const COLLECTION_TIMEOUT_MS = 4 * 60 * 1000; // 4 minutes — safety net if HTTP requests hang
 
-async function getIntervalMs(): Promise<number> {
+async function getSettings(key: string, defaultValue: number, min: number, max: number): Promise<number> {
   try {
-    const row = await db.select().from(systemSettings).where(eq(systemSettings.key, 'metrics_interval_seconds')).get();
+    const row = await db.select().from(systemSettings).where(eq(systemSettings.key, key)).get();
     if (row) {
-      const seconds = parseInt(row.value);
-      if (seconds >= 10 && seconds <= 3600) return seconds * 1000;
+      const val = parseInt(row.value);
+      if (val >= min && val <= max) return val;
     }
   } catch {}
-  return DEFAULT_INTERVAL_SECONDS * 1000;
+  return defaultValue;
+}
+
+async function getIntervalMs(): Promise<number> {
+  return (await getSettings('metrics_interval_seconds', DEFAULT_INTERVAL_SECONDS, 10, 3600)) * 1000;
+}
+
+async function getRetentionDays(): Promise<number> {
+  return getSettings('metrics_retention_days', DEFAULT_RETENTION_DAYS, 1, 365);
 }
 
 // ── Container metrics (existing logic) ─────────────────────────────────────────
@@ -334,17 +342,95 @@ async function collectWorkerMetrics(): Promise<void> {
 
 // ── Prune old data ──────────────────────────────────────────────────────────────
 
+/**
+ * Delete rows older than the retention window.
+ * For data older than 7 days, keep only 1 sample per hour (downsampling)
+ * to preserve trending ability while dramatically reducing storage.
+ */
 async function pruneOldData(): Promise<void> {
-  const cutoff = new Date(Date.now() - RETENTION_DAYS * 86_400_000);
+  const retentionDays = await getRetentionDays();
+  const cutoff = new Date(Date.now() - retentionDays * 86_400_000);
+  const cutoffUnix = Math.floor(cutoff.getTime() / 1000);
+
+  // ── Raw retention: delete anything past the absolute retention window ──────
   try {
-    await db.delete(containerMetrics).where(lt(containerMetrics.collectedAt, cutoff));
+    await db.delete(workerPings).where(lt(workerPings.pingedAt, cutoff));
   } catch { /* table may not exist yet */ }
   try {
     await db.delete(workerMetrics).where(lt(workerMetrics.collectedAt, cutoff));
   } catch { /* table may not exist yet */ }
   try {
-    await db.delete(workerPings).where(lt(workerPings.pingedAt, cutoff));
+    await db.delete(containerMetrics).where(lt(containerMetrics.collectedAt, cutoff));
   } catch { /* table may not exist yet */ }
+
+  // ── Downsampling: for data between 7 days ago and the retention cutoff,    ──
+  // ── keep at most 1 row per hour per worker/container. This preserves        ──
+  // ── historical trend visibility without keeping every 1-minute sample.      ──
+  const downsampleCutoff = new Date(Date.now() - 7 * 86_400_000);
+  const downsampleUnix = Math.floor(downsampleCutoff.getTime() / 1000);
+
+  // Only downsample if the downsample window is still within the retention window
+  if (downsampleCutoff <= cutoff) return;
+
+  // ── Downsample worker_pings: keep 1 row per hour per worker ────────────────
+  try {
+    sqlite.run(`
+      DELETE FROM worker_pings WHERE id IN (
+        SELECT id FROM (
+          SELECT id,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY worker_id, strftime('%Y-%m-%dT%H', pinged_at, 'unixepoch')
+                   ORDER BY pinged_at DESC
+                 ) AS rn
+          FROM worker_pings
+          WHERE pinged_at >= ${downsampleUnix}
+            AND pinged_at < ${cutoffUnix}
+        ) WHERE rn > 1
+      )
+    `);
+  } catch (e) {
+    console.error('[metrics] Failed to downsample worker_pings:', (e as any).message || e);
+  }
+
+  // ── Downsample worker_metrics: keep 1 row per hour per worker ──────────────
+  try {
+    sqlite.run(`
+      DELETE FROM worker_metrics WHERE id IN (
+        SELECT id FROM (
+          SELECT id,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY worker_id, strftime('%Y-%m-%dT%H', collected_at, 'unixepoch')
+                   ORDER BY collected_at DESC
+                 ) AS rn
+          FROM worker_metrics
+          WHERE collected_at >= ${downsampleUnix}
+            AND collected_at < ${cutoffUnix}
+        ) WHERE rn > 1
+      )
+    `);
+  } catch (e) {
+    console.error('[metrics] Failed to downsample worker_metrics:', (e as any).message || e);
+  }
+
+  // ── Downsample container_metrics: keep 1 row per hour per container ────────
+  try {
+    sqlite.run(`
+      DELETE FROM container_metrics WHERE id IN (
+        SELECT id FROM (
+          SELECT id,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY container_id, strftime('%Y-%m-%dT%H', collected_at, 'unixepoch')
+                   ORDER BY collected_at DESC
+                 ) AS rn
+          FROM container_metrics
+          WHERE collected_at >= ${downsampleUnix}
+            AND collected_at < ${cutoffUnix}
+        ) WHERE rn > 1
+      )
+    `);
+  } catch (e) {
+    console.error('[metrics] Failed to downsample container_metrics:', (e as any).message || e);
+  }
 }
 
 // ── Scheduler ───────────────────────────────────────────────────────────────────

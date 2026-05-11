@@ -176,10 +176,9 @@ sqlite.run(`
     block_read_bytes INTEGER,
     block_write_bytes INTEGER
   );
-  CREATE INDEX IF NOT EXISTS container_metrics_container_id_idx
-    ON container_metrics (container_id);
-  CREATE INDEX IF NOT EXISTS container_metrics_collected_at_idx
-    ON container_metrics (collected_at);
+  CREATE INDEX IF NOT EXISTS container_metrics_container_collected_idx
+    ON container_metrics (container_id, collected_at);
+  DROP INDEX IF EXISTS container_metrics_container_id_idx;
 
   CREATE TABLE IF NOT EXISTS oidc_config (
     id TEXT PRIMARY KEY NOT NULL,
@@ -394,10 +393,9 @@ sqlite.run(`
     volumes_count INTEGER
   );
 
-  CREATE INDEX IF NOT EXISTS worker_metrics_worker_id_idx
-    ON worker_metrics (worker_id);
-  CREATE INDEX IF NOT EXISTS worker_metrics_collected_at_idx
-    ON worker_metrics (collected_at);
+  CREATE INDEX IF NOT EXISTS worker_metrics_worker_collected_idx
+    ON worker_metrics (worker_id, collected_at);
+  DROP INDEX IF EXISTS worker_metrics_worker_id_idx;
 
   CREATE TABLE IF NOT EXISTS worker_pings (
     id TEXT PRIMARY KEY NOT NULL,
@@ -408,8 +406,9 @@ sqlite.run(`
     error TEXT
   );
 
-  CREATE INDEX IF NOT EXISTS worker_pings_worker_id_idx
-    ON worker_pings (worker_id);
+  CREATE INDEX IF NOT EXISTS worker_pings_worker_pinged_idx
+    ON worker_pings (worker_id, pinged_at);
+  DROP INDEX IF EXISTS worker_pings_worker_id_idx;
 
   CREATE TABLE IF NOT EXISTS system_settings (
     key TEXT PRIMARY KEY NOT NULL,
@@ -432,7 +431,7 @@ sqlite.run(`
 
 const db = drizzle(sqlite);
 
-export { db };
+export { db, sqlite };
 
 // ── Auto-bootstrap admin user ─────────────────────────────────────────────────
 // Creates the admin user on first boot — no manual db:init required.

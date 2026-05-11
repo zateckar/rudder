@@ -29,10 +29,14 @@ export const load = async ({ cookies }: { cookies: any }) => {
   const intervalRow = await db.select().from(systemSettings).where(eq(systemSettings.key, 'metrics_interval_seconds')).get();
   const metricsInterval = intervalRow ? parseInt(intervalRow.value) : 300;
 
+  const retentionRow = await db.select().from(systemSettings).where(eq(systemSettings.key, 'metrics_retention_days')).get();
+  const metricsRetentionDays = retentionRow ? parseInt(retentionRow.value) : 30;
+
 
   return {
     user: currentUser,
     usersList: allUsers,
     metricsInterval,
+    metricsRetentionDays,
   };
 };
