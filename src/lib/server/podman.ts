@@ -242,10 +242,23 @@ export class PodmanClient {
           try {
             resolve(JSON.parse(data) as T);
           } catch {
+            const firstLine = data.split('\n')[0];
+            if (firstLine) {
+              try {
+                resolve(JSON.parse(firstLine) as T);
+                return;
+              } catch {}
+            }
             resolve(data as unknown as T);
           }
         });
       });
+
+      const absoluteTimeout = setTimeout(() => {
+        req.destroy(new Error(`Podman API request absolute timeout: ${method} ${path}`));
+      }, 30_000);
+
+      req.on('close', () => clearTimeout(absoluteTimeout));
 
       req.on('timeout', () => {
         req.destroy(new Error(`Podman API request timed out: ${method} ${path}`));

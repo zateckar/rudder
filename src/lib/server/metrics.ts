@@ -97,30 +97,59 @@ async function collectContainerMetrics(): Promise<void> {
       if (realStatus !== 'running') continue;
 
       try {
-        const raw = await client.getContainerStats(container.containerId);
+        const raw = await client.getContainerStats(container.containerId) as any;
 
-        const cpuDelta = raw.cpu_stats.cpu_usage.total_usage - raw.precpu_stats.cpu_usage.total_usage;
-        const systemDelta = raw.cpu_stats.system_cpu_usage - raw.precpu_stats.system_cpu_usage;
-        const numCpus = raw.cpu_stats.online_cpus ?? raw.cpu_stats.cpu_usage.percpu_usage?.length ?? 1;
-        const cpuPercent = systemDelta > 0 ? (cpuDelta / systemDelta) * numCpus * 100 : 0;
+        let cpuPercent = 0;
+        let memUsage = 0;
+        let memLimit = 0;
+        let memPercent = 0;
+        let rxBytes = 0;
+        let txBytes = 0;
+        let blockRead = 0;
+        let blockWrite = 0;
 
-        const memUsage = raw.memory_stats.usage ?? 0;
-        const memLimit = raw.memory_stats.limit ?? 0;
-        const memPercent = memLimit > 0 ? (memUsage / memLimit) * 100 : 0;
+        if (raw && typeof raw === 'object') {
+          if (raw.Stats && Array.isArray(raw.Stats) && raw.Stats.length > 0) {
+            // Libpod format
+            const stat = raw.Stats[0];
+            cpuPercent = stat.CPU ?? stat.CPUPerc ?? 0;
+            memUsage = stat.MemUsage ?? 0;
+            memLimit = stat.MemLimit ?? 0;
+            memPercent = stat.MemPerc ?? (memLimit > 0 ? (memUsage / memLimit) * 100 : 0);
+            rxBytes = stat.NetInput ?? 0;
+            txBytes = stat.NetOutput ?? 0;
+            blockRead = stat.BlockInput ?? 0;
+            blockWrite = stat.BlockOutput ?? 0;
+          } else {
+            // Docker format
+            const cpuUsage = raw.cpu_stats?.cpu_usage?.total_usage ?? 0;
+            const preCpuUsage = raw.precpu_stats?.cpu_usage?.total_usage ?? 0;
+            const systemCpu = raw.cpu_stats?.system_cpu_usage ?? 0;
+            const preSystemCpu = raw.precpu_stats?.system_cpu_usage ?? 0;
+            
+            const cpuDelta = cpuUsage - preCpuUsage;
+            const systemDelta = systemCpu - preSystemCpu;
+            const numCpus = raw.cpu_stats?.online_cpus ?? raw.cpu_stats?.cpu_usage?.percpu_usage?.length ?? 1;
+            
+            cpuPercent = systemDelta > 0 && cpuDelta > 0 ? (cpuDelta / systemDelta) * numCpus * 100 : 0;
 
-        let rxBytes = 0, txBytes = 0;
-        if (raw.networks) {
-          for (const iface of Object.values(raw.networks)) {
-            rxBytes += iface.rx_bytes ?? 0;
-            txBytes += iface.tx_bytes ?? 0;
-          }
-        }
+            memUsage = raw.memory_stats?.usage ?? 0;
+            memLimit = raw.memory_stats?.limit ?? 0;
+            memPercent = memLimit > 0 ? (memUsage / memLimit) * 100 : 0;
 
-        let blockRead = 0, blockWrite = 0;
-        if (raw.blkio_stats?.io_service_bytes_recursive) {
-          for (const entry of raw.blkio_stats.io_service_bytes_recursive) {
-            if (entry.op === 'Read') blockRead += entry.value;
-            if (entry.op === 'Write') blockWrite += entry.value;
+            if (raw.networks) {
+              for (const iface of Object.values(raw.networks as Record<string, any>)) {
+                rxBytes += iface.rx_bytes ?? 0;
+                txBytes += iface.tx_bytes ?? 0;
+              }
+            }
+
+            if (raw.blkio_stats?.io_service_bytes_recursive) {
+              for (const entry of raw.blkio_stats.io_service_bytes_recursive) {
+                if (entry.op === 'Read' || entry.op === 'read') blockRead += entry.value;
+                if (entry.op === 'Write' || entry.op === 'write') blockWrite += entry.value;
+              }
+            }
           }
         }
 
