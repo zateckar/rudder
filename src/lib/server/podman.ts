@@ -228,6 +228,7 @@ export class PodmanClient {
           ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {}),
         },
         agent,
+        timeout: 30_000, // 30 s — prevents hung requests from blocking the metrics scheduler
       };
 
       const req = reqModule.request(reqOptions, (res) => {
@@ -246,6 +247,9 @@ export class PodmanClient {
         });
       });
 
+      req.on('timeout', () => {
+        req.destroy(new Error(`Podman API request timed out: ${method} ${path}`));
+      });
       req.on('error', reject);
       if (body) req.write(body);
       req.end();

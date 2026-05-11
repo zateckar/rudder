@@ -17,6 +17,7 @@ const lastProcessedProvisioning = new Map<string, number>();
 
 const DEFAULT_INTERVAL_SECONDS = 60;    // 1 minute
 const RETENTION_DAYS = 30;
+const COLLECTION_TIMEOUT_MS = 4 * 60 * 1000; // 4 minutes — safety net if HTTP requests hang
 
 async function getIntervalMs(): Promise<number> {
   try {
@@ -345,7 +346,12 @@ async function runLoop(): Promise<void> {
   running = true;
   const start = Date.now();
   try {
-    await collectAll();
+    await Promise.race([
+      collectAll(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Collection timed out — possible hung HTTP request')), COLLECTION_TIMEOUT_MS)
+      ),
+    ]);
     console.log(`[metrics] Collection done in ${Date.now() - start}ms`);
   } catch (e) {
     console.error('[metrics] Collection failed:', (e as any).message || e);
