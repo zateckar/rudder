@@ -213,6 +213,17 @@ try {
   // Column already exists
 }
 
+// Add OIDC columns to workers if they don't exist
+for (const col of [
+  `ALTER TABLE workers ADD COLUMN oidc_enabled INTEGER NOT NULL DEFAULT 0;`,
+  `ALTER TABLE workers ADD COLUMN oidc_provider_url TEXT;`,
+  `ALTER TABLE workers ADD COLUMN oidc_client_id TEXT;`,
+  `ALTER TABLE workers ADD COLUMN oidc_client_secret TEXT;`,
+  `ALTER TABLE workers ADD COLUMN oidc_encryption_key TEXT;`,
+]) {
+  try { sqlite.run(col); } catch { /* Column already exists */ }
+}
+
 // Add team claim columns to oidc_config if they don't exist
 try {
   sqlite.run(`ALTER TABLE oidc_config ADD COLUMN team_claim_name TEXT;`);

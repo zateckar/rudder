@@ -95,10 +95,14 @@ async function collectContainerMetrics(): Promise<void> {
         console.warn(`[metrics] ${worker.name}: container ${container.name} (${container.containerId.slice(0, 12)}) not found in Podman — marking missing`);
       }
 
-      if (realStatus !== dbStatus) {
-        await db.update(containers)
-          .set({ status: realStatus, updatedAt: now })
-          .where(eq(containers.id, container.id));
+      try {
+        if (realStatus !== dbStatus) {
+          await db.update(containers)
+            .set({ status: realStatus, updatedAt: now })
+            .where(eq(containers.id, container.id));
+        }
+      } catch (e) {
+        console.error(`[metrics] Failed to update status for container ${container.name}:`, (e as any).message || e);
       }
 
       // Only collect metrics for running containers
@@ -444,10 +448,16 @@ async function collectAll(): Promise<void> {
     return;
   }
 
-  await Promise.allSettled([
+  const results = await Promise.allSettled([
     collectContainerMetrics(),
     collectWorkerMetrics(),
   ]);
+  const labels = ['collectContainerMetrics', 'collectWorkerMetrics'];
+  for (let i = 0; i < results.length; i++) {
+    if (results[i].status === 'rejected') {
+      console.error(`[metrics] ${labels[i]} failed:`, (results[i] as PromiseRejectedResult).reason?.message || (results[i] as PromiseRejectedResult).reason);
+    }
+  }
   await pruneOldData();
 
   // Evaluate alert rules against freshly collected metrics
