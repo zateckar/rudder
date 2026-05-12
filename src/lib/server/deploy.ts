@@ -320,6 +320,7 @@ export async function executeApplicationDeploy(
             cpuPeriod: container.cpuShares ? 100000 : undefined,
             healthcheck: container.healthcheck,
             networkMode: networkName,
+            networkAliases: container.labels['service'] ? [container.labels['service']] : undefined,
           });
 
           await db.insert(containers).values({

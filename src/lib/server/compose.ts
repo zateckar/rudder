@@ -231,9 +231,7 @@ export function parseCompose(
       const firstPortBinding = ports[firstPortKey]?.[0]?.hostPort;
       
       if (firstPortBinding) {
-        const fullDomain = serviceName === appName 
-          ? `${appName}.${baseDomain}`
-          : `${serviceName}.${appName}.${baseDomain}`;
+        const fullDomain = `${appName}.${baseDomain}`;
         const traefikLabels = generateTraefikLabelsForApp(
           serviceName,
           fullDomain,

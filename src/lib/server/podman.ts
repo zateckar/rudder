@@ -414,6 +414,7 @@ export class PodmanClient {
       startPeriod?: number;
     };
     networkMode?: string;
+    networkAliases?: string[];
   }): Promise<{ Id: string; Warnings: string[] }> {
     const resolvedImage = this.resolveImageName(config.image);
     
@@ -449,6 +450,16 @@ export class PodmanClient {
 
     if (config.networkMode && config.networkMode.trim() !== '') {
       containerConfig.HostConfig.NetworkMode = config.networkMode;
+    }
+
+    if (config.networkMode && config.networkAliases && config.networkAliases.length > 0) {
+      containerConfig.NetworkingConfig = {
+        EndpointsConfig: {
+          [config.networkMode]: {
+            Aliases: config.networkAliases,
+          },
+        },
+      };
     }
 
     if (config.binds) {
