@@ -216,8 +216,8 @@ export async function POST({
       workerId: worker.id,
       teamId: team.id,
       domain,
-      type: 'single',
-      deploymentFormat: 'compose',
+      type: parsed.type as 'single' | 'compose' | 'k8s',
+      deploymentFormat: 'k8s',
       manifest: parsed.manifest,
       environment: parsed.environment,
       volumes: null,
@@ -511,17 +511,34 @@ async function handleUpdateScale(
     );
   }
 
-  if (app.type !== 'single') {
+  // For k8s deployments, update spec.replicas in the stored manifest
+  if (app.type === 'k8s' && app.manifest) {
+    try {
+      const manifestObj = JSON.parse(app.manifest);
+      manifestObj.spec = manifestObj.spec || {};
+      manifestObj.spec.replicas = replicas;
+      await db
+        .update(applications)
+        .set({ replicas, manifest: JSON.stringify(manifestObj), updatedAt: new Date() })
+        .where(eq(applications.id, app.id));
+    } catch {
+      // If manifest is invalid, fall through to the old behavior
+      await db
+        .update(applications)
+        .set({ replicas, updatedAt: new Date() })
+        .where(eq(applications.id, app.id));
+    }
+  } else if (app.type !== 'single') {
     return k8sError(
       400,
-      'Scaling is only supported for single-container deployments',
+      'Scaling is only supported for single-container and k8s deployments',
     );
+  } else {
+    await db
+      .update(applications)
+      .set({ replicas, updatedAt: new Date() })
+      .where(eq(applications.id, app.id));
   }
-
-  await db
-    .update(applications)
-    .set({ replicas, updatedAt: new Date() })
-    .where(eq(applications.id, app.id));
 
   // Redeploy with new replica count
   try {

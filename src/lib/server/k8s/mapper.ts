@@ -318,6 +318,7 @@ export function parseDeploymentBody(body: any): {
   replicas: number;
   manifest: string;
   restartPolicy: string;
+  type: string;
   workerAnnotation?: string;
   domain?: string;
   description?: string;
@@ -334,32 +335,12 @@ export function parseDeploymentBody(body: any): {
   if (!spec) throw new Error('spec is required');
 
   const template = spec.template?.spec;
-  const container = template?.containers?.[0];
-  if (!container?.image)
+  if (!template?.containers?.[0]?.image)
     throw new Error('spec.template.spec.containers[0].image is required');
 
-  const envVars = (container.env || [])
-    .filter((e: any) => e.name)
-    .map((e: any) => ({ key: e.name, value: e.value || '' }));
-
-  const ports = (container.ports || []).map((p: any) => ({
-    containerPort: String(p.containerPort || 80),
-    hostPort: p.hostPort ? String(p.hostPort) : '',
-    protocol: (p.protocol || 'tcp').toLowerCase(),
-  }));
-
-  const manifest = JSON.stringify({
-    image: container.image,
-    ...(container.command ? { command: container.command.join(' ') } : {}),
-    ...(container.workingDir ? { workingDir: container.workingDir } : {}),
-    ...(container.resources?.limits?.memory
-      ? { memoryLimit: container.resources.limits.memory }
-      : {}),
-    ...(container.resources?.limits?.cpu
-      ? { cpuLimit: container.resources.limits.cpu }
-      : {}),
-    ...(ports.length > 0 ? { ports } : {}),
-  });
+  // Store the full Deployment/Pod body as JSON so parseK8sManifest
+  // can process multi-container setups, volumes, env vars, etc.
+  const manifest = JSON.stringify(body);
 
   const restartPolicy =
     template?.restartPolicy === 'Never'
@@ -370,11 +351,12 @@ export function parseDeploymentBody(body: any): {
 
   return {
     name,
-    image: container.image,
-    environment: envVars.length > 0 ? JSON.stringify(envVars) : null,
+    image: template.containers[0].image,
+    environment: null, // Env vars are extracted from the full manifest by parseK8sManifest
     replicas: spec.replicas ?? 1,
     manifest,
     restartPolicy,
+    type: 'k8s',          // Treat kubectl-applied deployments as k8s type
     workerAnnotation: body.metadata?.annotations?.['rudder.dev/worker'],
     domain: body.metadata?.annotations?.['rudder.dev/domain'],
     description:

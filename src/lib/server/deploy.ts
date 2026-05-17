@@ -603,6 +603,11 @@ export async function executeApplicationDeploy(
             ...k8sEnv,
           ];
 
+          // Build volume binds from parsed K8s volumes
+          const k8sBinds = Object.entries(container.volumes)
+            .filter(([hostPath]) => hostPath)
+            .map(([hostPath, v]) => `${hostPath}:${v.bind}:${v.options}`);
+
           const containerResult = await podmanClient.createContainer({
             name: `${app.name}-${app.id.slice(0, 8)}-${container.name}`,
             image: container.image,
@@ -615,6 +620,7 @@ export async function executeApplicationDeploy(
             memory: container.memory,
             cpuQuota: container.cpuShares ? container.cpuShares * 100 : undefined,
             cpuPeriod: container.cpuShares ? 100000 : undefined,
+            binds: k8sBinds.length > 0 ? k8sBinds : undefined,
             networkMode: k8sNetworkName,
           });
 

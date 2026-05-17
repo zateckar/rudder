@@ -65,7 +65,19 @@ export interface ParsedK8sContainer {
 }
 
 export function parseK8sManifest(manifest: string, appName: string, teamSlug?: string): ParsedK8sContainer[] {
-  const docs = manifest.split('---').map(doc => Bun.YAML.parse(doc) as any).filter(Boolean);
+  // Detect JSON vs YAML — kubectl manifest is stored as JSON, UI YAML upload is YAML
+  const isJson = manifest.trim().startsWith('{') || manifest.trim().startsWith('[{');
+
+  let docs: any[];
+  if (isJson) {
+    try {
+      docs = [JSON.parse(manifest)];
+    } catch {
+      docs = [];
+    }
+  } else {
+    docs = manifest.split('---').map(doc => Bun.YAML.parse(doc) as any).filter(Boolean);
+  }
   
   const containers: ParsedK8sContainer[] = [];
   const volumes: Record<string, string> = {};
@@ -251,7 +263,19 @@ export function validateK8sManifest(manifest: string): { valid: boolean; errors:
   const errors: string[] = [];
   
   try {
-    const docs = manifest.split('---').map(doc => Bun.YAML.parse(doc) as any).filter(Boolean);
+    // Detect JSON vs YAML
+    const isJson = manifest.trim().startsWith('{') || manifest.trim().startsWith('[{');
+
+    let docs: any[];
+    if (isJson) {
+      try {
+        docs = [JSON.parse(manifest)];
+      } catch {
+        docs = [];
+      }
+    } else {
+      docs = manifest.split('---').map(doc => Bun.YAML.parse(doc) as any).filter(Boolean);
+    }
     
     if (docs.length === 0) {
       errors.push('Empty manifest');
@@ -275,7 +299,7 @@ export function validateK8sManifest(manifest: string): { valid: boolean; errors:
       }
     }
   } catch (e: any) {
-    errors.push(`YAML parse error: ${e.message}`);
+    errors.push(`Manifest parse error: ${e.message}`);
   }
   
   return { valid: errors.length === 0, errors };

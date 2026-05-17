@@ -1,6 +1,6 @@
 import { redirect } from '@sveltejs/kit';
 import { db, safeUserColumns } from '$lib/db';
-import { teams, teamMembers, users } from '$lib/db/schema';
+import { teams, teamMembers, users, apiKeys } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 
 export const load = async ({ params, cookies }: { params: { id: string }; cookies: any }) => {
@@ -54,10 +54,17 @@ export const load = async ({ params, cookies }: { params: { id: string }; cookie
     .where(eq(teamMembers.teamId, team.id))
     .all();
 
+  // Load API keys for this team (team-scoped + global keys for admins)
+  const teamApiKeys = await db.select()
+    .from(apiKeys)
+    .where(eq(apiKeys.teamId, team.id))
+    .all();
+
   return {
     user: currentUser,
     team,
     members: members.filter(m => m.username),
     userRole,
+    apiKeys: teamApiKeys,
   };
 };

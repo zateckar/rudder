@@ -143,6 +143,96 @@
       alert(e.message);
     }
   }
+
+  // ── API Keys ────────────────────────────────────────────────────
+
+  let showCreateKey = $state(false);
+  let creatingKey = $state(false);
+  let newKeyName = $state('');
+  let newKeyExpiry = $state('');
+  let createdKeyValue = $state<string | null>(null);
+  let createKeyError = $state<string | null>(null);
+  let apiKeysList = $state<any[]>([]);
+
+  $effect(() => {
+    apiKeysList = data.apiKeys || [];
+  });
+
+  async function createApiKey() {
+    createKeyError = null;
+    createdKeyValue = null;
+    creatingKey = true;
+    try {
+      const body: any = { name: newKeyName || `kubectl-${data.team.slug}`, teamId: data.team.id };
+      if (newKeyExpiry) body.expiresInDays = parseInt(newKeyExpiry);
+
+      const res = await fetch('/api/api-keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      const result = await res.json();
+      if (!res.ok) {
+        createKeyError = result.error || 'Failed to create API key';
+        return;
+      }
+
+      createdKeyValue = result.key;
+      newKeyName = '';
+      newKeyExpiry = '';
+      // Reload the list
+      const reloadRes = await fetch(`/api/api-keys`);
+      if (reloadRes.ok) {
+        const reloadData = await reloadRes.json();
+        apiKeysList = reloadData.filter((k: any) => k.teamId === data.team.id);
+      }
+    } catch (e: any) {
+      createKeyError = e.message;
+    } finally {
+      creatingKey = false;
+    }
+  }
+
+  async function deleteApiKey(keyId: string) {
+    if (!confirm('Are you sure you want to revoke this API key? Any services using it will immediately lose access.')) return;
+
+    try {
+      const res = await fetch(`/api/api-keys?id=${keyId}`, { method: 'DELETE' });
+      if (res.ok) {
+        apiKeysList = apiKeysList.filter(k => k.id !== keyId);
+      } else {
+        const result = await res.json();
+        alert(result.error || 'Failed to delete API key');
+      }
+    } catch (e: any) {
+      alert(e.message);
+    }
+  }
+
+  function copyToClipboard(text: string) {
+    navigator.clipboard.writeText(text).then(() => {
+      alert('API key copied to clipboard!');
+    }).catch(() => {
+      // Fallback for non-HTTPS
+      prompt('Copy this API key (it will not be shown again):', text);
+    });
+  }
+
+  function dismissKey() {
+    createdKeyValue = null;
+    showCreateKey = false;
+  }
+
+  function formatDate(d: string | Date | null | undefined) {
+    if (!d) return 'Never';
+    return new Date(d).toLocaleString();
+  }
+
+  function isExpired(key: any) {
+    if (!key.expiresAt) return false;
+    return new Date(key.expiresAt) < new Date();
+  }
 </script>
 
 <header>
@@ -329,6 +419,80 @@
       {:else}
         <p class="no-quota">No quotas set for this team.</p>
       {/if}
+    </div>
+
+    <!-- API Keys -->
+    <div class="info-card api-keys-card">
+      <div class="quota-header">
+        <h3>API Keys</h3>
+        {#if data.userRole === 'owner'}
+          <button class="btn-small btn-ghost-sm" onclick={() => { showCreateKey = !showCreateKey; createdKeyValue = null; createKeyError = null; }}>
+            {showCreateKey ? 'Cancel' : '+ New Key'}
+          </button>
+        {/if}
+      </div>
+
+      <p class="api-keys-description">
+        Use API keys as Bearer tokens with <code>kubectl</code> or any HTTP client to access this team's resources via the K8s-compatible API at <code>/k8s/</code>.
+      </p>
+
+      <div class="api-keys-content">
+        {#if showCreateKey}
+          <div class="create-key-form">
+            {#if createdKeyValue}
+              <div class="key-reveal">
+                <p class="key-reveal-label">API key created! Copy it now — it will not be shown again.</p>
+                <div class="key-value-display">
+                  <code>{createdKeyValue}</code>
+                  <button class="btn-small btn-primary" onclick={() => copyToClipboard(createdKeyValue!)}>Copy</button>
+                </div>
+                <button class="btn-small btn-ghost-sm dismiss-btn" onclick={dismissKey}>Dismiss</button>
+              </div>
+            {:else}
+              {#if createKeyError}
+                <div class="error-msg">{createKeyError}</div>
+              {/if}
+              <form onsubmit={(e) => { e.preventDefault(); createApiKey(); }}>
+                <div class="quota-field">
+                  <label for="key-name">Key Name</label>
+                  <input type="text" id="key-name" bind:value={newKeyName} placeholder="kubectl-{data.team.slug}" />
+                </div>
+                <div class="quota-field">
+                  <label for="key-expiry">Expires in (days)</label>
+                  <input type="number" id="key-expiry" bind:value={newKeyExpiry} placeholder="Never" min="1" />
+                </div>
+                <button type="submit" class="btn-primary btn-small" disabled={creatingKey}>
+                  {creatingKey ? 'Creating...' : 'Create API Key'}
+                </button>
+              </form>
+            {/if}
+          </div>
+        {/if}
+
+        {#if apiKeysList.length > 0}
+          <div class="api-keys-list">
+            {#each apiKeysList as key}
+              <div class="api-key-row" class:expired={isExpired(key)}>
+                <div class="api-key-info">
+                  <span class="api-key-name">{key.name || 'Unnamed'}</span>
+                  <span class="api-key-meta">
+                    Created: {formatDate(key.createdAt)}
+                    {#if key.expiresAt}
+                      · Expires: {formatDate(key.expiresAt)}
+                    {/if}
+                    · Last used: {formatDate(key.lastUsedAt)}
+                  </span>
+                </div>
+                <button class="btn-danger btn-small" onclick={() => deleteApiKey(key.id)} title="Revoke this key">
+                  Revoke
+                </button>
+              </div>
+            {/each}
+          </div>
+        {:else if !showCreateKey}
+          <p class="no-quota">No API keys for this team.</p>
+        {/if}
+      </div>
     </div>
   </div>
 </div>
@@ -720,5 +884,126 @@
     color: var(--text-muted);
     font-style: italic;
     margin: 0;
+  }
+
+  .api-keys-card {
+    margin-top: 16px;
+  }
+
+  .api-keys-description {
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.5;
+    margin: -8px 0 16px 0;
+    padding: 0;
+  }
+
+  .api-keys-description code {
+    font-size: 11px;
+    background: var(--bg-overlay);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+
+  .api-keys-content {
+    padding: 0;
+  }
+
+  .api-keys-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .api-key-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border-subtle);
+    gap: 8px;
+  }
+
+  .api-key-row:last-child {
+    border-bottom: none;
+  }
+
+  .api-key-row.expired {
+    opacity: 0.5;
+  }
+
+  .api-key-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .api-key-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+
+  .api-key-meta {
+    font-size: 10px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .create-key-form {
+    margin-bottom: 12px;
+  }
+
+  .create-key-form form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .create-key-form form button[type="submit"] {
+    margin-top: 4px;
+  }
+
+  .key-reveal {
+    background: var(--bg-active);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-md);
+    padding: 12px;
+    margin-bottom: 12px;
+  }
+
+  .key-reveal-label {
+    font-size: 12px;
+    color: var(--accent-text);
+    margin: 0 0 8px 0;
+    font-weight: 500;
+  }
+
+  .key-value-display {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .key-value-display code {
+    flex: 1;
+    font-size: 11px;
+    background: var(--bg-input);
+    padding: 6px 8px;
+    border-radius: var(--radius-sm);
+    word-break: break-all;
+    font-family: var(--font-mono);
+    color: var(--text-primary);
+    border: 1px solid var(--border-subtle);
+  }
+
+  .dismiss-btn {
+    margin-top: 8px;
+    width: 100%;
+    text-align: center;
   }
 </style>

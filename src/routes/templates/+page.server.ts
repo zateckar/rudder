@@ -3,6 +3,23 @@ import { db, safeWorkerColumns, safeUserColumns } from '$lib/db';
 import { applicationTemplates, applications, users, teams, teamMembers, workers } from '$lib/db/schema';
 import { eq, inArray, or } from 'drizzle-orm';
 
+async function canModifyTemplate(userId: string, template: any): Promise<boolean> {
+  // Global admins can modify any template
+  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
+  if (currentUser?.role === 'admin') return true;
+
+  // Template creator can modify their own templates
+  if (template.createdBy === userId) return true;
+
+  // User is a member of the owning team
+  const membership = await db
+    .select()
+    .from(teamMembers)
+    .where(eq(teamMembers.userId, userId))
+    .all();
+  return membership.some((m) => m.teamId === template.teamId);
+}
+
 export const load = async ({ cookies, url }: { cookies: any; url: URL }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
 
@@ -159,13 +176,8 @@ export const actions = {
       .get();
     if (!template) return fail(404, { error: 'Template not found' });
 
-    // Verify user is a member of the owning team
-    const membership = await db
-      .select()
-      .from(teamMembers)
-      .where(eq(teamMembers.userId, userId!))
-      .all();
-    if (!membership.some((m) => m.teamId === template.teamId)) {
+    // Verify user can modify this template
+    if (!(await canModifyTemplate(userId!, template))) {
       return fail(403, { error: 'Not authorized to modify this template' });
     }
 
@@ -198,12 +210,7 @@ export const actions = {
       .get();
     if (!template) return fail(404, { error: 'Template not found' });
 
-    const membership = await db
-      .select()
-      .from(teamMembers)
-      .where(eq(teamMembers.userId, userId!))
-      .all();
-    if (!membership.some((m) => m.teamId === template.teamId)) {
+    if (!(await canModifyTemplate(userId!, template))) {
       return fail(403, { error: 'Not authorized to modify this template' });
     }
 
@@ -236,12 +243,7 @@ export const actions = {
       .get();
     if (!template) return fail(404, { error: 'Template not found' });
 
-    const membership = await db
-      .select()
-      .from(teamMembers)
-      .where(eq(teamMembers.userId, userId!))
-      .all();
-    if (!membership.some((m) => m.teamId === template.teamId)) {
+    if (!(await canModifyTemplate(userId!, template))) {
       return fail(403, { error: 'Not authorized to delete this template' });
     }
 
