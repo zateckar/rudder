@@ -5,6 +5,7 @@ version: "3.8"
 #
 #   ADMIN_PASSWORD=yourpassword        # sets the initial admin login password
 #   PUBLIC_URL=https://your-domain     # external URL shown in links & OIDC redirects
+#   ORIGIN=https://your-domain         # external URL, used for CSRF origin checks
 #
 # Everything else is auto-configured on first boot.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -21,6 +22,9 @@ services:
       - PORT=3000
       - DATABASE_URL=file:/app/data/rudder.db
       - PUBLIC_URL=${PUBLIC_URL:-http://localhost:3000}
+      # Required behind a reverse proxy: SvelteKit rejects cross-origin form
+      # posts by comparing against this. Must match the browser-facing URL.
+      - ORIGIN=${ORIGIN:-${PUBLIC_URL:-http://localhost:3000}}
       - SESSION_MAX_AGE=${SESSION_MAX_AGE:-604800}
 
       # ── Admin bootstrap ──────────────────────────────────────────────────────
@@ -36,6 +40,9 @@ services:
 
       # ── Optional extras ───────────────────────────────────────────────────────
       - WORKER_REGISTRATION_SECRET=${WORKER_REGISTRATION_SECRET:-}
+      # Comma-separated host directories applications may bind-mount.
+      # Empty (default) disables host path mounts; named volumes still work.
+      - ALLOWED_HOST_MOUNT_PREFIXES=${ALLOWED_HOST_MOUNT_PREFIXES:-}
     volumes:
       - rudder-data:/app/data
     networks:

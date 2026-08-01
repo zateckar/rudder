@@ -42,13 +42,17 @@ COPY --from=builder --chown=rudder:rudder /app/drizzle ./drizzle
 RUN mkdir -p /app/data && chown rudder:rudder /app/data
 
 # ── Proxy-aware defaults ─────────────────────────────────────────────────────
-# Tell the SvelteKit node adapter to read the real protocol and host from the
-# headers that any upstream HTTPS reverse proxy (nginx, traefik, Caddy, …)
-# injects.  This makes secure cookies, CSRF checks, and redirect URLs work
-# correctly out of the box — no ORIGIN env var needed in your deployment config.
-# These values can be overridden by container environment variables if needed.
-ENV PROTOCOL_HEADER=X-Forwarded-Proto \
-    HOST_HEADER=X-Forwarded-Host
+# PROTOCOL_HEADER lets the node adapter learn the real scheme from an upstream
+# HTTPS proxy, so `secure` session cookies are set correctly.
+#
+# HOST_HEADER is deliberately NOT set.  Trusting X-Forwarded-Host means the
+# request origin — which SvelteKit's CSRF check and the OIDC redirect URL are
+# both derived from — is attacker-controlled unless a proxy always overwrites
+# that header.  Set ORIGIN to your external URL instead, e.g.
+#   ORIGIN=https://rudder.example.com
+# Only add HOST_HEADER=X-Forwarded-Host if you serve several hostnames AND a
+# trusted proxy strips client-supplied values.
+ENV PROTOCOL_HEADER=X-Forwarded-Proto
 
 # Switch to non-root user
 USER rudder

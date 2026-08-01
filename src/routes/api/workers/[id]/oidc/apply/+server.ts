@@ -4,6 +4,7 @@ import { db } from '$lib/db';
 import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { executeSSHCommand } from '$lib/server/ssh';
+import { decryptField } from '$lib/server/encryption';
 
 /** POST /api/workers/[id]/oidc/apply — push global-oidc.yml to the worker via SSH.
  *  Traefik watches /etc/traefik/dynamic/ and hot-reloads within seconds. */
@@ -32,7 +33,7 @@ export const POST: RequestHandler = async ({ params, request, cookies, locals })
   }
 
   const baseDomain = worker.baseDomain;
-  const encKey = worker.oidcEncryptionKey || '';
+  const encKey = decryptField(worker.oidcEncryptionKey) || '';
 
   // Build the global-oidc.yml content (matches the provisioning template)
   const oidcYml = `http:
@@ -42,7 +43,7 @@ export const POST: RequestHandler = async ({ params, request, cookies, locals })
         traefikoidc:
           providerURL: "${worker.oidcProviderUrl}"
           clientID: "${worker.oidcClientId}"
-          clientSecret: "${worker.oidcClientSecret}"
+          clientSecret: "${decryptField(worker.oidcClientSecret)}"
           sessionEncryptionKey: "${encKey}"
           callbackURL: "https://auth.${baseDomain}/oauth2/callback"
           cookieDomain: ".${baseDomain}"

@@ -8,6 +8,7 @@ import { env } from '$lib/server/env';
 import { randomBytes } from 'crypto';
 import { withLock, LockError } from '$lib/server/locks';
 import { parseJsonBody, ValidationError, schemas } from '$lib/server/validation';
+import { encryptField, decryptField } from '$lib/server/encryption';
 
 /** Parse mTLS certificates and bouncer key from provisioning script stdout */
 function parseCertsFromOutput(stdout: string): {
@@ -110,14 +111,15 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
             return json({ error: 'SSH connection failed' }, { status: 500 });
           }
 
-          const bouncerKey = worker.crowdsecBouncerKey || randomBytes(20).toString('hex');
+          const bouncerKey =
+            decryptField(worker.crowdsecBouncerKey) || randomBytes(20).toString('hex');
 
           const workerOidcConfig = (worker.oidcEnabled && worker.oidcProviderUrl && worker.oidcClientId && worker.oidcClientSecret)
             ? {
                 providerURL: worker.oidcProviderUrl,
                 clientID: worker.oidcClientId,
-                clientSecret: worker.oidcClientSecret,
-                encryptionKey: worker.oidcEncryptionKey || '',
+                clientSecret: decryptField(worker.oidcClientSecret) || '',
+                encryptionKey: decryptField(worker.oidcEncryptionKey) || '',
               }
             : undefined;
 
@@ -171,9 +173,11 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
             ...(hasCerts ? {
               podmanCaCert: certs.caCert,
               podmanClientCert: certs.clientCert,
-              podmanClientKey: certs.clientKey,
+              // Private key material is encrypted at rest; the CA and client
+              // certificates are public halves and stay readable.
+              podmanClientKey: encryptField(certs.clientKey),
             } : {}),
-            crowdsecBouncerKey: storedBouncerKey,
+            crowdsecBouncerKey: encryptField(storedBouncerKey),
             provisionedAt: new Date(),
             lastSeenAt: new Date(),
           }).where(eq(workers.id, workerId));

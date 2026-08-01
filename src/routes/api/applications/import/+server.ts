@@ -2,16 +2,23 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { applications, workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { requireAuth } from '$lib/server/auth';
+import { authErrorResponse, requireTeamMember } from '$lib/server/auth';
 
 export async function POST({ request, cookies }: { request: Request; cookies: any }) {
-  const ctx = await requireAuth(cookies);
-
   const body = await request.json();
   const { config, name, teamId, workerId } = body;
 
   if (!config || !name || !teamId || !workerId) {
     return json({ error: 'Missing required fields: config, name, teamId, workerId' }, { status: 400 });
+  }
+
+  // Import writes an application into a team — verify the caller belongs to
+  // it, otherwise any user could plant an app in someone else's team.
+  let ctx;
+  try {
+    ({ ...ctx } = await requireTeamMember(cookies, teamId));
+  } catch (error) {
+    return authErrorResponse(error);
   }
 
   // Validate name format
@@ -62,7 +69,9 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
     restartPolicy: config.restartPolicy || 'always',
     rateLimitAvg: config.rateLimitAvg || null,
     rateLimitBurst: config.rateLimitBurst || null,
-    authType: config.authType || 'none',
+    // Default to the worker's global auth rather than 'none': an imported
+    // config should never silently end up less protected than a new app.
+    authType: config.authType === 'none' || config.authType === 'oidc' ? config.authType : 'global',
     healthcheck: config.healthcheck || null,
     replicas: config.replicas || 1,
     gitRepo: config.gitRepo || null,

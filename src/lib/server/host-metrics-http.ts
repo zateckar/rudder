@@ -10,6 +10,7 @@
 import type { HostStats } from './host-metrics';
 import https from 'https';
 import http from 'http';
+import { decryptField } from './encryption';
 
 interface MetricsWorker {
   podmanApiUrl: string;
@@ -46,7 +47,10 @@ export async function getHostStatsHttp(worker: MetricsWorker): Promise<HostStats
 
     if (worker.podmanCaCert) agentOptions.ca = resolveCert(worker.podmanCaCert);
     if (worker.podmanClientCert) agentOptions.cert = resolveCert(worker.podmanClientCert);
-    if (worker.podmanClientKey) agentOptions.key = resolveCert(worker.podmanClientKey);
+    if (worker.podmanClientKey) {
+      const key = decryptField(worker.podmanClientKey);
+      if (key) agentOptions.key = resolveCert(key);
+    }
 
     const agent = new https.Agent(agentOptions);
 

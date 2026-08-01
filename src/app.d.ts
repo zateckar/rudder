@@ -13,6 +13,9 @@ declare global {
 			userRole?: string;
 			teamId?: string | null;
 			apiUser?: boolean;
+			/** Set when the request authenticated with an API key. Used for auditing. */
+			apiKeyId?: string;
+			apiKeyName?: string;
 		}
 		// interface PageData {}
 		// interface PageState {}

@@ -1,5 +1,5 @@
 import { redirect } from '@sveltejs/kit';
-import { db } from '$lib/db';
+import { db, safeUserColumns } from '$lib/db';
 import { users } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 
@@ -27,7 +27,13 @@ export const load = async ({ cookies, url }: { cookies: any; url: URL }) => {
     return { user: null };
   }
 
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
+  // Select explicit columns: the previous `select()` shipped the bcrypt
+  // password hash to the browser in every SSR payload.
+  const currentUser = await db
+    .select(safeUserColumns)
+    .from(users)
+    .where(eq(users.id, userId))
+    .get();
 
   return {
     user: currentUser,

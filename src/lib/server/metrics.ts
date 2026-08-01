@@ -11,6 +11,7 @@ import { createPodmanClient } from './podman';
 import { getHostStats } from './host-metrics';
 import { getHostStatsHttp } from './host-metrics-http';
 import { evaluateAlerts } from './alerts';
+import { decryptField } from './encryption';
 
 // Track which provisioning events have already been processed to avoid redundant discovery runs
 const lastProcessedProvisioning = new Map<string, number>();
@@ -205,7 +206,7 @@ async function collectWorkerMetrics(): Promise<void> {
           apiUrl: worker.podmanApiUrl,
           caCert: worker.podmanCaCert,
           clientCert: worker.podmanClientCert,
-          clientKey: worker.podmanClientKey,
+          clientKey: decryptField(worker.podmanClientKey),
         });
         const ok = await client.ping();
         if (ok) {

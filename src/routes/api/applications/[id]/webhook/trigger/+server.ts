@@ -1,6 +1,6 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
-import { deployWebhooks } from '$lib/db/schema';
+import { deployWebhooks, applications, auditLogs } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { hashKey } from '$lib/server/encryption';
 import { executeApplicationDeploy } from '$lib/server/deploy';
@@ -55,6 +55,29 @@ export async function POST({ params, request, url }: { params: { id: string }; r
     .update(deployWebhooks)
     .set({ lastUsedAt: new Date() })
     .where(eq(deployWebhooks.id, webhook.id));
+
+  // Webhook calls carry no session or API key, so the global audit hook skips
+  // them — record the deploy here instead.
+  try {
+    const app = await db
+      .select({ teamId: applications.teamId })
+      .from(applications)
+      .where(eq(applications.id, applicationId))
+      .get();
+
+    await db.insert(auditLogs).values({
+      id: crypto.randomUUID(),
+      userId: webhook.createdBy,
+      teamId: app?.teamId ?? null,
+      action: 'DEPLOY',
+      resourceType: 'application',
+      resourceId: applicationId,
+      details: JSON.stringify({ via: 'webhook', webhookId: webhook.id }),
+      createdAt: new Date(),
+    });
+  } catch (e) {
+    console.error('Failed to write webhook audit log:', e);
+  }
 
   // Trigger the deploy
   try {

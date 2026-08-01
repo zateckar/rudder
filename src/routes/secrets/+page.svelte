@@ -8,7 +8,11 @@
   let editing = $state<any>(null);
   let saving = $state(false);
   let error = $state('');
+  // Plaintext is never included in the listing — it is fetched per secret,
+  // on demand, and cached here only for the lifetime of the page.
   let showValues = $state<Record<string, boolean>>({});
+  let revealed = $state<Record<string, string>>({});
+  let revealing = $state<Record<string, boolean>>({});
 
   let fName = $state('');
   let fValue = $state('');
@@ -33,11 +37,33 @@
     editing = null; showForm = false; error = '';
   }
 
-  function startEdit(s: any) {
+  async function startEdit(s: any) {
     editing = s;
-    fName = s.name; fValue = s.value; fDesc = s.description || '';
+    fName = s.name; fDesc = s.description || '';
     fScope = s.scope; fTeamId = s.teamId || '';
+    // Pull the current value so an edit that only changes the description
+    // does not blank out the secret.
+    fValue = revealed[s.id] ?? (await revealValue(s.id)) ?? '';
     showForm = true; error = '';
+  }
+
+  /** Fetch and cache the plaintext of one secret. Returns null on failure. */
+  async function revealValue(id: string): Promise<string | null> {
+    if (revealed[id] !== undefined) return revealed[id];
+    revealing[id] = true;
+    try {
+      const res = await fetch(`/api/secrets?reveal=${encodeURIComponent(id)}`);
+      if (!res.ok) {
+        const b = await res.json().catch(() => ({}));
+        error = b.error || 'Failed to read secret';
+        return null;
+      }
+      const body = await res.json();
+      revealed[id] = body.value;
+      return body.value;
+    } finally {
+      revealing[id] = false;
+    }
   }
 
   async function saveSecret() {
@@ -72,12 +98,12 @@
     else { const b = await res.json(); alert(b.error || 'Failed'); }
   }
 
-  function toggleValue(id: string) { showValues[id] = !showValues[id]; }
-
-  function maskValue(v: string): string {
-    if (!v) return '—';
-    return '•'.repeat(Math.min(v.length, 20));
+  async function toggleValue(id: string) {
+    if (showValues[id]) { showValues[id] = false; return; }
+    if ((await revealValue(id)) !== null) showValues[id] = true;
   }
+
+  const MASK = '••••••••••••';
 </script>
 
 <header>
@@ -88,8 +114,10 @@
 </header>
 
 <p class="page-desc">
-  Environment variables available to containers. <b>Global</b> secrets are available to all users.
-  <b>Team</b> secrets are available only to members of that team.
+  Environment variables injected into containers. <b>Global</b> secrets are injected into every
+  application; their values are readable by admins only. <b>Team</b> secrets are injected into that
+  team's applications and readable by its members. Values are fetched individually and each read is
+  recorded in the audit log.
 </p>
 
 {#if showForm}
@@ -163,17 +191,23 @@
           <tr>
             <td class="name-cell"><code>{s.name}</code></td>
             <td class="value-cell">
-              <span class="val">{showValues[s.id] ? s.value : maskValue(s.value)}</span>
-              <button class="btn-icon" onclick={() => toggleValue(s.id)} title={showValues[s.id] ? 'Hide' : 'Show'}>
-                {showValues[s.id] ? 'Hide' : 'Show'}
-              </button>
+              <span class="val">{showValues[s.id] ? revealed[s.id] : MASK}</span>
+              {#if s.revealable}
+                <button class="btn-icon" onclick={() => toggleValue(s.id)} disabled={revealing[s.id]} title={showValues[s.id] ? 'Hide' : 'Show'}>
+                  {revealing[s.id] ? '…' : showValues[s.id] ? 'Hide' : 'Show'}
+                </button>
+              {:else}
+                <span class="muted" title="Global secret values are visible to admins only">hidden</span>
+              {/if}
             </td>
             <td><span class="badge {s.scope}">{s.scope}</span></td>
             <td class="muted">{s.description || '—'}</td>
             <td class="muted">{new Date(s.updatedAt).toLocaleDateString()}</td>
             <td class="actions">
-              <button class="btn-icon" onclick={() => startEdit(s)} title="Edit">Edit</button>
-              <button class="btn-icon danger" onclick={() => deleteSecret(s.id)} title="Delete">Del</button>
+              {#if s.revealable}
+                <button class="btn-icon" onclick={() => startEdit(s)} title="Edit">Edit</button>
+                <button class="btn-icon danger" onclick={() => deleteSecret(s.id)} title="Delete">Del</button>
+              {/if}
             </td>
           </tr>
         {/each}

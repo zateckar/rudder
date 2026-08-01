@@ -45,3 +45,40 @@ export function decrypt(encryptedText: string): string {
 export function hashKey(key: string): string {
   return createHash('sha256').update(key).digest('hex');
 }
+
+/** Shape produced by `encrypt`: hex IV : hex auth tag : hex ciphertext. */
+const ENCRYPTED_PATTERN = /^[0-9a-f]{32}:[0-9a-f]{32}:[0-9a-f]*$/i;
+
+/** True when `value` looks like output of `encrypt`. */
+export function isEncrypted(value: string): boolean {
+  return ENCRYPTED_PATTERN.test(value);
+}
+
+/**
+ * Encrypt a value that may already be encrypted (idempotent).
+ * Use for credential columns so repeated writes don't double-encrypt.
+ */
+export function encryptField(value: string | null | undefined): string | null {
+  if (value === null || value === undefined || value === '') return null;
+  return isEncrypted(value) ? value : encrypt(value);
+}
+
+/**
+ * Decrypt a credential column, tolerating rows written before the column was
+ * encrypted.  Legacy plaintext is returned as-is so existing workers keep
+ * functioning; it is re-encrypted the next time the record is written.
+ */
+export function decryptField(value: string): string;
+export function decryptField(value: string | null | undefined): string | null;
+export function decryptField(value: string | null | undefined): string | null {
+  if (value === null || value === undefined || value === '') return null;
+  if (!isEncrypted(value)) return value;
+  try {
+    return decrypt(value);
+  } catch {
+    // Wrong ENCRYPTION_KEY, or corrupted data. Surfacing null lets callers
+    // fail with a clear "no credentials" error rather than a crypto stack trace.
+    console.error('[encryption] Failed to decrypt a stored credential field.');
+    return null;
+  }
+}

@@ -4,6 +4,7 @@ import { db } from '$lib/db';
 import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { randomBytes } from 'crypto';
+import { encryptField } from '$lib/server/encryption';
 
 /** GET /api/workers/[id]/oidc — return current OIDC config (secret masked) */
 export const GET: RequestHandler = async ({ params, cookies, locals }) => {
@@ -51,14 +52,14 @@ export const PUT: RequestHandler = async ({ params, request, cookies, locals }) 
 
   // Only update secret if a new one is provided (empty string = keep existing)
   if (oidcClientSecret !== undefined && oidcClientSecret !== '') {
-    updates.oidcClientSecret = oidcClientSecret;
+    updates.oidcClientSecret = encryptField(oidcClientSecret);
   }
 
   // Update encryption key if provided; auto-generate if enabling and none exists
   if (oidcEncryptionKey) {
-    updates.oidcEncryptionKey = oidcEncryptionKey;
+    updates.oidcEncryptionKey = encryptField(oidcEncryptionKey);
   } else if (oidcEnabled && !worker.oidcEncryptionKey) {
-    updates.oidcEncryptionKey = randomBytes(32).toString('hex');
+    updates.oidcEncryptionKey = encryptField(randomBytes(32).toString('hex'));
   }
 
   await db.update(workers).set(updates).where(eq(workers.id, params.id));

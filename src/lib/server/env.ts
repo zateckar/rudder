@@ -68,6 +68,14 @@ const envSchema = z.object({
    * unaffected.  See src/lib/server/mounts.ts for the full policy.
    */
   ALLOWED_HOST_MOUNT_PREFIXES: z.string().default(''),
+  /**
+   * Allow talking to a worker's Podman API without mTLS.  The API is
+   * root-equivalent on the worker, so this is for local development only.
+   */
+  ALLOW_INSECURE_PODMAN: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
   OIDC_PROVIDER_URL: z.string().url().optional(),
   OIDC_CLIENT_ID: z.string().optional(),
   OIDC_CLIENT_SECRET: z.string().optional(),

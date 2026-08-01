@@ -70,6 +70,8 @@ const authentication: Handle = async ({ event, resolve }) => {
           if (apiKey && (!apiKey.expiresAt || apiKey.expiresAt > new Date())) {
             event.locals.apiUser = true;
             event.locals.teamId = apiKey.teamId;
+            event.locals.apiKeyId = apiKey.id;
+            event.locals.apiKeyName = apiKey.name;
             await db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, apiKey.id));
           }
         } catch (e) {
@@ -81,35 +83,48 @@ const authentication: Handle = async ({ event, resolve }) => {
 
   const response = await resolve(event);
 
-  if (event.request.method !== 'GET' && event.request.method !== 'HEAD' && event.request.method !== 'OPTIONS') {
-    if (userId) {
-      const url = new URL(event.request.url);
-      if (!url.pathname.startsWith('/api/auth/')) {
-        let resourceType = 'unknown';
-        let action = event.request.method;
-        
-        if (url.pathname.startsWith('/api/applications')) resourceType = 'application';
-        else if (url.pathname.startsWith('/api/workers')) resourceType = 'worker';
-        else if (url.pathname.startsWith('/api/containers')) resourceType = 'container';
-        else if (url.pathname.startsWith('/api/teams')) resourceType = 'team';
-        else if (url.pathname.startsWith('/api/domains')) resourceType = 'domain';
+  // Audit every mutating request that carried *some* identity — session or API
+  // key.  Previously only session users were recorded, so the entire
+  // kubectl/API-key surface mutated state with no trail at all.
+  const isMutation =
+    event.request.method !== 'GET' &&
+    event.request.method !== 'HEAD' &&
+    event.request.method !== 'OPTIONS';
 
-        try {
-          await db.insert(auditLogs).values({
-            id: crypto.randomUUID(),
-            userId: userId || null,
-            teamId: null,
-            action,
-            resourceType,
-            details: JSON.stringify({
-              path: url.pathname,
-              status: response.status
-            }),
-            createdAt: new Date(),
-          });
-        } catch (e) {
-          console.error('Failed to write audit log:', e);
-        }
+  if (isMutation && (userId || event.locals.apiUser)) {
+    const url = new URL(event.request.url);
+    if (!url.pathname.startsWith('/api/auth/')) {
+      let resourceType = 'unknown';
+      const action = event.request.method;
+
+      if (url.pathname.startsWith('/api/applications')) resourceType = 'application';
+      else if (url.pathname.startsWith('/api/workers')) resourceType = 'worker';
+      else if (url.pathname.startsWith('/api/containers')) resourceType = 'container';
+      else if (url.pathname.startsWith('/api/teams')) resourceType = 'team';
+      else if (url.pathname.startsWith('/api/domains')) resourceType = 'domain';
+      else if (url.pathname.startsWith('/api/secrets')) resourceType = 'secret';
+      else if (url.pathname.startsWith('/api/api-keys')) resourceType = 'api_key';
+      else if (url.pathname.startsWith('/k8s/')) resourceType = 'k8s';
+
+      try {
+        await db.insert(auditLogs).values({
+          id: crypto.randomUUID(),
+          userId: userId ?? null,
+          teamId: event.locals.teamId ?? null,
+          action,
+          resourceType,
+          details: JSON.stringify({
+            path: url.pathname,
+            status: response.status,
+            // Identify the actor when there is no user behind the request.
+            ...(event.locals.apiUser
+              ? { via: 'api_key', apiKeyId: event.locals.apiKeyId, apiKeyName: event.locals.apiKeyName }
+              : {}),
+          }),
+          createdAt: new Date(),
+        });
+      } catch (e) {
+        console.error('Failed to write audit log:', e);
       }
     }
   }
