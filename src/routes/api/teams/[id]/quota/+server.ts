@@ -1,15 +1,17 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { teamQuotas, teams, users, applications, containers } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
+import { authErrorResponse, requireTeamMember } from '$lib/server/auth';
 
 /** GET: Return quota for this team + current usage */
 export async function GET({ params, cookies }: { params: { id: string }; cookies: any }) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
+  // Quota and usage describe a team's footprint — restrict to its members.
+  try {
+    await requireTeamMember(cookies, params.id);
+  } catch (error) {
+    return authErrorResponse(error);
+  }
 
   const team = await db.select().from(teams).where(eq(teams.id, params.id)).get();
   if (!team) return json({ error: 'Team not found' }, { status: 404 });

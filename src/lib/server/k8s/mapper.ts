@@ -76,6 +76,12 @@ export function applicationToDeployment(
   },
   teamSlug: string,
   appContainers: Array<{ id: string; status: string }>,
+  /**
+   * Message from a deploy that just failed, if any.  Surfaced as a failing
+   * Progressing condition so `kubectl` reports the rollout accurately instead
+   * of always claiming success.
+   */
+  deployError?: string | null,
 ) {
   let image = '';
   let ports: Array<{ containerPort: number; protocol: string }> = [];
@@ -172,11 +178,13 @@ export function applicationToDeployment(
         },
         {
           type: 'Progressing',
-          status: 'True',
+          status: deployError ? 'False' : 'True',
           lastUpdateTime: app.updatedAt.toISOString(),
           lastTransitionTime: app.createdAt.toISOString(),
-          reason: 'NewReplicaSetAvailable',
-          message: `ReplicaSet "${app.name}" has successfully progressed.`,
+          reason: deployError ? 'ProgressDeadlineExceeded' : 'NewReplicaSetAvailable',
+          message: deployError
+            ? `ReplicaSet "${app.name}" failed to progress: ${deployError}`
+            : `ReplicaSet "${app.name}" has successfully progressed.`,
         },
       ],
     },

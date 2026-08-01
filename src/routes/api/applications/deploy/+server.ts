@@ -1,20 +1,15 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
-import { applications, workers, containers, teamQuotas, deployments, deployWebhooks, applicationTemplates } from '$lib/db/schema';
+import { applications, workers, containers, deployments, deployWebhooks, applicationTemplates } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { getRestPodmanClient } from '$lib/server/podman-client';
 import { executeApplicationDeploy, resolveWorkerSSHConfig } from '$lib/server/deploy';
 import { teardownAppNetwork } from '$lib/server/networks';
+import { canAccessApplication } from '$lib/server/auth';
+import { checkDeployQuota } from '$lib/server/quota';
 
 
 export async function POST({ request, cookies }: { request: Request; cookies: any }) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId || !(await validateSession(sessionId))) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
   const body = await request.json();
   const { applicationId, action } = body;
 
@@ -22,8 +17,14 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
     return json({ error: 'Application ID and action required' }, { status: 400 });
   }
 
-  const app = await db.select().from(applications).where(eq(applications.id, applicationId)).get();
-  if (!app) return json({ error: 'Application not found' }, { status: 404 });
+  // Deploying, stopping and removing an application are all team-scoped
+  // operations — authenticating alone previously let any user act on any app.
+  const access = await canAccessApplication(cookies, applicationId);
+  if (!access) {
+    return json({ error: 'Application not found' }, { status: 404 });
+  }
+  const { ctx, application: app } = access;
+
   if (!app.workerId) return json({ error: 'No worker assigned to this application' }, { status: 400 });
 
   const worker = await db.select().from(workers).where(eq(workers.id, app.workerId)).get();
@@ -32,43 +33,12 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
   try {
     // ──────────────────────── DEPLOY ────────────────────────
     if (action === 'deploy') {
-      // ── Quota check ──────────────────────────────────────
-      if (app.teamId) {
-        const quota = await db.select().from(teamQuotas).where(eq(teamQuotas.teamId, app.teamId)).get();
-        if (quota) {
-          const teamApps = await db.select().from(applications).where(eq(applications.teamId, app.teamId)).all();
-
-          // Check maxApplications — only on first deploy (no existing containers)
-          if (quota.maxApplications !== null) {
-            const existingContainers = await db.select().from(containers).where(eq(containers.applicationId, applicationId)).all();
-            if (existingContainers.length === 0 && teamApps.length > (quota.maxApplications ?? Infinity)) {
-              return json({
-                error: `Team quota exceeded: maximum ${quota.maxApplications} applications allowed (currently ${teamApps.length})`
-              }, { status: 403 });
-            }
-          }
-
-          // Check maxContainers
-          if (quota.maxContainers !== null) {
-            let totalContainers = 0;
-            for (const teamApp of teamApps) {
-              const appContainers = await db.select().from(containers).where(eq(containers.applicationId, teamApp.id)).all();
-              totalContainers += appContainers.length;
-            }
-            if (totalContainers >= (quota.maxContainers ?? Infinity)) {
-              return json({
-                error: `Team quota exceeded: maximum ${quota.maxContainers} containers allowed (currently ${totalContainers})`
-              }, { status: 403 });
-            }
-          }
-        }
+      const verdict = await checkDeployQuota(app.teamId, applicationId, app.replicas ?? 1);
+      if (!verdict.allowed) {
+        return json({ error: verdict.message }, { status: 403 });
       }
-      // Resolve deploying user from session
-      const deploySessionId = getSessionIdFromCookies(cookies);
-      let deployUserId: string | null = null;
-      if (deploySessionId) {
-        deployUserId = await validateSession(deploySessionId);
-      }
+
+      const deployUserId = ctx.user.id;
 
       const result = await executeApplicationDeploy(applicationId, deployUserId);
       if (!result.success) {

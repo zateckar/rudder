@@ -14,6 +14,7 @@ import { writeFileSync, unlinkSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir, platform } from 'os';
 import { randomBytes } from 'crypto';
+import { resolveDataDir } from './paths';
 
 export interface SSHConnectionConfig {
   host: string;
@@ -24,7 +25,7 @@ export interface SSHConnectionConfig {
 
 /** Persistent known_hosts so a worker's key is pinned after first contact. */
 const KNOWN_HOSTS_PATH = (() => {
-  const dir = join(process.cwd(), 'data');
+  const dir = resolveDataDir();
   try {
     mkdirSync(dir, { recursive: true });
   } catch {

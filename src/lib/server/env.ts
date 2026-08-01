@@ -1,11 +1,15 @@
 import { z } from 'zod';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
+import { resolveDataDir } from './paths';
 
 // ── Auto-generate secrets ────────────────────────────────────────────────────
-// SESSION_SECRET and ENCRYPTION_KEY are auto-generated on first boot and
-// persisted in <data-dir>/.secrets.json so they survive container restarts.
-// Explicit env vars always take priority when they are ≥ 32 characters.
+// ENCRYPTION_KEY is auto-generated on first boot and persisted in
+// <data-dir>/.secrets.json so it survives container restarts.  An explicit env
+// var always takes priority.
+//
+// Losing this key makes every stored secret permanently undecryptable, so the
+// failure modes below are loud rather than silent.
 
 function randomHex(byteCount: number): string {
   const bytes = new Uint8Array(byteCount);
@@ -14,13 +18,15 @@ function randomHex(byteCount: number): string {
 }
 
 interface PersistedSecrets {
-  sessionSecret: string;
   encryptionKey: string;
 }
 
+const isProduction = process.env.NODE_ENV === 'production';
+
 function loadOrCreateSecrets(): PersistedSecrets {
-  // Resolve data dir the same way db/index.ts does: <cwd>/data
-  const dataDir = join(process.cwd(), 'data');
+  // Follows DATABASE_URL so the key lives on the same volume as the data it
+  // protects.
+  const dataDir = resolveDataDir();
   const secretsFile = join(dataDir, '.secrets.json');
 
   try {
@@ -28,37 +34,55 @@ function loadOrCreateSecrets(): PersistedSecrets {
 
     if (existsSync(secretsFile)) {
       const stored = JSON.parse(readFileSync(secretsFile, 'utf8')) as Partial<PersistedSecrets>;
-      if (stored.sessionSecret && stored.encryptionKey) {
-        return stored as PersistedSecrets;
+      if (stored.encryptionKey) {
+        return { encryptionKey: stored.encryptionKey };
       }
     }
 
-    const generated: PersistedSecrets = {
-      sessionSecret: randomHex(32), // 64-char hex — well above the 32-char minimum
-      encryptionKey: randomHex(32),
-    };
+    const generated: PersistedSecrets = { encryptionKey: randomHex(32) };
     writeFileSync(secretsFile, JSON.stringify(generated, null, 2), { mode: 0o600 });
-    console.log('[env] Auto-generated SESSION_SECRET and ENCRYPTION_KEY → saved to', secretsFile);
+    console.log('[env] Auto-generated ENCRYPTION_KEY → saved to', secretsFile);
     return generated;
-  } catch {
-    // Filesystem not writable — use ephemeral secrets (sessions reset on restart)
-    console.warn('[env] Could not persist secrets. Sessions will be reset on each restart.');
-    return { sessionSecret: randomHex(32), encryptionKey: randomHex(32) };
+  } catch (e) {
+    // An ephemeral key silently orphans every secret written during this run,
+    // so in production this is fatal rather than a warning.
+    const message =
+      `[env] Could not persist ENCRYPTION_KEY to ${secretsFile}: ${(e as Error).message}. ` +
+      `Stored secrets would become unreadable after a restart.`;
+    if (isProduction) {
+      console.error(message);
+      throw new Error(
+        'Refusing to start: ENCRYPTION_KEY cannot be persisted. Make the data directory ' +
+          'writable, or set ENCRYPTION_KEY explicitly.',
+      );
+    }
+    console.warn(`${message} Continuing with an ephemeral key (development only).`);
+    return { encryptionKey: randomHex(32) };
   }
 }
 
 const auto = loadOrCreateSecrets();
 
-/** Use provided env var if long enough; fall back to the auto-generated value. */
-function resolveSecret(envVar: string | undefined, fallback: string): string {
-  return envVar && envVar.length >= 32 ? envVar : fallback;
+/**
+ * Use the provided env var if it meets the length requirement.  A too-short
+ * value is rejected outright — silently falling back to the generated key made
+ * a misconfigured ENCRYPTION_KEY look like it had been applied.
+ */
+function resolveSecret(name: string, envVar: string | undefined, fallback: string): string {
+  if (envVar === undefined || envVar === '') return fallback;
+  if (envVar.length < 32) {
+    throw new Error(
+      `${name} must be at least 32 characters (got ${envVar.length}). ` +
+        `Unset it to use the auto-generated value instead.`,
+    );
+  }
+  return envVar;
 }
 
 // ── Schema ───────────────────────────────────────────────────────────────────
 
 const envSchema = z.object({
   DATABASE_URL: z.string().default('./data/rudder.db'),
-  SESSION_SECRET: z.string().min(32),
   SESSION_MAX_AGE: z.coerce.number().default(604800),
   ENCRYPTION_KEY: z.string().min(32),
   PUBLIC_URL: z.string().default('http://localhost:5173'),
@@ -84,10 +108,9 @@ const envSchema = z.object({
 function loadEnv() {
   const parsed = envSchema.safeParse({
     ...process.env,
-    // Inject auto-generated values so the schema always has valid secrets even
-    // when the user hasn't set the env vars explicitly.
-    SESSION_SECRET: resolveSecret(process.env.SESSION_SECRET, auto.sessionSecret),
-    ENCRYPTION_KEY: resolveSecret(process.env.ENCRYPTION_KEY, auto.encryptionKey),
+    // Inject the auto-generated value so the schema always has a valid key even
+    // when the user hasn't set the env var explicitly.
+    ENCRYPTION_KEY: resolveSecret('ENCRYPTION_KEY', process.env.ENCRYPTION_KEY, auto.encryptionKey),
   });
 
   if (!parsed.success) {

@@ -132,24 +132,73 @@ function parseHealthcheck(raw: string | null | undefined): {
   }
 }
 
+// ── Host port allocation ─────────────────────────────────────────────────────
+
+const PORT_RANGE_START = 30000;
+const PORT_RANGE_END = 40000;
+
+/**
+ * Host ports already bound by containers on this worker.
+ *
+ * `excludeApplicationId` releases the ports held by the application being
+ * redeployed, whose containers are torn down earlier in the same deploy.
+ */
+async function reservedPortsForWorker(
+  workerId: string,
+  excludeApplicationId?: string,
+): Promise<Set<number>> {
+  const rows = await db
+    .select({
+      applicationId: containers.applicationId,
+      exposedPort: containers.exposedPort,
+      ports: containers.ports,
+    })
+    .from(containers)
+    .where(eq(containers.workerId, workerId))
+    .all();
+
+  const taken = new Set<number>();
+  for (const row of rows) {
+    if (excludeApplicationId && row.applicationId === excludeApplicationId) continue;
+    if (row.exposedPort) taken.add(row.exposedPort);
+    if (!row.ports) continue;
+    try {
+      // Stored as { "80/tcp": [{ hostPort: "31234" }], … }
+      const parsed = JSON.parse(row.ports);
+      for (const bindings of Object.values(parsed) as any[]) {
+        for (const b of bindings ?? []) {
+          const port = parseInt(b?.hostPort ?? b?.HostPort);
+          if (Number.isInteger(port)) taken.add(port);
+        }
+      }
+    } catch {
+      // Unparseable port record — nothing to reserve.
+    }
+  }
+  return taken;
+}
+
+/** Pick a free host port, falling back to a linear scan if draws keep colliding. */
+function pickFreePort(taken: Set<number>): number {
+  const span = PORT_RANGE_END - PORT_RANGE_START;
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const candidate = PORT_RANGE_START + Math.floor(Math.random() * span);
+    if (!taken.has(candidate)) return candidate;
+  }
+  for (let port = PORT_RANGE_START; port < PORT_RANGE_END; port++) {
+    if (!taken.has(port)) return port;
+  }
+  throw new Error(
+    `No free host port available in range ${PORT_RANGE_START}-${PORT_RANGE_END} on this worker.`,
+  );
+}
+
 /** Parse CPU string like "0.5", "2" -> cpuQuota (period=100000) */
 function parseCpu(cpu: string): { cpuQuota: number; cpuPeriod: number } | undefined {
   if (!cpu) return undefined;
   const val = parseFloat(cpu);
   if (isNaN(val) || val <= 0) return undefined;
   return { cpuQuota: Math.floor(val * 100000), cpuPeriod: 100000 };
-}
-
-/**
- * Build a container image on a worker from a Git repository via SSH.
- * Clones the repo, runs podman build, then cleans up the clone directory.
- */
-async function buildImageFromGit(
-  worker: typeof workers.$inferSelect,
-  app: typeof applications.$inferSelect,
-): Promise<string> {
-  if (!app.gitRepo) throw new Error('No git repository configured');
-  throw new Error('Git-based image builds via SSH are not supported. SSH keys are no longer stored server-side. Please use a pre-built Docker image instead.');
 }
 
 export interface DeployResult {
@@ -370,10 +419,17 @@ export async function executeApplicationDeploy(
         cfg = { image: app.manifest };
       }
 
-      // If this is a git-based app, build the image from source on the worker
+      // Git-based builds required an SSH key held server-side; that was removed
+      // when keys moved to the browser vault, so the feature no longer exists.
+      // Fail with a clear message instead of a generic build error.
       if (app.gitRepo) {
-        const builtImage = await buildImageFromGit(worker, app);
-        cfg.image = builtImage;
+        return {
+          success: false,
+          message:
+            'Git-based builds are no longer supported — SSH keys are not stored server-side. ' +
+            'Build the image in CI and deploy it by tag instead.',
+          statusCode: 400,
+        };
       }
 
       const secretEnvVars = await resolveSecrets(app.teamId);
@@ -455,6 +511,16 @@ export async function executeApplicationDeploy(
       // Collect all replica ports for Traefik service URLs
       const replicaPorts: number[] = [];
 
+      // Ports already taken on this worker, so a fresh allocation cannot land
+      // on one.  Previously each port was an unchecked random draw, which
+      // collided silently once a worker held a few dozen containers.
+      const takenPorts = await reservedPortsForWorker(worker.id, app.id);
+      const allocatePort = () => {
+        const port = pickFreePort(takenPorts);
+        takenPorts.add(port);
+        return port;
+      };
+
       for (let replicaIdx = 1; replicaIdx <= replicaCount; replicaIdx++) {
         const containerName = replicaCount > 1 ? `${app.name}-${app.id.slice(0, 8)}-${replicaIdx}` : `${app.name}-${app.id.slice(0, 8)}`;
 
@@ -467,15 +533,15 @@ export async function executeApplicationDeploy(
             if (!p.containerPort) continue;
             const proto = p.protocol || 'tcp';
             const key = `${p.containerPort}/${proto}`;
-            // For replicas, always assign random ports to avoid collisions
+            // For replicas, always assign fresh ports to avoid collisions
             const hostPort = (replicaCount > 1 || !p.hostPort?.trim())
-              ? String(30000 + Math.floor(Math.random() * 10000))
+              ? String(allocatePort())
               : p.hostPort.trim();
             portBindings[key] = [{ hostPort }];
             if (!mainExposedPort) mainExposedPort = parseInt(hostPort);
           }
         } else {
-          const exposedPort = 30000 + Math.floor(Math.random() * 10000);
+          const exposedPort = allocatePort();
           portBindings['80/tcp'] = [{ hostPort: String(exposedPort) }];
           mainExposedPort = exposedPort;
         }

@@ -29,18 +29,16 @@ import {
   k8sList,
   matchPath,
 } from '$lib/server/k8s/mapper';
-import { db } from '$lib/db';
+import { db, sqlite } from '$lib/db';
 import {
   applications,
   containers,
   workers,
-  deployments,
-  deployWebhooks,
-  applicationTemplates,
 } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { executeApplicationDeploy } from '$lib/server/deploy';
 import { getRestPodmanClient } from '$lib/server/podman-client';
+import { checkApplicationQuota } from '$lib/server/quota';
 
 // ── GET ────────────────────────────────────────────────────────
 
@@ -179,18 +177,21 @@ export async function POST({
       return k8sError(422, e.message, 'Invalid');
     }
 
-    // Check name uniqueness
-    const existing = await db
-      .select()
-      .from(applications)
-      .where(eq(applications.name, parsed.name))
-      .get();
+    // Name uniqueness is per namespace (team), matching how deployments are
+    // looked up.  A global check let one team's app name block another's and
+    // leaked the existence of applications in teams the caller cannot see.
+    const existing = await findAppByName(team.id, parsed.name);
     if (existing) {
       return k8sError(
         409,
         `deployments.apps "${parsed.name}" already exists`,
         'AlreadyExists',
       );
+    }
+
+    const quota = await checkApplicationQuota(team.id);
+    if (!quota.allowed) {
+      return k8sError(403, quota.message!, 'Forbidden');
     }
 
     // Resolve worker
@@ -228,12 +229,7 @@ export async function POST({
       updatedAt: new Date(),
     });
 
-    // Deploy
-    try {
-      await executeApplicationDeploy(appId, null);
-    } catch (e: any) {
-      console.error('Deploy failed after K8s create:', e.message);
-    }
+    const deployError = await runDeploy(appId, 'create');
 
     const app = await db
       .select()
@@ -246,7 +242,7 @@ export async function POST({
       .where(eq(containers.applicationId, appId))
       .all();
     return k8sJson(
-      applicationToDeployment(app!, team.slug, appContainers),
+      applicationToDeployment(app!, team.slug, appContainers, deployError),
       201,
     );
   }
@@ -370,20 +366,18 @@ export async function DELETE({
       }
     }
 
-    // Clean up FK references
-    await db
-      .delete(deployments)
-      .where(eq(deployments.applicationId, app.id));
-    await db
-      .delete(deployWebhooks)
-      .where(eq(deployWebhooks.applicationId, app.id));
-    await db
-      .update(applicationTemplates)
-      .set({ sourceAppId: null })
-      .where(eq(applicationTemplates.sourceAppId, app.id));
-
-    // Delete the application
-    await db.delete(applications).where(eq(applications.id, app.id));
+    // Clear FK references and remove the application atomically — a failure
+    // partway through previously left orphaned deployments and webhooks
+    // pointing at an application that no longer existed.
+    sqlite.transaction(() => {
+      sqlite.run('DELETE FROM deployments WHERE application_id = ?', [app.id]);
+      sqlite.run('DELETE FROM deploy_webhooks WHERE application_id = ?', [app.id]);
+      sqlite.run(
+        'UPDATE application_templates SET source_app_id = NULL WHERE source_app_id = ?',
+        [app.id],
+      );
+      sqlite.run('DELETE FROM applications WHERE id = ?', [app.id]);
+    })();
 
     return k8sJson({
       kind: 'Status',
@@ -403,6 +397,27 @@ export async function DELETE({
 }
 
 // ── Shared helpers ─────────────────────────────────────────────
+
+/**
+ * Run a deploy and return the failure message, or null on success.
+ *
+ * The resource itself is kept either way — that matches Kubernetes, where a
+ * failed rollout leaves the Deployment in place — but the caller reports the
+ * outcome through the Progressing condition rather than silently succeeding.
+ */
+async function runDeploy(appId: string, phase: string): Promise<string | null> {
+  try {
+    const result = await executeApplicationDeploy(appId, null);
+    if (!result.success) {
+      console.error(`[k8s] Deploy failed after ${phase}:`, result.message);
+      return result.message;
+    }
+    return null;
+  } catch (e: any) {
+    console.error(`[k8s] Deploy threw after ${phase}:`, e.message);
+    return e.message || 'Deployment failed';
+  }
+}
 
 async function findAppByName(teamId: string, name: string) {
   return db
@@ -455,12 +470,7 @@ async function handleUpdateDeployment(
     .set(updates)
     .where(eq(applications.id, app.id));
 
-  // Redeploy
-  try {
-    await executeApplicationDeploy(app.id, null);
-  } catch (e: any) {
-    console.error('Deploy failed after K8s update:', e.message);
-  }
+  const deployError = await runDeploy(app.id, 'update');
 
   const updated = await db
     .select()
@@ -473,7 +483,7 @@ async function handleUpdateDeployment(
     .where(eq(containers.applicationId, app.id))
     .all();
   return k8sJson(
-    applicationToDeployment(updated!, team.slug, appContainers),
+    applicationToDeployment(updated!, team.slug, appContainers, deployError),
   );
 }
 
@@ -540,11 +550,12 @@ async function handleUpdateScale(
       .where(eq(applications.id, app.id));
   }
 
-  // Redeploy with new replica count
-  try {
-    await executeApplicationDeploy(app.id, null);
-  } catch (e: any) {
-    console.error('Scale deploy failed:', e.message);
+  // Redeploy with new replica count.  A scale failure is reported to the
+  // caller rather than swallowed, so `kubectl scale` cannot report success
+  // for a rollout that never happened.
+  const deployError = await runDeploy(app.id, 'scale');
+  if (deployError) {
+    return k8sError(500, `Scale failed: ${deployError}`, 'InternalError');
   }
 
   const updated = await db

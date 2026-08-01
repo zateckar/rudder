@@ -3,10 +3,15 @@ import { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { resolveDbPath } from '../server/paths';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const dbDir = join(__dirname, '../../../data');
-const dbPath = join(dbDir, 'rudder.db');
+// DATABASE_URL is now honoured; it was previously documented but ignored, so
+// the database always landed next to the bundle rather than where the operator
+// asked for it.
+const dbPath = resolveDbPath(
+  join(dirname(fileURLToPath(import.meta.url)), '../../../data'),
+);
+const dbDir = dirname(dbPath);
 
 if (!existsSync(dbDir)) {
   mkdirSync(dbDir, { recursive: true });
@@ -16,9 +21,15 @@ const sqlite = new Database(dbPath);
 sqlite.run('PRAGMA journal_mode = WAL');
 sqlite.run('PRAGMA foreign_keys = ON');
 
-// ── Core tables (idempotent — migrations may not have run on fresh deploys) ──
-// These were previously only created via drizzle-kit migrations; inlining them
-// here ensures a fresh database always has the schema it needs on first boot.
+// ── Core tables (idempotent) ─────────────────────────────────────────────────
+//
+// This block, together with the ALTER TABLE migrations further down, is the
+// authoritative schema at runtime: nothing calls drizzle's migrate(), so the
+// files in drizzle/ are reference output from `bun run db:generate` only.
+//
+// When you change src/lib/db/schema.ts you MUST mirror it here — the two
+// drifted before (applications.auth_type defaulted to 'none' here but 'global'
+// in schema.ts, so new rows were created less protected than intended).
 sqlite.run(`
   CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY NOT NULL,
@@ -92,7 +103,7 @@ sqlite.run(`
     restart_policy TEXT NOT NULL DEFAULT 'always',
     rate_limit_avg INTEGER,
     rate_limit_burst INTEGER,
-    auth_type TEXT NOT NULL DEFAULT 'none',
+    auth_type TEXT NOT NULL DEFAULT 'global',
     auth_config TEXT,
     stack_id TEXT,
     replicas INTEGER NOT NULL DEFAULT 1,
@@ -198,6 +209,24 @@ sqlite.run(`
     updated_at INTEGER NOT NULL
   );
 `);
+
+// Enforce one membership per (team, user).  Duplicates were previously
+// possible, making role checks depend on which row happened to come back
+// first, so collapse any that exist before adding the constraint.
+try {
+  sqlite.run(`
+    DELETE FROM team_members
+    WHERE rowid NOT IN (
+      SELECT MIN(rowid) FROM team_members GROUP BY team_id, user_id
+    );
+  `);
+  sqlite.run(`
+    CREATE UNIQUE INDEX IF NOT EXISTS team_members_team_user_unique
+      ON team_members (team_id, user_id);
+  `);
+} catch (e) {
+  console.error('[db] Could not enforce unique team memberships:', e);
+}
 
 // Add description column to applications if it doesn't exist
 try {
