@@ -1,7 +1,8 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
-import { containers, containerMetrics } from '$lib/db/schema';
+import { containerMetrics } from '$lib/db/schema';
 import { eq, and, asc, sql } from 'drizzle-orm';
+import { authErrorResponse, requireContainerScope } from '$lib/server/auth';
 
 const RANGES: Record<string, number> = {
   '1h':  1  * 60 * 60 * 1000,
@@ -28,21 +29,11 @@ export async function GET({
   url: URL;
   cookies: any;
 }) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId || !(await validateSession(sessionId))) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  const dbContainer = await db
-    .select()
-    .from(containers)
-    .where(eq(containers.id, params.id))
-    .get();
-
-  if (!dbContainer) {
-    return json({ error: 'Container not found' }, { status: 404 });
+  let dbContainer;
+  try {
+    ({ container: dbContainer } = await requireContainerScope(cookies, params.id));
+  } catch (error) {
+    return authErrorResponse(error);
   }
 
   const rangeParam = url.searchParams.get('range') ?? '1h';

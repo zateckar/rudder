@@ -130,8 +130,9 @@ export const schemas = {
 
   createApiKey: z.object({
     name: z.string().min(1).max(100),
-    teamId: z.string().uuid().optional(),
-    expiresAt: z.string().datetime().optional(),
+    /** Omit for a global (all-teams) key — admin only. */
+    teamId: z.string().uuid().optional().nullable(),
+    expiresInDays: z.number().int().positive().max(3650).optional(),
   }),
 
   addTeamMember: z.object({

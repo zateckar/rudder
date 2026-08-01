@@ -1,23 +1,18 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
-import { containers, workers } from '$lib/db/schema';
+import { containers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { getRestPodmanClient } from '$lib/server/podman-client';
+import { authErrorResponse, requireContainerAccess } from '$lib/server/auth';
 
 export const GET: RequestHandler = async ({ params, cookies }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId || !(await validateSession(sessionId))) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
+  let dbContainer, worker;
+  try {
+    ({ container: dbContainer, worker } = await requireContainerAccess(cookies, params.id));
+  } catch (error) {
+    return authErrorResponse(error);
   }
-
-  const dbContainer = await db.select().from(containers).where(eq(containers.id, params.id)).get();
-  if (!dbContainer) return json({ error: 'Container not found' }, { status: 404 });
-
-  const worker = await db.select().from(workers).where(eq(workers.id, dbContainer.workerId!)).get();
-  if (!worker) return json({ error: 'Worker not found' }, { status: 404 });
 
   try {
     const client = getRestPodmanClient(worker);
@@ -30,25 +25,24 @@ export const GET: RequestHandler = async ({ params, cookies }) => {
 };
 
 export const PATCH: RequestHandler = async ({ params, request, cookies }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId || !(await validateSession(sessionId))) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
+  let dbContainer, worker;
+  try {
+    ({ container: dbContainer, worker } = await requireContainerAccess(cookies, params.id));
+  } catch (error) {
+    return authErrorResponse(error);
   }
-
-  const dbContainer = await db.select().from(containers).where(eq(containers.id, params.id)).get();
-  if (!dbContainer) return json({ error: 'Container not found' }, { status: 404 });
-
-  const worker = await db.select().from(workers).where(eq(workers.id, dbContainer.workerId!)).get();
-  if (!worker) return json({ error: 'Worker not found' }, { status: 404 });
 
   const body = await request.json();
   const { action } = body;
 
+  let client: ReturnType<typeof getRestPodmanClient>;
   try {
-    const client = getRestPodmanClient(worker);
+    client = getRestPodmanClient(worker);
+  } catch (error: any) {
+    return json({ error: error.message }, { status: 400 });
+  }
 
+  try {
     if (action === 'start') {
       await client.startContainer(dbContainer.containerId);
       await db.update(containers).set({ status: 'running', updatedAt: new Date() }).where(eq(containers.id, params.id));
@@ -69,6 +63,7 @@ export const PATCH: RequestHandler = async ({ params, request, cookies }) => {
     client.destroy();
     return json({ success: true, action });
   } catch (error: any) {
+    client.destroy();
     return json({ error: error.message }, { status: 500 });
   }
 };

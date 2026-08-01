@@ -1,8 +1,7 @@
 import { json } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { containers, workers } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { workers } from '$lib/db/schema';
 import { createPodmanClient, type PodmanClient } from '$lib/server/podman';
+import { authErrorResponse, requireContainerAccess } from '$lib/server/auth';
 
 function getPodmanClient(worker: typeof workers.$inferSelect): { client: PodmanClient } | null {
   if (worker.podmanApiUrl && worker.podmanCaCert && worker.podmanClientCert && worker.podmanClientKey) {
@@ -19,25 +18,11 @@ function getPodmanClient(worker: typeof workers.$inferSelect): { client: PodmanC
 }
 
 export async function GET({ params, cookies }: { params: { id: string }; cookies: any }) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId || !(await validateSession(sessionId))) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  const containerId = params.id;
-
-  const container = await db.select().from(containers).where(eq(containers.id, containerId)).get();
-
-  if (!container || !container.workerId) {
-    return json({ error: 'Container not found or no worker assigned' }, { status: 404 });
-  }
-
-  const worker = await db.select().from(workers).where(eq(workers.id, container.workerId)).get();
-
-  if (!worker) {
-    return json({ error: 'Worker not found' }, { status: 404 });
+  let container, worker;
+  try {
+    ({ container, worker } = await requireContainerAccess(cookies, params.id));
+  } catch (error) {
+    return authErrorResponse(error);
   }
 
   const result = getPodmanClient(worker);

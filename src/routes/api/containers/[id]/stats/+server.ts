@@ -1,35 +1,13 @@
 import { json } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { containers, workers } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
 import { getRestPodmanClient } from '$lib/server/podman-client';
+import { authErrorResponse, requireContainerAccess } from '$lib/server/auth';
 
 export async function GET({ params, cookies }: { params: { id: string }; cookies: any }) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId || !(await validateSession(sessionId))) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  const dbContainer = await db
-    .select()
-    .from(containers)
-    .where(eq(containers.id, params.id))
-    .get();
-
-  if (!dbContainer || !dbContainer.workerId) {
-    return json({ error: 'Container not found' }, { status: 404 });
-  }
-
-  const worker = await db
-    .select()
-    .from(workers)
-    .where(eq(workers.id, dbContainer.workerId))
-    .get();
-
-  if (!worker) {
-    return json({ error: 'Worker not found' }, { status: 404 });
+  let dbContainer, worker;
+  try {
+    ({ container: dbContainer, worker } = await requireContainerAccess(cookies, params.id));
+  } catch (error) {
+    return authErrorResponse(error);
   }
 
   try {

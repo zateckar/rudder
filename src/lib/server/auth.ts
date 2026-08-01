@@ -1,5 +1,6 @@
+import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
-import { users, teamMembers, applications, workers, teams } from '$lib/db/schema';
+import { users, teamMembers, applications, workers, teams, containers } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import type { Cookies } from '@sveltejs/kit';
 import { getSessionIdFromCookies, validateSession } from '$lib/auth';
@@ -189,6 +190,112 @@ export async function canManageWorker(
   }
 
   return { ctx, worker };
+}
+
+/**
+ * Resolve a container the caller is allowed to touch, together with its worker.
+ *
+ * Containers inherit their tenancy from the application that owns them.  A
+ * container with no owning application (e.g. discovered directly on a worker)
+ * is infrastructure, so only admins may reach it.
+ *
+ * Throws AuthorizationError so callers can funnel failures through
+ * `authErrorResponse`.  404 is returned for containers the caller may not see
+ * so the endpoint does not double as a container-ID oracle.
+ */
+export async function requireContainerScope(
+  cookies: Cookies,
+  containerId: string
+): Promise<{
+  ctx: AuthContext;
+  container: typeof containers.$inferSelect;
+}> {
+  const ctx = await requireAuth(cookies);
+
+  const container = await db
+    .select()
+    .from(containers)
+    .where(eq(containers.id, containerId))
+    .get();
+
+  if (!container) {
+    throw new AuthorizationError('Container not found', 404);
+  }
+
+  if (ctx.user.role !== 'admin') {
+    if (!container.applicationId) {
+      throw new AuthorizationError('Container not found', 404);
+    }
+
+    const application = await db
+      .select()
+      .from(applications)
+      .where(eq(applications.id, container.applicationId))
+      .get();
+
+    if (!application?.teamId) {
+      throw new AuthorizationError('Container not found', 404);
+    }
+
+    const membership = await db
+      .select()
+      .from(teamMembers)
+      .where(
+        and(
+          eq(teamMembers.userId, ctx.user.id),
+          eq(teamMembers.teamId, application.teamId)
+        )
+      )
+      .get();
+
+    if (!membership) {
+      throw new AuthorizationError('Container not found', 404);
+    }
+  }
+
+  return { ctx, container };
+}
+
+/**
+ * As `requireContainerScope`, but also resolves the worker that hosts the
+ * container.  Use this for any route that talks to the Podman API.
+ */
+export async function requireContainerAccess(
+  cookies: Cookies,
+  containerId: string
+): Promise<{
+  ctx: AuthContext;
+  container: typeof containers.$inferSelect;
+  worker: typeof workers.$inferSelect;
+}> {
+  const { ctx, container } = await requireContainerScope(cookies, containerId);
+
+  if (!container.workerId) {
+    throw new AuthorizationError('Container has no worker assigned', 400);
+  }
+
+  const worker = await db
+    .select()
+    .from(workers)
+    .where(eq(workers.id, container.workerId))
+    .get();
+
+  if (!worker) {
+    throw new AuthorizationError('Worker not found', 404);
+  }
+
+  return { ctx, container, worker };
+}
+
+/**
+ * Convert an AuthorizationError into a JSON response.  Re-throws anything else
+ * so genuine faults still surface as 500s rather than being masked as 403s.
+ */
+export function authErrorResponse(error: unknown): Response {
+  if (error instanceof AuthorizationError) {
+    return json({ error: error.message }, { status: error.statusCode });
+  }
+  throw error;
 }
 
 export async function getUserTeams(cookies: Cookies): Promise<typeof teams.$inferSelect[]> {

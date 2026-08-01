@@ -11,6 +11,7 @@ import { generateTraefikLabelsForApp, type AppMiddlewareOptions } from '$lib/ser
 import { decrypt } from '$lib/server/encryption';
 import { ensureAppNetwork, joinNetwork, connectTraefik, teardownAppNetwork } from '$lib/server/networks';
 import { env } from '$lib/server/env';
+import { buildHostBind, MountPolicyError } from '$lib/server/mounts';
 
 /** Parse memory string like "512m", "2g" -> bytes */
 function parseMemory(mem: string): number | undefined {
@@ -302,7 +303,7 @@ export async function executeApplicationDeploy(
 
           const binds = Object.entries(container.volumes)
             .filter(([hostPath]) => hostPath)
-            .map(([hostPath, v]) => `${hostPath}:${v.bind}:${v.options}`);
+            .map(([hostPath, v]) => buildHostBind(hostPath, v.bind, v.options));
 
           const containerResult = await podmanClient.createContainer({
             name: container.name,
@@ -423,11 +424,14 @@ export async function executeApplicationDeploy(
                 return `rudder-${app.id.slice(0, 8)}-${rv.name}:${rv.containerPath}:${v.mode || 'rw'}`;
               }
               if (!v.hostPath || !v.containerPath) return null;
-              return `${v.hostPath}:${v.containerPath}:${v.mode || 'rw'}`;
+              return buildHostBind(v.hostPath, v.containerPath, v.mode);
             })
             .filter((b): b is string => b !== null);
-        } catch {
-          // ignore
+        } catch (e) {
+          // A rejected mount must fail the deploy — never silently drop it,
+          // which would start the container without its expected storage.
+          if (e instanceof MountPolicyError) throw e;
+          // Malformed JSON: no volumes to mount.
         }
       }
 
@@ -606,7 +610,7 @@ export async function executeApplicationDeploy(
           // Build volume binds from parsed K8s volumes
           const k8sBinds = Object.entries(container.volumes)
             .filter(([hostPath]) => hostPath)
-            .map(([hostPath, v]) => `${hostPath}:${v.bind}:${v.options}`);
+            .map(([hostPath, v]) => buildHostBind(hostPath, v.bind, v.options));
 
           const containerResult = await podmanClient.createContainer({
             name: `${app.name}-${app.id.slice(0, 8)}-${container.name}`,
@@ -676,6 +680,12 @@ export async function executeApplicationDeploy(
         .set({ status: 'failed', errorMessage: error.message, finishedAt: new Date() })
         .where(eq(deployments.id, deploymentId));
     } catch { /* best-effort */ }
+
+    // A rejected mount is a manifest problem, not a server fault — report it
+    // as a 400 with the policy message so the user can fix the definition.
+    if (error instanceof MountPolicyError) {
+      return { success: false, message: error.message, statusCode: 400 };
+    }
 
     throw error;
   }

@@ -1,52 +1,97 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
-import { apiKeys, users, teamMembers } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { apiKeys, teamMembers } from '$lib/db/schema';
+import { eq, and, inArray } from 'drizzle-orm';
 import { hashKey } from '$lib/server/encryption';
 import { randomBytes } from 'crypto';
+import {
+  authErrorResponse,
+  requireAuth,
+  requireTeamOwner,
+  type AuthContext,
+} from '$lib/server/auth';
+import { parseJsonBody, ValidationError, schemas } from '$lib/server/validation';
 
 /** Generate a cryptographically secure API key with a recognisable prefix. */
 function generateApiKey(): string {
   return 'rud_' + randomBytes(24).toString('base64url');
 }
 
-export async function GET({ cookies }: { cookies: any }) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
+/** Strip the key hash before returning a row to the client. */
+function publicKey(row: typeof apiKeys.$inferSelect) {
+  const { keyHash: _hash, ...rest } = row;
+  return { ...rest, scope: row.teamId ? 'team' : 'global' };
+}
 
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
+export async function GET({ cookies }: { cookies: any }) {
+  let ctx: AuthContext;
+  try {
+    ctx = await requireAuth(cookies);
+  } catch (error) {
+    return authErrorResponse(error);
   }
 
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
+  // Admins see every key.  Everyone else sees only keys scoped to a team they
+  // belong to — global keys carry cross-team access and are admin-only.
+  if (ctx.user.role === 'admin') {
+    const keys = await db.select().from(apiKeys).all();
+    return json(keys.map(publicKey));
+  }
 
-  const keys = await db.select().from(apiKeys).all();
+  const memberships = await db
+    .select({ teamId: teamMembers.teamId })
+    .from(teamMembers)
+    .where(eq(teamMembers.userId, ctx.user.id))
+    .all();
 
-  const filteredKeys = user?.role === 'admin'
-    ? keys
-    : keys.filter(k => k.teamId === null);
+  const teamIds = memberships.map((m) => m.teamId);
+  if (teamIds.length === 0) return json([]);
 
-  return json(filteredKeys.map(k => ({
-    ...k,
-    keyPrefix: k.name ? `sk_${k.name.substring(0, 8)}` : null,
-  })));
+  const keys = await db
+    .select()
+    .from(apiKeys)
+    .where(inArray(apiKeys.teamId, teamIds))
+    .all();
+
+  return json(keys.map(publicKey));
 }
 
 export async function POST({ request, cookies }: { request: Request; cookies: any }) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
+  let ctx: AuthContext;
+  try {
+    ctx = await requireAuth(cookies);
+  } catch (error) {
+    return authErrorResponse(error);
   }
 
-  const body = await request.json();
+  let body;
+  try {
+    body = await parseJsonBody(request, schemas.createApiKey);
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      return json({ error: error.message }, { status: 400 });
+    }
+    throw error;
+  }
+
   const { name, teamId, expiresInDays } = body;
 
-  if (!name) {
-    return json({ error: 'API key name is required' }, { status: 400 });
+  // A key with no teamId is global: it grants access to every team through the
+  // Kubernetes-compatible API, so only admins may mint one.  Team-scoped keys
+  // require ownership of that specific team.
+  if (!teamId) {
+    if (ctx.user.role !== 'admin') {
+      return json(
+        { error: 'Only admins can create global API keys. Specify a teamId for a team-scoped key.' },
+        { status: 403 },
+      );
+    }
+  } else {
+    try {
+      await requireTeamOwner(cookies, teamId);
+    } catch (error) {
+      return authErrorResponse(error);
+    }
   }
 
   const rawKey = generateApiKey();
@@ -70,18 +115,20 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
   return json({
     id: keyId,
     name,
+    scope: teamId ? 'team' : 'global',
+    teamId: teamId || null,
+    // The only time the raw key is ever returned.
     key: rawKey,
     expiresAt,
   });
 }
 
 export async function DELETE({ url, cookies }: { url: URL; cookies: any }) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
+  let ctx: AuthContext;
+  try {
+    ctx = await requireAuth(cookies);
+  } catch (error) {
+    return authErrorResponse(error);
   }
 
   const keyId = url.searchParams.get('id');
@@ -89,33 +136,25 @@ export async function DELETE({ url, cookies }: { url: URL; cookies: any }) {
     return json({ error: 'API key ID required' }, { status: 400 });
   }
 
-  // Fetch the key to check ownership before deleting.
   const key = await db.select().from(apiKeys).where(eq(apiKeys.id, keyId)).get();
   if (!key) {
     return json({ error: 'API key not found' }, { status: 404 });
   }
 
-  // Admins may delete any key.
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (user?.role === 'admin') {
-    await db.delete(apiKeys).where(eq(apiKeys.id, keyId));
-    return json({ success: true });
-  }
+  if (ctx.user.role !== 'admin') {
+    // Global keys are admin-only in both directions.
+    if (!key.teamId) {
+      return json({ error: 'API key not found' }, { status: 404 });
+    }
+    const membership = await db
+      .select()
+      .from(teamMembers)
+      .where(and(eq(teamMembers.teamId, key.teamId), eq(teamMembers.userId, ctx.user.id)))
+      .get();
 
-  // Non-admins may only delete keys that belong to a team they are a member of.
-  if (!key.teamId) {
-    // Global (non-team) keys may only be deleted by admins.
-    return json({ error: 'Forbidden' }, { status: 403 });
-  }
-
-  const membership = await db
-    .select()
-    .from(teamMembers)
-    .where(and(eq(teamMembers.teamId, key.teamId), eq(teamMembers.userId, userId)))
-    .get();
-
-  if (!membership) {
-    return json({ error: 'Forbidden' }, { status: 403 });
+    if (!membership || membership.role !== 'owner') {
+      return json({ error: 'Team owner access required' }, { status: 403 });
+    }
   }
 
   await db.delete(apiKeys).where(eq(apiKeys.id, keyId));

@@ -1,39 +1,19 @@
 import { json } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { containers, workers } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
 import { getRestPodmanClient } from '$lib/server/podman-client';
+import { authErrorResponse, requireContainerAccess } from '$lib/server/auth';
 
 export async function POST({ params, request, cookies }: { params: { id: string }; request: Request; cookies: any }) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId || !(await validateSession(sessionId))) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
+  let container, worker;
+  try {
+    ({ container, worker } = await requireContainerAccess(cookies, params.id));
+  } catch (error) {
+    return authErrorResponse(error);
   }
 
   const { command } = await request.json();
-  
+
   if (!command) {
     return json({ error: 'Command required' }, { status: 400 });
-  }
-
-  // Get container
-  const container = await db.select().from(containers).where(eq(containers.id, params.id)).get();
-  
-  if (!container) {
-    return json({ error: 'Container not found' }, { status: 404 });
-  }
-
-  if (!container.workerId) {
-    return json({ error: 'Container has no worker assigned' }, { status: 400 });
-  }
-
-  // Get worker
-  const worker = await db.select().from(workers).where(eq(workers.id, container.workerId)).get();
-  
-  if (!worker) {
-    return json({ error: 'Worker not found' }, { status: 404 });
   }
 
   let client: ReturnType<typeof getRestPodmanClient>;
@@ -71,12 +51,12 @@ export async function POST({ params, request, cookies }: { params: { id: string 
 }
 
 // Handle WebSocket upgrade for interactive terminal
-export async function GET({ params, request, cookies, url }: { params: { id: string }; request: Request; cookies: any; url: URL }) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId || !(await validateSession(sessionId))) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
+export async function GET({ params, request, cookies }: { params: { id: string }; request: Request; cookies: any }) {
+  let worker;
+  try {
+    ({ worker } = await requireContainerAccess(cookies, params.id));
+  } catch (error) {
+    return authErrorResponse(error);
   }
 
   // Check if this is a WebSocket upgrade request
@@ -85,27 +65,8 @@ export async function GET({ params, request, cookies, url }: { params: { id: str
     return json({ error: 'WebSocket upgrade required' }, { status: 400 });
   }
 
-  // Get container
-  const container = await db.select().from(containers).where(eq(containers.id, params.id)).get();
-  
-  if (!container) {
-    return json({ error: 'Container not found' }, { status: 404 });
-  }
-
-  if (!container.workerId) {
-    return json({ error: 'Container has no worker assigned' }, { status: 400 });
-  }
-
-  // Get worker
-  const worker = await db.select().from(workers).where(eq(workers.id, container.workerId)).get();
-  
-  if (!worker) {
-    return json({ error: 'Worker not found' }, { status: 404 });
-  }
-
-  let client: ReturnType<typeof getRestPodmanClient>;
   try {
-    client = getRestPodmanClient(worker);
+    getRestPodmanClient(worker).destroy();
   } catch (e: any) {
     return json({ error: `Client creation failed: ${e.message}` }, { status: 400 });
   }

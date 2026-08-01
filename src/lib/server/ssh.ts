@@ -1,7 +1,19 @@
-import { execSync } from 'child_process';
-import { writeFileSync, unlinkSync, existsSync } from 'fs';
+/**
+ * SSH helpers for worker provisioning and the host terminal.
+ *
+ * Commands are executed via `spawn` with an argv array and no shell, so the
+ * local shell never interprets user input.  (A previous implementation
+ * interpolated the command into an `execSync` string, which let `$(...)` in a
+ * terminal command execute on the Rudder host rather than the worker.)
+ *
+ * Everything here is async — `execSync` would block the single-threaded server
+ * for the whole timeout window, freezing every other request.
+ */
+import { spawn } from 'child_process';
+import { writeFileSync, unlinkSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir, platform } from 'os';
+import { randomBytes } from 'crypto';
 
 export interface SSHConnectionConfig {
   host: string;
@@ -10,66 +22,170 @@ export interface SSHConnectionConfig {
   privateKey: string;
 }
 
+/** Persistent known_hosts so a worker's key is pinned after first contact. */
+const KNOWN_HOSTS_PATH = (() => {
+  const dir = join(process.cwd(), 'data');
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch {
+    return join(tmpdir(), 'rudder_known_hosts');
+  }
+  return join(dir, 'known_hosts');
+})();
+
+/**
+ * Base SSH options.
+ *
+ * `accept-new` trusts a host the first time it is seen and pins it thereafter,
+ * so an attacker cannot transparently swap in a different worker later.  It is
+ * still trust-on-first-use; `StrictHostKeyChecking=no` (the previous setting)
+ * accepted *any* changed key on *every* connection.
+ */
+function baseOptions(port: number, keyPath: string): string[] {
+  return [
+    '-o', 'StrictHostKeyChecking=accept-new',
+    '-o', `UserKnownHostsFile=${KNOWN_HOSTS_PATH}`,
+    '-o', 'BatchMode=yes',
+    '-o', 'PasswordAuthentication=no',
+    // Suppress the "Permanently added ... to the list of known hosts" notice,
+    // which would otherwise surface as spurious stderr on first connection.
+    '-o', 'LogLevel=ERROR',
+    '-i', keyPath,
+    '-p', String(port),
+  ];
+}
+
 export function createTempKeyFile(privateKey: string): string {
-  const tempPath = join(tmpdir(), `rudder_temp_${Date.now()}.key`);
-  writeFileSync(tempPath, privateKey, { mode: 0o600 });
+  // Random name: a predictable path in a shared tmpdir invites a symlink race.
+  const tempPath = join(tmpdir(), `rudder_${randomBytes(16).toString('hex')}.key`);
+  writeFileSync(tempPath, privateKey, { mode: 0o600, flag: 'wx' });
   return platform() === 'win32' ? tempPath.replace(/\\/g, '/') : tempPath;
 }
 
 export function deleteTempKeyFile(path: string): void {
-  if (existsSync(path)) {
-    unlinkSync(path);
+  try {
+    if (existsSync(path)) unlinkSync(path);
+  } catch {
+    /* best-effort */
   }
 }
 
+const MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
+
+interface RunResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+
+/** Run ssh with an argv array. Never invokes a shell locally. */
+function runSSH(
+  args: string[],
+  opts: { timeoutMs: number; input?: string },
+): Promise<RunResult> {
+  return new Promise((resolve) => {
+    const child = spawn('ssh', args, { shell: false });
+
+    let stdout = '';
+    let stderr = '';
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGKILL');
+      resolve({
+        stdout,
+        stderr: stderr || `SSH command timed out after ${opts.timeoutMs}ms`,
+        exitCode: 124,
+      });
+    }, opts.timeoutMs);
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes <= MAX_OUTPUT_BYTES) stdout += chunk.toString();
+    });
+
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderrBytes += chunk.length;
+      if (stderrBytes <= MAX_OUTPUT_BYTES) stderr += chunk.toString();
+    });
+
+    child.on('error', (err: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ stdout, stderr: err.message, exitCode: 1 });
+    });
+
+    child.on('close', (code: number | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ stdout, stderr, exitCode: code ?? 1 });
+    });
+
+    if (opts.input !== undefined) {
+      child.stdin.on('error', () => { /* remote closed early */ });
+      child.stdin.end(opts.input);
+    } else {
+      child.stdin.end();
+    }
+  });
+}
+
 export async function testSSHConnection(config: SSHConnectionConfig): Promise<boolean> {
+  let tempKeyPath: string | null = null;
   try {
-    const tempKeyPath = createTempKeyFile(config.privateKey);
-    execSync(
-      `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i "${tempKeyPath}" -p ${config.port} ${config.username}@${config.host} echo hello`,
-      { encoding: 'utf8', timeout: 15000 }
+    tempKeyPath = createTempKeyFile(config.privateKey);
+    const result = await runSSH(
+      [
+        ...baseOptions(config.port, tempKeyPath),
+        '-o', 'ConnectTimeout=10',
+        `${config.username}@${config.host}`,
+        'echo hello',
+      ],
+      { timeoutMs: 15000 },
     );
-    deleteTempKeyFile(tempKeyPath);
-    return true;
-  } catch (error) {
+    return result.exitCode === 0;
+  } catch {
     return false;
+  } finally {
+    // The old implementation only deleted the key on success, leaving private
+    // keys in tmpdir whenever a connection test failed.
+    if (tempKeyPath) deleteTempKeyFile(tempKeyPath);
   }
 }
 
 export async function executeSSHCommand(
   config: SSHConnectionConfig,
   command: string,
-  stdinInput?: string
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const tempKeyPath = createTempKeyFile(config.privateKey);
+  stdinInput?: string,
+): Promise<RunResult> {
+  let tempKeyPath: string | null = null;
   try {
-    let stdout: string;
-    let stderr: string;
-    if (stdinInput) {
-      // Use stdin for script input
-      const result = execSync(
-        `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=60 -i "${tempKeyPath}" -p ${config.port} ${config.username}@${config.host} ${command}`,
-        { encoding: 'utf8', timeout: 900000, input: stdinInput, maxBuffer: 50 * 1024 * 1024 }
-      );
-      stdout = result;
-      stderr = '';
-    } else {
-      stdout = execSync(
-        `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -i "${tempKeyPath}" -p ${config.port} ${config.username}@${config.host} "${command.replace(/"/g, '\\"')}"`,
-        { encoding: 'utf8', timeout: 120000, maxBuffer: 50 * 1024 * 1024 }
-      );
-      stderr = '';
-    }
-    deleteTempKeyFile(tempKeyPath);
-    return { stdout, stderr, exitCode: 0 };
+    tempKeyPath = createTempKeyFile(config.privateKey);
+
+    const args = [
+      ...baseOptions(config.port, tempKeyPath),
+      '-o', 'ConnectTimeout=30',
+      '-o', 'ServerAliveInterval=15',
+      '-o', 'ServerAliveCountMax=60',
+      `${config.username}@${config.host}`,
+      // Passed as a single argv element: the *remote* shell interprets it,
+      // the local one never sees it.
+      command,
+    ];
+
+    return await runSSH(args, {
+      timeoutMs: stdinInput ? 900_000 : 120_000,
+      input: stdinInput,
+    });
   } catch (error: any) {
-    deleteTempKeyFile(tempKeyPath);
-    const errMsg = error.message || '';
-    const stderrOutput = error.stderr ? error.stderr.toString() : '';
-    return {
-      stdout: error.stdout ? error.stdout.toString() : '',
-      stderr: stderrOutput || errMsg,
-      exitCode: error.status || 1
-    };
+    return { stdout: '', stderr: error?.message || 'SSH execution failed', exitCode: 1 };
+  } finally {
+    if (tempKeyPath) deleteTempKeyFile(tempKeyPath);
   }
 }

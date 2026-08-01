@@ -9,31 +9,30 @@ import { containers, workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { validateTerminalToken } from '$lib/server/terminal-tokens';
 import { executeSSHCommand, type SSHConnectionConfig } from '$lib/server/ssh';
-import { join } from 'path';
-import { writeFileSync, unlinkSync } from 'fs';
-import { tmpdir } from 'os';
-import { spawn } from 'child_process';
 
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 
 export function GET({ url }: { url: URL }) {
   const sessionId = url.searchParams.get('sessionId');
-  const containerId = url.searchParams.get('containerId');
-  const workerIdParam = url.searchParams.get('workerId');
   const authToken = url.searchParams.get('token');
 
   if (!sessionId || !authToken) {
     return new Response('Missing required parameters', { status: 400 });
   }
 
-  if (!containerId && !workerIdParam) {
-    return new Response('Missing containerId or workerId', { status: 400 });
-  }
-
-  // Validate single-use token
+  // Validate single-use token.  The token is the *only* authorization signal
+  // here, so the target container/host is read from the token itself — never
+  // from the query string, which the caller controls.
   const tokenData = validateTerminalToken(authToken);
   if (!tokenData) {
     return new Response('Invalid or expired token', { status: 401 });
+  }
+
+  const containerId = tokenData.containerId ?? null;
+  const workerIdParam = tokenData.workerId ?? null;
+
+  if (!containerId && !workerIdParam) {
+    return new Response('Token is not bound to a container or worker', { status: 400 });
   }
 
   return new Response(null, {
@@ -216,8 +215,4 @@ async function handleContainerTerminal(ws: WebSocket, worker: any, containerId: 
     ws.close(1011, 'Failed to exec into container');
     client.destroy();
   }
-}
-
-function cleanupKeyFile(path: string) {
-  try { unlinkSync(path); } catch { /* ignore */ }
 }

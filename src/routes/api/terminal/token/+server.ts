@@ -1,34 +1,47 @@
 import { json } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { containers, workers } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import {
+  authErrorResponse,
+  canManageWorker,
+  requireContainerAccess,
+} from '$lib/server/auth';
 import { storeTerminalToken } from '$lib/server/terminal-tokens';
+import { parseJsonBody, ValidationError, schemas } from '$lib/server/validation';
 
 export async function POST({ request, cookies }: { request: Request; cookies: any }) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
+  let body;
+  try {
+    body = await parseJsonBody(request, schemas.terminalToken);
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      return json({ error: error.message }, { status: 400 });
+    }
+    throw error;
   }
 
-  const body = await request.json();
   const { containerId, workerId } = body;
 
   if (!containerId && !workerId) {
     return json({ error: 'Container ID or Worker ID required' }, { status: 400 });
   }
-
-  // Verify resource exists
-  if (containerId) {
-    const container = await db.select().from(containers).where(eq(containers.id, containerId)).get();
-    if (!container) return json({ error: 'Container not found' }, { status: 404 });
+  if (containerId && workerId) {
+    return json({ error: 'Provide either containerId or workerId, not both' }, { status: 400 });
   }
-  if (workerId) {
-    const worker = await db.select().from(workers).where(eq(workers.id, workerId)).get();
-    if (!worker) return json({ error: 'Worker not found' }, { status: 404 });
-    // SSH key will be provided ad-hoc via browser vault — no need to require sshKeyId
+
+  // Authorize against the specific resource the token will be bound to.  The
+  // WebSocket handler trusts the token alone, so this is the only place the
+  // caller's permission to reach this container/host is ever checked.
+  let userId: string;
+  try {
+    if (containerId) {
+      const { ctx } = await requireContainerAccess(cookies, containerId);
+      userId = ctx.user.id;
+    } else {
+      // A host shell is unrestricted root on the worker — admins only.
+      const { ctx } = await canManageWorker(cookies, workerId!);
+      userId = ctx.user.id;
+    }
+  } catch (error) {
+    return authErrorResponse(error);
   }
 
   // Generate a short-lived token (5 minutes) for terminal WebSocket handshake.
