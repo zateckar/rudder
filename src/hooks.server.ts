@@ -14,7 +14,9 @@ const securityHeaders: Handle = async ({ event, resolve }) => {
   response.headers.set('X-Content-Type-Options', 'nosniff');
   response.headers.set('X-Frame-Options', 'SAMEORIGIN');
   response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
-  response.headers.set('X-XSS-Protection', '1; mode=block');
+  // X-XSS-Protection is deliberately not set: the legacy auditor it enables is
+  // removed from current browsers and could itself introduce vulnerabilities.
+  // The CSP below is the actual defence.
   response.headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
 
   // HSTS: only set in production to avoid breaking local dev (HTTP)

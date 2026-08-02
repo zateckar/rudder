@@ -35,8 +35,10 @@ COPY --from=builder --chown=rudder:rudder /app/build ./build
 COPY --from=builder --chown=rudder:rudder /app/node_modules ./node_modules
 COPY --from=builder --chown=rudder:rudder /app/package.json ./
 
-# Copy drizzle migrations so the app can auto-migrate on startup
-COPY --from=builder --chown=rudder:rudder /app/drizzle ./drizzle
+# drizzle/ is deliberately not copied.  Nothing calls drizzle's migrate() at
+# runtime — src/lib/db/index.ts applies the schema itself on startup — and
+# drizzle-kit is a devDependency that the production install above prunes, so
+# the SQL files would be unusable inside the image.
 
 # Create data directory for SQLite database
 RUN mkdir -p /app/data && chown rudder:rudder /app/data

@@ -6,7 +6,6 @@ Container orchestration platform built with SvelteKit, Drizzle ORM, and SQLite. 
 
 ### Core
 - **Application deployment** -- single container, Docker Compose, and Kubernetes manifests
-- **Git-based deployment** -- build from Git repo + Dockerfile directly on workers
 - **Worker provisioning** -- automated SSH-based setup of Podman, Traefik, and CrowdSec
 - **Container management** -- start, stop, restart, recreate, resource limits, scaling (replicas)
 - **Container logs** -- searchable, filterable, downloadable log viewer with line-level highlighting
@@ -27,9 +26,11 @@ Container orchestration platform built with SvelteKit, Drizzle ORM, and SQLite. 
 - **Per-app rate limiting** -- configurable request rate limits via Traefik middleware
 - **Per-app OIDC auth** -- protect applications with OAuth 2.0 / OIDC (with PKCE)
 - **Security headers** -- HSTS, X-Frame-Options, CSP, Permissions-Policy on all proxied apps
-- **mTLS** -- mutual TLS for Podman API and Traefik dashboard access
+- **mTLS** -- mutual TLS for Podman API and Traefik dashboard access (required; no plaintext fallback)
 - **Secrets store** -- AES-256-GCM encrypted secrets, automatically injected into deployments
 - **Label sanitization** -- user-provided traefik.* labels are stripped to prevent route hijacking
+- **Mount policy** -- host bind mounts are denied unless explicitly allow-listed by an operator
+- **Login throttling** -- per-user and per-IP rate limiting with failed attempts audited
 
 ### Monitoring & Alerts
 - **Worker metrics** -- CPU, memory, disk, network with time-series charts
@@ -42,9 +43,9 @@ Container orchestration platform built with SvelteKit, Drizzle ORM, and SQLite. 
 - **Team-based RBAC** -- admin/member roles with team-scoped resource isolation
 - **Team resource quotas** -- configurable limits on CPU, memory, containers, and applications per team
 - **OIDC SSO** -- Google, GitHub, Okta, Auth0, plus generic OIDC provider
-- **API keys** -- team-scoped keys with expiration for programmatic access
+- **API keys** -- team-scoped keys (team owners) or global keys (admins), with optional expiry
 - **kubectl-compatible API** -- manage deployments via standard Kubernetes tooling
-- **Audit logging** -- full trail of all create/update/delete operations
+- **Audit logging** -- every mutating request, by session user or API key, plus failed logins
 - **Azure backup/restore** -- automated daily backup to Azure Blob Storage with restore
 
 ---
@@ -101,17 +102,27 @@ That's it. The app is running and the admin account is ready.
 **Optional `.env` settings:**
 
 ```env
-# Pin secrets to survive volume replacement (auto-generated otherwise)
-SESSION_SECRET=<64-char-random-string>
+# Pin the encryption key to survive volume replacement (auto-generated otherwise).
+# Losing it makes every stored secret permanently unreadable.
 ENCRYPTION_KEY=<64-char-random-string>
 
 # Session lifetime (default 7 days)
 SESSION_MAX_AGE=604800
 
+# Host directories applications may bind-mount (comma-separated).
+# Empty (the default) disables host path mounts; named volumes still work.
+ALLOWED_HOST_MOUNT_PREFIXES=/srv/appdata
+
 # OIDC providers
 OIDC_GOOGLE_CLIENT_ID=...
 OIDC_GOOGLE_CLIENT_SECRET=...
 ```
+
+> **Behind a proxy:** set `ORIGIN` to the browser-facing URL (e.g.
+> `https://rudder.example.com`). SvelteKit compares it against the request origin
+> for CSRF protection. The image does **not** trust `X-Forwarded-Host`, because
+> doing so would let a client choose its own origin unless the proxy always
+> overwrites that header.
 
 ### Kubernetes
 
@@ -134,7 +145,7 @@ kubectl apply -f my-deployment.yaml
 
 The app initialises itself on first boot — no init jobs or manual steps required.
 
-> **Secrets persistence:** `SESSION_SECRET` and `ENCRYPTION_KEY` are auto-generated and stored in the PVC (`/app/data/.secrets.json`). Uncomment the corresponding fields in `rudder-secrets` if you want to pin them explicitly (recommended when moving data between clusters).
+> **Secrets persistence:** `ENCRYPTION_KEY` is auto-generated and stored in the PVC (`/app/data/.secrets.json`). Pin it explicitly in `rudder-secrets` when moving data between clusters — without the original key, stored secrets cannot be decrypted. If the data directory is not writable, the app refuses to start in production rather than generating a key that would be lost on restart.
 
 ### CI/CD
 
@@ -150,10 +161,12 @@ The GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatical
 |----------|----------|---------|-------------|
 | `ADMIN_PASSWORD` | **Yes** (production) | `admin` (dev only) | Password for the auto-created `admin` account. Set before first boot; ignored once the user exists. |
 | `PUBLIC_URL` | **Yes** | `http://localhost:5173` | External URL of the app — used in OIDC redirects and links. |
-| `SESSION_SECRET` | No | auto-generated | Min 32-char string for session integrity. Auto-generated and persisted in the data volume on first boot. |
-| `ENCRYPTION_KEY` | No | auto-generated | Min 32-char string for secret encryption (AES-256-GCM). Auto-generated and persisted on first boot. |
+| `ORIGIN` | **Yes** (behind a proxy) | — | Browser-facing URL, used for CSRF origin checks. |
+| `ENCRYPTION_KEY` | No | auto-generated | Min 32-char string for secret encryption (AES-256-GCM). Auto-generated and persisted on first boot. A shorter value is rejected at startup. |
 | `SESSION_MAX_AGE` | No | `604800` (7 days) | Session lifetime in seconds. |
-| `DATABASE_URL` | No | `file:./data/rudder.db` | SQLite database path. |
+| `DATABASE_URL` | No | `./data/rudder.db` | SQLite database path. Accepts a bare path or `file:` URL; generated secrets and `known_hosts` are stored alongside it. |
+| `ALLOWED_HOST_MOUNT_PREFIXES` | No | — | Comma-separated host directories applications may bind-mount. Empty disables host mounts. `/proc`, `/etc`, `/dev`, `/usr` and similar are always denied. |
+| `ALLOW_INSECURE_PODMAN` | No | `false` | Permit talking to a worker's Podman API without mTLS. Development only. |
 | `WORKER_REGISTRATION_SECRET` | No | — | Shared secret for worker self-registration. |
 | `OIDC_GOOGLE_CLIENT_ID` | No | — | Google OAuth client ID. |
 | `OIDC_GOOGLE_CLIENT_SECRET` | No | — | Google OAuth client secret. |
@@ -191,11 +204,20 @@ SvelteKit Server (Bun runtime with Node adapter)
 
 ## Security
 
-- All API endpoints require authentication (session or API key)
-- Worker management requires admin role
-- SSH private keys encrypted at rest (AES-256-GCM)
-- Passwords hashed with bcrypt (12 rounds)
-- Podman API secured with mutual TLS (client certificate required)
+- All API endpoints require authentication (session or API key) **and** authorization:
+  applications, containers and terminals are scoped to the caller's teams; workers,
+  users and system settings are admin-only
+- SSH private keys are never stored server-side — they live in an encrypted
+  browser-side vault and are supplied per operation
+- Stored worker credentials (Podman mTLS client key, CrowdSec bouncer key, worker
+  OIDC secrets) and all user secrets are encrypted at rest (AES-256-GCM)
+- Session tokens are 256-bit and stored hashed; database read access does not
+  yield usable sessions
+- Passwords hashed with bcrypt (12 rounds); logins are rate limited per user and
+  per source address
+- Podman API secured with mutual TLS (client certificate required; connections
+  fail closed if credentials are missing)
+- Host bind mounts are denied by default and must be explicitly allow-listed
 - CrowdSec AppSec WAF on all application routes with IP ban enforcement
 - Security headers: HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy
 - User-provided container labels sanitized to prevent Traefik route hijacking
@@ -224,21 +246,26 @@ kubectl delete pod <pod-name>       # Remove container
 
 ### Setup
 
-1. Generate a kubeconfig (requires active session):
+1. Generate a kubeconfig. This mints an API key, so it needs an active session
+   and the same privileges as creating one by hand: **team owner** for a
+   team-scoped config, **admin** for a global one.
 
 ```sh
-# Team-scoped access
+# Team-scoped access (team owners and admins)
 curl -X POST https://your-rudder/api/kubeconfig \
   -H "Content-Type: application/json" \
   -H "Cookie: session_id=YOUR_SESSION" \
   -d '{"teamId": "your-team-id"}'
 
-# Global admin access
+# Global access across every team (admins only)
 curl -X POST https://your-rudder/api/kubeconfig \
   -H "Content-Type: application/json" \
   -H "Cookie: session_id=YOUR_SESSION" \
   -d '{}'
 ```
+
+The returned token is shown once and cannot be retrieved again. Revoke it from
+**Settings → API keys** if it leaks.
 
 2. Save the returned `kubeconfig` field to `~/.kube/config` (or use `KUBECONFIG` env var).
 

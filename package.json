@@ -35,11 +35,8 @@
 		"@xterm/xterm": "^6.0.0",
 		"drizzle-orm": "^0.45.2",
 		"monaco-editor": "^0.55.1",
-		"playwright": "^1.60.0",
 		"ssh2": "^1.17.0",
 		"ws": "^8.20.1",
-		"xterm": "^5.3.0",
-		"xterm-addon-fit": "^0.8.0",
 		"zod": "^4.4.3"
 	}
 }

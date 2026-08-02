@@ -2,12 +2,22 @@ import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'crypt
 import { env } from './env';
 
 const ALGORITHM = 'aes-256-gcm';
-const IV_LENGTH = 16;
-const AUTH_TAG_LENGTH = 16;
+/**
+ * 96 bits is the size GCM is specified for; anything else is folded through
+ * GHASH first. Decryption reads the IV length from the stored value, so
+ * ciphertexts written with the previous 128-bit IV keep working.
+ */
+const IV_LENGTH = 12;
 
+/**
+ * ENCRYPTION_KEY is required to be at least 32 characters and is normally
+ * 64 hex characters from the CSPRNG, so it is already high-entropy key
+ * material rather than a password. A plain SHA-256 is therefore sufficient to
+ * map it to 32 bytes; introducing a salted KDF now would make every existing
+ * ciphertext unreadable without a re-encryption migration.
+ */
 function getKey(): Buffer {
-  const hash = createHash('sha256').update(env.ENCRYPTION_KEY).digest();
-  return hash;
+  return createHash('sha256').update(env.ENCRYPTION_KEY).digest();
 }
 
 export function encrypt(text: string): string {
@@ -46,8 +56,12 @@ export function hashKey(key: string): string {
   return createHash('sha256').update(key).digest('hex');
 }
 
-/** Shape produced by `encrypt`: hex IV : hex auth tag : hex ciphertext. */
-const ENCRYPTED_PATTERN = /^[0-9a-f]{32}:[0-9a-f]{32}:[0-9a-f]*$/i;
+/**
+ * Shape produced by `encrypt`: hex IV : hex auth tag : hex ciphertext.
+ * The IV is 24 hex chars today and 32 in values written before the IV length
+ * was corrected, so both are recognised.
+ */
+const ENCRYPTED_PATTERN = /^(?:[0-9a-f]{24}|[0-9a-f]{32}):[0-9a-f]{32}:[0-9a-f]*$/i;
 
 /** True when `value` looks like output of `encrypt`. */
 export function isEncrypted(value: string): boolean {

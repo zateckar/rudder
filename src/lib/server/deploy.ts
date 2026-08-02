@@ -209,15 +209,16 @@ export interface DeployResult {
 }
 
 /**
- * Resolve the SSH connection config for a worker, or return null when the
- * worker has no SSH key configured (e.g. local dev workers).
- * Used by deploy / delete paths to pass into teardownAppNetwork so the
- * Netavark stale-rule cleanup can be performed over SSH after network removal.
+ * SSH config for a worker, used by teardownAppNetwork to run the Netavark
+ * stale-rule cleanup after a network is removed.
+ *
+ * Always null: SSH keys live in the browser vault, not on the server, so no
+ * deploy path can open an SSH session on its own. Kept as a named seam so the
+ * call sites read clearly and can be wired up if server-held keys return.
  */
 export async function resolveWorkerSSHConfig(
-  worker: typeof workers.$inferSelect,
+  _worker: typeof workers.$inferSelect,
 ): Promise<null> {
-  // SSH keys are no longer stored server-side — always returns null
   return null;
 }
 

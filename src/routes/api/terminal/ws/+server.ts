@@ -106,9 +106,20 @@ export function GET({ url }: { url: URL }) {
   });
 }
 
+/**
+ * Host "terminal".
+ *
+ * Each line is run as its own SSH invocation, so there is no shell session:
+ * `cd`, exported variables and interactive programs do not persist between
+ * commands. The banner says so rather than leaving users to discover it.
+ */
 async function handleHostTerminal(ws: WebSocket, sshConfig: SSHConnectionConfig) {
   ws.send(JSON.stringify({ type: 'connected', message: 'Host terminal ready' }));
-  ws.send(`\x1b[1;32m${sshConfig.username}@${sshConfig.host}\x1b[0m\r\n$ `);
+  ws.send(`\x1b[1;32m${sshConfig.username}@${sshConfig.host}\x1b[0m\r\n`);
+  ws.send(
+    `\x1b[2mEach command runs in its own SSH session — 'cd' and shell variables ` +
+      `do not carry over. Chain with && for multi-step commands.\x1b[0m\r\n$ `,
+  );
 
   let currentCommand = '';
 

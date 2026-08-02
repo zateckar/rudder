@@ -10,9 +10,9 @@
 
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
-import { apiKeys, teams, teamMembers, users } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
-import { getSessionIdFromCookies, validateSession } from '$lib/auth';
+import { apiKeys, teams } from '$lib/db/schema';
+import { eq } from 'drizzle-orm';
+import { requireAuth, requireAdmin, requireTeamOwner, authErrorResponse } from '$lib/server/auth';
 import { hashKey } from '$lib/server/encryption';
 import { randomBytes } from 'crypto';
 
@@ -25,20 +25,17 @@ export async function POST({
   cookies: any;
   url: URL;
 }) {
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
+  // This endpoint mints an API key, so it must apply exactly the same rules as
+  // POST /api/api-keys: a global (teamId: null) key reaches every team through
+  // the k8s API and is admin-only, and a team key is an owner-level grant.
+  // Plain membership is not enough — otherwise this route is a way around them.
+  let ctx;
+  try {
+    ctx = await requireAuth(cookies);
+  } catch (error) {
+    return authErrorResponse(error);
   }
-
-  const user = await db
-    .select()
-    .from(users)
-    .where(eq(users.id, userId))
-    .get();
-  if (!user) {
-    return json({ error: 'User not found' }, { status: 404 });
-  }
+  const user = ctx.user;
 
   const body = await request.json().catch(() => ({}));
   const teamId: string | null = body.teamId || null;
@@ -55,27 +52,16 @@ export async function POST({
       .get();
     if (!team) return json({ error: 'Team not found' }, { status: 404 });
 
-    if (user.role !== 'admin') {
-      const membership = await db
-        .select()
-        .from(teamMembers)
-        .where(
-          and(
-            eq(teamMembers.userId, userId),
-            eq(teamMembers.teamId, teamId),
-          ),
-        )
-        .get();
-      if (!membership) {
-        return json(
-          { error: 'Not a member of this team' },
-          { status: 403 },
-        );
-      }
+    try {
+      await requireTeamOwner(cookies, teamId);
+    } catch (error) {
+      return authErrorResponse(error);
     }
     teamSlug = team.slug;
   } else {
-    if (user.role !== 'admin') {
+    try {
+      await requireAdmin(cookies);
+    } catch {
       return json(
         {
           error:
@@ -104,12 +90,17 @@ export async function POST({
   const origin = url.origin;
   const serverUrl = `${origin}/k8s`;
 
+  // Only disable certificate verification for plain-HTTP (local) instances,
+  // where there is no certificate to verify.  Emitting it unconditionally would
+  // tell every kubectl user to accept any certificate for a connection that
+  // carries a bearer token with write access to their team.
+  const tlsLine = origin.startsWith('https:') ? '' : '\n    insecure-skip-tls-verify: true';
+
   const kubeconfig = `apiVersion: v1
 kind: Config
 clusters:
 - cluster:
-    server: ${serverUrl}
-    insecure-skip-tls-verify: true
+    server: ${serverUrl}${tlsLine}
   name: rudder
 contexts:
 - context:
