@@ -340,6 +340,20 @@ export function parseK8sManifest(manifest: string, ctx: PlanContext): Deployment
   // bridge network that is one alias for two containers.
   assertDistinctAliases(appName, containers.map((c) => c.key));
 
+  // The deviation that cannot be detected statically: whether a container talks
+  // to a sibling over `localhost` is in the application's own configuration,
+  // not in the manifest. So it is stated whenever the shape occurs — a
+  // multi-container manifest — rather than when it bites.
+  if (containers.length > 1) {
+    notes.push(
+      `This manifest has ${containers.length} containers. In a Kubernetes Pod they would share ` +
+        `one network namespace and reach each other on localhost; here each gets its own address ` +
+        `on a bridge network, so they must use each other's names instead — ` +
+        `${containers.map((c) => `"${c.key}"`).join(', ')}. Anything configured to connect to ` +
+        `127.0.0.1 or localhost will reach only itself.`,
+    );
+  }
+
   // Routes are assigned after the whole manifest is read, so the container that
   // owns the application hostname is the first one declared that publishes a
   // port, whichever document it came from.
@@ -481,6 +495,13 @@ function parseK8sContainer(
 
   if (container.ports) {
     for (const port of container.ports) {
+      if (port.hostPort !== undefined) {
+        notes.push(
+          `${where} asks to publish container port ${port.containerPort} on host port ` +
+            `${port.hostPort}. Rudder allocates host ports itself so two applications can both ` +
+            `listen on the same port, and Traefik routes to whichever it was given.`,
+        );
+      }
       ports[`${port.containerPort}/tcp`] = [{ hostPort: String(allocatePort()) }];
     }
   }

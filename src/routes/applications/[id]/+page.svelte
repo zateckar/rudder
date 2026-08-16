@@ -140,6 +140,12 @@
     deployedBy: string | null;
     deployedByName: string | null;
     errorMessage: string | null;
+    /**
+     * What this deploy did not do exactly as the manifest asked — a Kubernetes
+     * semantic that does not survive translation to containers on a bridge, a
+     * field Rudder ignores. Not errors; the deploy succeeded.
+     */
+    notes: string[];
     createdAt: string;
     finishedAt: string | null;
   }
@@ -1133,6 +1139,13 @@
                       title="View error details"
                     >Error</button>
                   {/if}
+                  {#if dep.notes?.length}
+                    <button
+                      class="btn-act btn-notes"
+                      onclick={() => alert(dep.notes.join('\n\n'))}
+                      title="This deploy succeeded, but not everything the manifest asked for was done as written"
+                    >{dep.notes.length} note{dep.notes.length === 1 ? '' : 's'}</button>
+                  {/if}
                 </td>
               </tr>
             {/each}
@@ -1807,6 +1820,13 @@
     background: var(--red-subtle); margin-left: 4px;
   }
   .btn-error-detail:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 15%, transparent); }
+
+  /* Not a failure — the deploy worked, but not everything as written. */
+  .btn-notes {
+    color: var(--yellow-text); border-color: color-mix(in srgb, var(--yellow) 30%, transparent);
+    background: var(--yellow-subtle); margin-left: 4px;
+  }
+  .btn-notes:hover:not(:disabled) { background: color-mix(in srgb, var(--yellow) 15%, transparent); }
 
   .text-muted { color: var(--text-muted); }
 

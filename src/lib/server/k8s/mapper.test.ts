@@ -1,5 +1,13 @@
 import { describe, expect, test } from 'bun:test';
-import { containerPortOf, containerToPod, imageReferenceOrBlank, podNameOf } from './mapper';
+import {
+  containerKeyOf,
+  containerPortOf,
+  containerToPod,
+  imageReferenceOrBlank,
+  podGroupToPod,
+  podGroupsFor,
+  podNameOf,
+} from './mapper';
 
 describe('imageReferenceOrBlank', () => {
   test('accepts a bare image reference', () => {
@@ -109,5 +117,78 @@ describe('containerToPod', () => {
     const pod = containerToPod({ ...base, name: '/whoami', status: 'running', ports: null, exposedPort: null }, 'shop', 'platform');
     expect(pod.metadata.name).toBe('whoami');
     expect(podNameOf('/whoami')).toBe('whoami');
+  });
+});
+
+describe('containerKeyOf', () => {
+  test('reads the alias the deploy path stamped', () => {
+    expect(containerKeyOf({ name: 'shop-1a2b3c4d-web-g3', labels: '{"rudder.alias":"web"}' })).toBe('web');
+  });
+
+  test('falls back to the container name for rows without one', () => {
+    // Rows written before the label existed, and containers discovered on a
+    // worker rather than deployed by Rudder.
+    expect(containerKeyOf({ name: '/whoami', labels: null })).toBe('whoami');
+    expect(containerKeyOf({ name: 'legacy', labels: '{not json' })).toBe('legacy');
+  });
+});
+
+describe('podGroupsFor', () => {
+  const row = (id: string, key: string, generation = 1) => ({
+    id,
+    name: `shop-1a2b3c4d-${key}-g${generation}`,
+    containerId: `cid-${id}`,
+    image: 'nginx:1.25',
+    status: 'running',
+    ports: null,
+    exposedPort: null,
+    labels: JSON.stringify({ 'rudder.alias': key }),
+    generation,
+    workerId: 'w1',
+    createdAt: new Date('2026-01-01T00:00:00Z'),
+    updatedAt: new Date('2026-01-01T00:05:00Z'),
+  });
+
+  test('reports a Kubernetes application as one Pod holding its containers', () => {
+    // `kubectl apply` was given one Pod. Reporting a two-container manifest as
+    // two Pods described something the user never wrote.
+    const groups = podGroupsFor({ name: 'shop', type: 'k8s' }, [row('a', 'web'), row('b', 'side')]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].name).toBe('shop');
+    const pod = podGroupToPod(groups[0], 'shop', 'platform');
+    expect(pod.spec.containers.map((c) => c.name)).toEqual(['web', 'side']);
+    expect(pod.status.containerStatuses.map((c) => c.name)).toEqual(['web', 'side']);
+  });
+
+  test('keeps a retained generation as its own Pod', () => {
+    // Separate running processes. Merging them would list stopped containers
+    // as part of the Pod serving traffic.
+    const groups = podGroupsFor({ name: 'shop', type: 'k8s' }, [
+      row('a', 'web', 2),
+      row('b', 'web', 3),
+    ]);
+    expect(groups.map((g) => g.name)).toEqual(['shop-g2', 'shop-g3']);
+  });
+
+  test('leaves compose services as one Pod each', () => {
+    // Separate workloads that happen to share a file.
+    const groups = podGroupsFor({ name: 'shop', type: 'compose' }, [row('a', 'web'), row('b', 'db')]);
+    expect(groups.map((g) => g.name)).toEqual(['shop-1a2b3c4d-web-g1', 'shop-1a2b3c4d-db-g1']);
+  });
+
+  test('leaves replicas as one Pod each', () => {
+    // A replica genuinely is a separate Pod.
+    const groups = podGroupsFor({ name: 'shop', type: 'single' }, [row('a', 'shop'), row('b', 'shop')]);
+    expect(groups).toHaveLength(2);
+  });
+
+  test('a Pod is not Ready until every container is', () => {
+    const groups = podGroupsFor({ name: 'shop', type: 'k8s' }, [
+      row('a', 'web'),
+      { ...row('b', 'side'), status: 'created' },
+    ]);
+    const pod = podGroupToPod(groups[0], 'shop', 'platform');
+    expect(pod.status.phase).toBe('Pending');
+    expect(pod.status.conditions.find((c) => c.type === 'Ready')?.status).toBe('False');
   });
 });

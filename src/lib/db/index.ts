@@ -339,6 +339,7 @@ sqlite.run(`
     status TEXT NOT NULL DEFAULT 'pending',
     deployed_by TEXT REFERENCES users(id),
     error_message TEXT,
+    notes TEXT,
     created_at INTEGER NOT NULL, finished_at INTEGER
   );
 `);
@@ -510,6 +511,7 @@ sqlite.run(`
 // database that never had the table.
 for (const col of [
   `ALTER TABLE deployments ADD COLUMN image_digest TEXT;`,
+  `ALTER TABLE deployments ADD COLUMN notes TEXT;`,
   `ALTER TABLE worker_metrics ADD COLUMN updates_pending INTEGER;`,
   `ALTER TABLE worker_metrics ADD COLUMN updates_security INTEGER;`,
   `ALTER TABLE worker_metrics ADD COLUMN reboot_required INTEGER;`,

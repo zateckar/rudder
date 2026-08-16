@@ -364,6 +364,16 @@ export const deployments = sqliteTable('deployments', {
   status: text('status', { enum: ['pending', 'running', 'succeeded', 'failed', 'rolled_back'] }).notNull().default('pending'),
   deployedBy: text('deployed_by').references(() => users.id),
   errorMessage: text('error_message'),
+  /**
+   * Things the manifest asked for that this deployment did not do exactly as
+   * written — a Kubernetes semantic that does not survive translation to
+   * containers on a bridge, a field Rudder ignores. JSON array of strings.
+   *
+   * Recorded rather than logged: a note in the control plane's stdout is the
+   * same as the silence it replaced. These belong next to the deployment they
+   * describe, where the person who wrote the manifest will see them.
+   */
+  notes: text('notes'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   finishedAt: integer('finished_at', { mode: 'timestamp' }),
 });

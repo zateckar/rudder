@@ -742,10 +742,6 @@ export async function executeApplicationDeploy(
     throw e;
   }
 
-  for (const note of plan.notes) {
-    console.warn(`[deploy] ${app.name}: ${note}`);
-  }
-
   await warnOnAliasCollisions(app, [...new Set(plan.containers.map((c) => c.aliases[0]))]);
 
   // ── Record deployment ──────────────────────────────────
@@ -781,6 +777,9 @@ export async function executeApplicationDeploy(
     image: deployImage,
     status: 'pending',
     deployedBy: deployedByUserId,
+    // What this deploy did not do exactly as the manifest asked. Stored on the
+    // row rather than logged, so it reaches the person who wrote the manifest.
+    notes: plan.notes.length > 0 ? JSON.stringify(plan.notes) : null,
     createdAt: new Date(),
   });
 

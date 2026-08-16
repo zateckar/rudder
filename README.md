@@ -342,7 +342,9 @@ kubectl scale deploy <name> --replicas=3  # Scale replicas
 kubectl delete deployment <name>    # Undeploy + remove
 kubectl logs <pod-name>             # Container logs
 kubectl logs -f <pod-name>          # Follow (streamed)
+kubectl logs <pod> -c <container>   # A named container of a multi-container pod
 kubectl exec <pod-name> -- <cmd>    # Run a command in a container
+kubectl exec <pod> -c <name> -- ... # ...in a named container
 kubectl get events -n <team>        # Deploy history as events
 kubectl delete pod <pod-name>       # Remove container
 ```
@@ -357,6 +359,41 @@ request is answered with a 500. Commands run and their output and exit code come
 back normally — only stdin is missing, and asking for it returns an error
 saying so rather than silently discarding your input. The same constraint
 applies to the container terminal in the UI.
+
+### What a manifest does and does not get
+
+Rudder runs every application as plain containers on a bridge network. There are
+no Podman pods: containers in one share a network namespace, so two of them
+cannot both bind port 80 — an ordinary thing for a manifest to ask — and
+published ports have to be fixed when the pod is created. Bridge networking
+gives each container its own address instead.
+
+That buys a lot and costs one thing, so the whole list is here rather than left
+to be discovered:
+
+| Manifest asks for | What happens |
+| --- | --- |
+| Containers talking over `localhost` | **Does not work.** Each container has its own address; they reach each other by container name (`http://api:8080`), and by `<app>-<name>` when a stack has two of the same name. Every multi-container deploy records a note saying so. |
+| `containerPort` | The port inside the container, reported as such by `kubectl get pod -o yaml`. The host port is allocated by Rudder so two applications can both listen on 80. |
+| `hostPort` | Ignored, and noted on the deployment. Traefik routes to whatever host port was allocated. |
+| `emptyDir` | A tmpfs. Ephemeral, which is the intent; `sizeLimit` is honoured. One mounted by two containers is refused — sharing it needs a shared namespace. |
+| `configMap` / `secret` volume | Delivered as files at the mount path, on a tmpfs, before the container starts. Secret data is decoded and lands at mode 0400, so it never reaches the worker's disk or `podman inspect`. |
+| `envFrom`, `configMapKeyRef`, `secretKeyRef` | Resolved against ConfigMaps and Secrets **declared in the same manifest**. There is no cluster to look anything else up in, so a reference to an object that is not there is refused unless it is marked `optional`. |
+| `hostPath` | Allowed only under `ALLOWED_HOST_MOUNT_PREFIXES`, and refused by name otherwise. |
+| `persistentVolumeClaim`, `nfs`, `projected`, `downwardAPI`, `csi`, `ephemeral` | Refused, naming the kind. |
+| `fieldRef`, `resourceFieldRef` | Refused. They describe a Pod that does not exist here. |
+| `subPath` on a volume mount | Refused. |
+| `command` / `args` | Mapped onto the container's entrypoint and command — the same split OCI makes, under swapped names. |
+| `restartPolicy` | Translated to Podman's spelling (`Always` → `always`, `OnFailure` → `on-failure`, `Never` → `no`). |
+
+Refusals happen before anything is created or torn down, so a manifest Rudder
+will not deploy leaves the running application exactly as it was. Anything
+Rudder does differently rather than refuses is recorded on the deployment and
+shown in the application's history — nothing is dropped in silence.
+
+Grouping several applications, or several containers that need to be managed
+together, is what **stacks** are for: applications in a stack share one network
+and reach each other by name across it.
 
 ### Setup
 
@@ -396,7 +433,7 @@ kubectl get pods
 |------------|--------|-------|
 | Namespace | Team | Identified by team slug |
 | Deployment | Application | Supports create, update, scale, delete |
-| Pod | Container | Individual running containers |
+| Pod | Application (`kubectl apply`) or container | A Kubernetes application is one Pod holding the containers it applied — use `-c <name>` for logs and exec. Compose services and replicas are one Pod each, because they are separate workloads. A generation retained for a fast rollback is its own Pod. |
 | Scale | Replicas | `kubectl scale` adjusts replica count |
 
 ### Deployment YAML Example

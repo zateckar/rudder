@@ -4,6 +4,17 @@ import { applications, deployments, users } from '$lib/db/schema';
 import { eq, desc } from 'drizzle-orm';
 import { executeFastRollback, fastRollbackTargets } from '$lib/server/deploy';
 
+/** Read the notes column, tolerating rows written before it existed. */
+function parseNotes(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((n): n is string => typeof n === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 export async function GET({ params, cookies }: { params: { id: string }; cookies: any }) {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
 
@@ -23,6 +34,7 @@ export async function GET({ params, cookies }: { params: { id: string }; cookies
     imageDigest: deployments.imageDigest,
     deployedBy: deployments.deployedBy,
     errorMessage: deployments.errorMessage,
+    notes: deployments.notes,
     createdAt: deployments.createdAt,
     finishedAt: deployments.finishedAt,
   })
@@ -51,6 +63,8 @@ export async function GET({ params, cookies }: { params: { id: string }; cookies
 
   const result = rows.map(r => ({
     ...r,
+    // Stored as a JSON array; sent as one so the page does not have to parse it.
+    notes: parseNotes(r.notes),
     fastRollback: fast.has(r.id),
     deployedByName: r.deployedBy ? (userMap.get(r.deployedBy) ?? 'Unknown') : null,
     createdAt: r.createdAt instanceof Date ? r.createdAt.toISOString() : r.createdAt,
