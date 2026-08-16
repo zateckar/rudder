@@ -314,11 +314,22 @@ export async function buildWorkerDynamicConfig(workerId: string): Promise<Served
   const worker = await db.select().from(workers).where(eq(workers.id, workerId)).get();
   if (!worker) throw new Error(`Worker ${workerId} not found`);
 
+  // `state = 'active'` is what makes blue/green work: generation N+1 is created
+  // as `pending` and is therefore invisible here until the deploy has verified
+  // it, and generation N flips to `draining` at cutover and disappears from the
+  // next fetch. Rows default to `active`, so nothing changes for an application
+  // deployed before generations existed.
   const rows = await db
     .select({ app: applications, container: containers })
     .from(containers)
     .innerJoin(applications, eq(containers.applicationId, applications.id))
-    .where(and(eq(containers.workerId, workerId), eq(containers.status, 'running')))
+    .where(
+      and(
+        eq(containers.workerId, workerId),
+        eq(containers.state, 'active'),
+        eq(containers.status, 'running'),
+      ),
+    )
     .all();
 
   const byRouter = new Map<string, RouteGroup & { app: any }>();

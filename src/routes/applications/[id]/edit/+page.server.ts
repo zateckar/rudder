@@ -4,6 +4,7 @@ import { applications, users, workers, teams, teamMembers, volumes, stacks } fro
 import { eq, inArray, or, isNull } from 'drizzle-orm';
 import { assertDomainAvailable } from '$lib/server/domains';
 import { ALLOWED_DOMAINS_UNSUPPORTED } from '$lib/server/oidc';
+import { DEFAULT_HEALTH_TIMEOUT_S } from '$lib/server/generations';
 
 export const load = async ({ params, cookies }: { params: { id: string }; cookies: any }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -221,6 +222,22 @@ export const actions = {
       }
     }
 
+    // Deploy behaviour. Both fields are absent from forms that do not offer
+    // them, which must leave the stored value alone rather than reset it.
+    const healthTimeoutRaw = formData.get('healthTimeoutSeconds');
+    const healthTimeoutSeconds =
+      healthTimeoutRaw === null
+        ? (app.healthTimeoutSeconds ?? null)
+        : healthTimeoutRaw.toString().trim()
+          ? Math.max(10, Math.min(3600, parseInt(healthTimeoutRaw.toString()) || DEFAULT_HEALTH_TIMEOUT_S))
+          : null;
+
+    const retainRaw = formData.get('retainPreviousMinutes');
+    const retainPreviousMinutes =
+      retainRaw === null
+        ? (app.retainPreviousMinutes ?? 0)
+        : Math.max(0, Math.min(1440, parseInt(retainRaw.toString()) || 0));
+
     // Security & Access Control
     const rateLimitAvgStr = formData.get('rateLimitAvg')?.toString();
     const rateLimitBurstStr = formData.get('rateLimitBurst')?.toString();
@@ -268,6 +285,8 @@ export const actions = {
         stackId,
         replicas,
         healthcheck,
+        healthTimeoutSeconds,
+        retainPreviousMinutes,
         gitRepo: gitRepo || null,
         gitBranch: gitBranch || null,
         gitDockerfile: gitDockerfile || null,

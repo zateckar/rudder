@@ -2,6 +2,7 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { applications, deployments, users } from '$lib/db/schema';
 import { eq, desc } from 'drizzle-orm';
+import { executeFastRollback, fastRollbackTargets } from '$lib/server/deploy';
 
 export async function GET({ params, cookies }: { params: { id: string }; cookies: any }) {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -42,8 +43,15 @@ export async function GET({ params, cookies }: { params: { id: string }; cookies
     if (u) userMap.set(u.id, u.fullName || u.username);
   }
 
+  // Which of these can be restored by restarting containers that are still on
+  // the worker. Surfaced per row so the page can say which rollbacks are
+  // seconds and which are a full redeploy, rather than letting the user find
+  // out during an incident.
+  const fast = new Set(await fastRollbackTargets(params.id));
+
   const result = rows.map(r => ({
     ...r,
+    fastRollback: fast.has(r.id),
     deployedByName: r.deployedBy ? (userMap.get(r.deployedBy) ?? 'Unknown') : null,
     createdAt: r.createdAt instanceof Date ? r.createdAt.toISOString() : r.createdAt,
     finishedAt: r.finishedAt instanceof Date ? r.finishedAt.toISOString() : r.finishedAt,
@@ -117,6 +125,22 @@ export async function POST({ params, request, cookies }: { params: { id: string 
     createdAt: new Date(),
     finishedAt: new Date(),
   });
+
+  // If that version's containers are still on the worker, stopped, starting
+  // them and repointing the service is the whole rollback — no pull, no
+  // recreate. A failure here is not fatal: it falls through to the redeploy
+  // below, which is what would have happened anyway.
+  if ((await fastRollbackTargets(params.id)).includes(source.id)) {
+    const fast = await executeFastRollback(params.id, source.id);
+    if (fast.success) {
+      return json({
+        success: true,
+        fast: true,
+        message: `Rolled back to version ${source.version} from the retained generation`,
+      });
+    }
+    console.warn(`[rollback] Fast path unavailable for ${params.id}: ${fast.message}`);
+  }
 
   // Trigger a redeploy by calling the deploy endpoint internally
   try {

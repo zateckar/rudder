@@ -15,6 +15,8 @@ Container orchestration platform built with SvelteKit, Drizzle ORM, and SQLite. 
 - **Network management** -- create, list, and delete Podman networks on workers
 
 ### Deployment & CI/CD
+- **Blue/green deploys** -- on workers using control-plane routing, the new containers are created and verified alongside the running ones and traffic only moves once they are up; a failed deploy leaves the previous version serving (see [Zero-downtime deploys](#zero-downtime-deploys))
+- **Instant rollback** -- optionally keep the superseded generation stopped-but-present, so rolling back to it restarts containers instead of pulling and recreating
 - **Deployment history** -- versioned deployment records with full rollback support
 - **Digest-pinned rollback** -- each deployment records the image digest it actually ran, and rollback recreates containers from that digest rather than re-resolving the tag
 - **Deploy webhooks** -- per-application webhook tokens for GitHub Actions, GitLab CI, etc.
@@ -268,6 +270,55 @@ SvelteKit Server (Bun runtime with Node adapter)
   unrelated reason cannot move Traefik to a new major version
 - Access logs rotated daily (logrotate, 14-day retention)
 - Traefik dashboard protected with mTLS (same as Podman API)
+
+---
+
+## Zero-downtime deploys
+
+A deploy used to remove the running containers before creating the new ones, so
+every deploy was a short outage and a deploy that failed halfway left nothing
+running at all. On a worker set to **control-plane routing** (`http` routing
+mode) deploys are additive instead:
+
+1. **Create** — generation N+1 is created and started alongside generation N,
+   which is still serving. New containers are named `<app>-<id8>-gN` and are
+   invisible to the routing configuration until step 3.
+2. **Verify** — Rudder waits for the new containers. If the application defines
+   a health check, it waits for `healthy`; otherwise it waits for them to stay
+   up, and fails immediately if one exits or starts restarting. The wait is
+   bounded by **Health timeout** on the application (default 120s).
+3. **Cut over** — the new generation is marked active and the old one draining,
+   which changes what the worker's next configuration fetch returns. No
+   container is recreated; traffic moves when Traefik reloads the file.
+4. **Reap** — after a grace period the superseded containers are stopped and
+   removed, or kept if the application opts into a rollback window.
+
+A failure in step 1 or 2 removes the partial generation and leaves the previous
+one serving. The deploy reports the failure without an outage.
+
+**Rollback.** Set **Keep previous version** on an application to leave the
+superseded containers stopped but present for N minutes. While that window is
+open, the deployment history marks that version *Rollback (instant)* and
+restoring it restarts those containers rather than pulling and recreating —
+traffic is back on the old version in about the configured poll interval.
+Outside the window rollback still works, as a full redeploy from the manifest.
+The application page distinguishes the two before you commit, because the
+difference is minutes and you find out during an incident.
+
+**When it does not apply.** These keep the previous destroy-then-create
+behaviour, and say so rather than pretending otherwise:
+
+| Case | Why |
+| --- | --- |
+| Worker in `labels` routing mode | Routing lives in container labels, so two generations would define the same Traefik router and service with different backends |
+| Kubernetes-manifest applications | Each container port is published on the identical host port, which two generations cannot both bind |
+| A single-container app with an explicit host port | Same reason; the port was asked for deliberately, so it is honoured rather than reallocated |
+
+Because a health check is the only real readiness signal available — Rudder
+reaches a worker through the Podman API and cannot connect to a published port
+itself — an application without one is accepted as soon as its containers have
+stayed up briefly. Define a health check on anything where "the process started"
+and "the process can serve" are meaningfully different.
 
 ---
 

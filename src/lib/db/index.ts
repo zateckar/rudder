@@ -111,6 +111,8 @@ sqlite.run(`
     git_branch TEXT,
     git_dockerfile TEXT,
     healthcheck TEXT,
+    health_timeout_seconds INTEGER,
+    retain_previous_minutes INTEGER NOT NULL DEFAULT 0,
     created_by TEXT REFERENCES users(id),
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
@@ -127,6 +129,9 @@ sqlite.run(`
     ports TEXT,
     exposed_port INTEGER,
     labels TEXT,
+    generation INTEGER NOT NULL DEFAULT 1,
+    state TEXT NOT NULL DEFAULT 'active',
+    deployment_id TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   );
@@ -509,6 +514,11 @@ for (const col of [
   `ALTER TABLE worker_metrics ADD COLUMN updates_security INTEGER;`,
   `ALTER TABLE worker_metrics ADD COLUMN reboot_required INTEGER;`,
   `ALTER TABLE secrets ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'env';`,
+  `ALTER TABLE containers ADD COLUMN generation INTEGER NOT NULL DEFAULT 1;`,
+  `ALTER TABLE containers ADD COLUMN state TEXT NOT NULL DEFAULT 'active';`,
+  `ALTER TABLE containers ADD COLUMN deployment_id TEXT;`,
+  `ALTER TABLE applications ADD COLUMN health_timeout_seconds INTEGER;`,
+  `ALTER TABLE applications ADD COLUMN retain_previous_minutes INTEGER NOT NULL DEFAULT 0;`,
 ]) {
   try { sqlite.run(col); } catch { /* Column already exists */ }
 }

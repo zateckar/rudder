@@ -111,6 +111,18 @@ export const applications = sqliteTable('applications', {
   gitBranch: text('git_branch'),
   gitDockerfile: text('git_dockerfile'),
   healthcheck: text('healthcheck'), // JSON: { test, interval, timeout, retries }
+  /**
+   * How long a blue/green deploy waits for the new generation to become
+   * healthy before giving up and removing it. Null means the default.
+   */
+  healthTimeoutSeconds: integer('health_timeout_seconds'),
+  /**
+   * Minutes to keep the superseded generation stopped-but-present after a
+   * successful deploy, so a rollback can restart it instead of pulling and
+   * recreating. 0 — the default — reaps it immediately, which is the behaviour
+   * of every deploy before this setting existed.
+   */
+  retainPreviousMinutes: integer('retain_previous_minutes').notNull().default(0),
   createdBy: text('created_by').references(() => users.id),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
@@ -158,6 +170,32 @@ export const containers = sqliteTable('containers', {
   domain: text('domain'),
   routerName: text('router_name'),
   labels: text('labels'),
+  /**
+   * Which deploy produced this container. Two generations of one application
+   * coexist during a blue/green cutover, which is only possible because the
+   * generation is part of the Podman name — names are unique per host, and the
+   * old scheme reused one, so the new container could not be created until the
+   * old one was gone.
+   */
+  generation: integer('generation').notNull().default(1),
+  /**
+   * The deploy that created this container. What makes a fast rollback
+   * possible: given a deployment the user picked out of the history, this is
+   * how Rudder knows whether its containers are still sitting on the worker,
+   * stopped, waiting to be restarted.
+   */
+  deploymentId: text('deployment_id'),
+  /**
+   * `pending`  — created, not yet verified, never routed.
+   * `active`   — serving traffic.
+   * `draining` — superseded; removed from the routing config, still running so
+   *              in-flight requests can finish, and retained beyond that when
+   *              the application opts into a fast-rollback window.
+   *
+   * Rows survive until after cutover so `reservedPortsForWorker` still counts
+   * the ports the old generation holds.
+   */
+  state: text('state', { enum: ['pending', 'active', 'draining'] }).notNull().default('active'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });

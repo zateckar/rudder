@@ -472,6 +472,18 @@ async function collectAll(): Promise<void> {
   }
   await pruneOldData();
 
+  // Superseded containers kept for a fast rollback have to be cleaned up even
+  // if the application is never deployed again. This loop is the only thing
+  // that already runs on a timer against every worker, so it is where the
+  // sweep lives rather than in a scheduler of its own.
+  try {
+    const { sweepExpiredGenerations } = await import('./deploy');
+    const reaped = await sweepExpiredGenerations();
+    if (reaped > 0) console.log(`[metrics] Reaped ${reaped} retained container(s)`);
+  } catch (e) {
+    console.error('[metrics] Generation sweep failed:', (e as any).message || e);
+  }
+
   // Evaluate alert rules against freshly collected metrics
   try {
     await evaluateAlerts();

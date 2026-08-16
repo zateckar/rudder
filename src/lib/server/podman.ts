@@ -75,7 +75,22 @@ export interface ContainerInspect {
     Running: boolean;
     Pid: number;
     ExitCode: number;
+    /**
+     * Present only when the image or the create call defined a health check.
+     * `starting` until the first probe succeeds or the retries run out.
+     */
+    Health?: {
+      Status: 'starting' | 'healthy' | 'unhealthy' | string;
+      FailingStreak?: number;
+    };
   };
+  /**
+   * How many times Podman has restarted this container. A blue/green deploy
+   * watches it: with `restart: always`, a container that crashes is back up by
+   * the next poll, so "is it running" alone cannot tell a healthy start from a
+   * crash loop.
+   */
+  RestartCount?: number;
   HostConfig: {
     RestartPolicy?: {
       Name: string;

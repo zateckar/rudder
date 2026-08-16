@@ -131,6 +131,12 @@
      * digests were tracked — those roll back by tag, as they always did.
      */
     imageDigest: string | null;
+    /**
+     * This version's containers are still on the worker, stopped, so rolling
+     * back to it restarts them instead of pulling and recreating. Only ever
+     * true while the application's retention window is open.
+     */
+    fastRollback: boolean;
     deployedBy: string | null;
     deployedByName: string | null;
     errorMessage: string | null;
@@ -177,7 +183,16 @@
   }
 
   async function rollbackTo(dep: Deployment) {
-    if (!confirm(`Roll back to version ${dep.version}? This will redeploy the application with that version's configuration.`)) return;
+    // Two very different operations behind one button. Saying which one is
+    // about to happen matters most during an incident, which is when this
+    // button gets pressed.
+    const what = dep.fastRollback
+      ? `Version ${dep.version} is still on the worker, stopped. Rolling back restarts those ` +
+        `containers and moves traffic to them — a few seconds, no image pull.`
+      : `Roll back to version ${dep.version}? This redeploys the application from that version's ` +
+        `configuration: the image is pulled and the containers are recreated, which takes as long ` +
+        `as a normal deploy.`;
+    if (!confirm(what)) return;
     rollbackBusy = dep.id;
     try {
       const res = await fetch(`/api/applications/${data.application.id}/deployments`, {
@@ -715,6 +730,17 @@
               <div class="container-title">
                 <h3>{container.name}</h3>
                 <span class="status-badge {container.status}">{container.status}</span>
+                <!-- Which generation this container belongs to, and whether it
+                     is the one serving traffic. Both are visible at once during
+                     a retention window, and telling them apart is the point. -->
+                <span
+                  class="generation-badge {container.state}"
+                  title={container.state === 'active'
+                    ? 'Serving traffic'
+                    : container.state === 'pending'
+                      ? 'Created by a deploy in progress; not routed'
+                      : 'Superseded — no longer routed, kept so a rollback can restart it'}
+                >g{container.generation} · {container.state}</span>
                 {#if container.status === 'running'}
                   {@const health = healthStatus[container.containerId]}
                   {#if health === undefined}
@@ -1090,11 +1116,14 @@
                   {#if !isLatest && dep.status === 'succeeded'}
                     <button
                       class="btn-act btn-rollback"
+                      class:btn-rollback-fast={dep.fastRollback}
                       onclick={() => rollbackTo(dep)}
                       disabled={isBusy || rollbackBusy !== null}
-                      title="Roll back to version {dep.version}"
+                      title={dep.fastRollback
+                        ? `These containers are still on the worker, stopped — rolling back restarts them`
+                        : `Redeploy version ${dep.version} from its manifest`}
                     >
-                      {isBusy ? 'Rolling back...' : 'Rollback'}
+                      {isBusy ? 'Rolling back...' : dep.fastRollback ? 'Rollback (instant)' : 'Rollback'}
                     </button>
                   {/if}
                   {#if dep.errorMessage}
@@ -1489,6 +1518,14 @@
   .status-badge.created { background: var(--yellow-subtle); color: var(--yellow-text); }
   .status-badge.paused { background: var(--purple-subtle); color: var(--purple); }
 
+  .generation-badge {
+    padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600;
+    letter-spacing: 0.04em; background: var(--bg-raised); color: var(--text-muted);
+    border: 1px solid var(--border-subtle);
+  }
+  .generation-badge.active { background: var(--accent-subtle); color: var(--accent); border-color: transparent; }
+  .generation-badge.pending { background: var(--yellow-subtle); color: var(--yellow-text); border-color: transparent; }
+
   /* Action buttons */
   .btn-act {
     padding: 4px 10px; border-radius: var(--radius-sm); font-size: 11px; font-weight: 500;
@@ -1757,6 +1794,13 @@
     background: var(--accent-subtle);
   }
   .btn-rollback:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+  /* Distinguished at a glance: a retained generation is a restart, everything
+     else is a full redeploy, and the two are minutes apart. */
+  .btn-rollback-fast {
+    color: var(--green-text); border-color: color-mix(in srgb, var(--green) 35%, transparent);
+    background: var(--green-subtle);
+  }
+  .btn-rollback-fast:hover:not(:disabled) { background: color-mix(in srgb, var(--green) 15%, transparent); }
 
   .btn-error-detail {
     color: var(--red-text); border-color: color-mix(in srgb, var(--red) 30%, transparent);

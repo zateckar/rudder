@@ -39,6 +39,11 @@
   // Replicas
   let replicas = $state(1);
 
+  // Blue/green deploy behaviour. Empty health timeout means the built-in
+  // default rather than "no timeout".
+  let healthTimeoutSeconds = $state<number | ''>('');
+  let retainPreviousMinutes = $state(0);
+
   // Health Check config
   let hcTestCmd = $state('');
   let hcInterval = $state('30s');
@@ -90,6 +95,9 @@
       manifestContent = app.type !== 'single' ? (app.manifest ?? '') : '';
       // Replicas
       replicas = app.replicas ?? 1;
+      // Deploy behaviour
+      healthTimeoutSeconds = app.healthTimeoutSeconds ?? '';
+      retainPreviousMinutes = app.retainPreviousMinutes ?? 0;
       // Git source
       if (app.gitRepo) {
         sourceType = 'git';
@@ -495,6 +503,40 @@
         </div>
       </div>
     {/if}
+
+    <!-- ── Deploy behaviour (all app types) ───────────────────── -->
+    <div class="form-section">
+      <h2>Deploy Behaviour</h2>
+      <p class="help-text">
+        On workers using control-plane routing, a deploy creates the new containers alongside the
+        running ones and only moves traffic once they are up. These settings control that changeover.
+      </p>
+      <div class="form-row">
+        <div class="form-group">
+          <label for="healthTimeoutSeconds">Health timeout (seconds)</label>
+          <input
+            type="number" id="healthTimeoutSeconds" name="healthTimeoutSeconds"
+            bind:value={healthTimeoutSeconds} min="10" max="3600" placeholder="120"
+          />
+          <p class="help-text">
+            How long to wait for the new containers before abandoning the deploy. The previous
+            version keeps serving throughout, and stays serving if the wait runs out.
+          </p>
+        </div>
+        <div class="form-group">
+          <label for="retainPreviousMinutes">Keep previous version (minutes)</label>
+          <input
+            type="number" id="retainPreviousMinutes" name="retainPreviousMinutes"
+            bind:value={retainPreviousMinutes} min="0" max="1440"
+          />
+          <p class="help-text">
+            Leave the superseded containers stopped but present for this long, so a rollback to that
+            version restarts them instead of pulling and recreating. 0 removes them at the end of the
+            deploy. They keep holding their host ports while retained.
+          </p>
+        </div>
+      </div>
+    </div>
 
     <!-- ── Security & Access Control (all app types) ──────────── -->
     <div class="form-section">

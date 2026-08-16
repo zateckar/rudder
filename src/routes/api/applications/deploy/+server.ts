@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { applications, workers, containers, deployments, deployWebhooks, applicationTemplates } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { getRestPodmanClient } from '$lib/server/podman-client';
 import { executeApplicationDeploy, resolveWorkerSSHConfig } from '$lib/server/deploy';
 import { teardownAppNetwork } from '$lib/server/networks';
@@ -64,10 +64,14 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
     // ──────────────────────── START ────────────────────────
     } else if (action === 'start') {
       const podmanClient = getRestPodmanClient(worker);
+      // Only the generation that is serving. A superseded generation retained
+      // for a fast rollback is deliberately stopped, and starting or restarting
+      // it here would resurrect the old version's processes without routing any
+      // traffic to them.
       const appContainers = await db
         .select()
         .from(containers)
-        .where(eq(containers.applicationId, applicationId))
+        .where(and(eq(containers.applicationId, applicationId), eq(containers.state, 'active')))
         .all();
 
       for (const container of appContainers) {
@@ -85,10 +89,14 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
     // ──────────────────────── STOP ─────────────────────────
     } else if (action === 'stop') {
       const podmanClient = getRestPodmanClient(worker);
+      // Only the generation that is serving. A superseded generation retained
+      // for a fast rollback is deliberately stopped, and starting or restarting
+      // it here would resurrect the old version's processes without routing any
+      // traffic to them.
       const appContainers = await db
         .select()
         .from(containers)
-        .where(eq(containers.applicationId, applicationId))
+        .where(and(eq(containers.applicationId, applicationId), eq(containers.state, 'active')))
         .all();
 
       for (const container of appContainers) {
@@ -106,10 +114,14 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
     // ──────────────────────── RESTART ──────────────────────
     } else if (action === 'restart') {
       const podmanClient = getRestPodmanClient(worker);
+      // Only the generation that is serving. A superseded generation retained
+      // for a fast rollback is deliberately stopped, and starting or restarting
+      // it here would resurrect the old version's processes without routing any
+      // traffic to them.
       const appContainers = await db
         .select()
         .from(containers)
-        .where(eq(containers.applicationId, applicationId))
+        .where(and(eq(containers.applicationId, applicationId), eq(containers.state, 'active')))
         .all();
 
       for (const container of appContainers) {
@@ -127,6 +139,8 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
     // ──────────────────────── DELETE ───────────────────────
     } else if (action === 'delete') {
       const podmanClient = getRestPodmanClient(worker);
+      // Every generation, unlike the lifecycle actions above: deleting the
+      // application must not leave a retained generation behind on the worker.
       const appContainers = await db
         .select()
         .from(containers)

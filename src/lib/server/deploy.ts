@@ -3,7 +3,7 @@
  */
 import { db } from '$lib/db';
 import { applications, workers, containers, teams, stacks, volumes, secrets, deployments } from '$lib/db/schema';
-import { eq, inArray, or, desc } from 'drizzle-orm';
+import { and, eq, inArray, or, desc } from 'drizzle-orm';
 import { getRestPodmanClient } from '$lib/server/podman-client';
 import { parseCompose, validateCompose } from '$lib/server/compose';
 import { parseK8sManifest, validateK8sManifest } from '$lib/server/kubernetes';
@@ -27,6 +27,21 @@ import { buildTar, MAX_TAR_NAME } from '$lib/server/tar';
 // Traefik needs the OIDC client secret in the container's labels; Rudder's own
 // database does not, and used to keep a plaintext copy of it there.
 import { redactSecretLabels } from '$lib/server/redaction';
+import {
+  CONVERGENCE_POLL_MS,
+  CUTOVER_CONVERGENCE_TIMEOUT_MS,
+  DRAIN_GRACE_MS,
+  HEALTH_POLL_MS,
+  SETTLE_MS,
+  TRAEFIK_RELOAD_MARGIN_MS,
+  declaresFixedHostPorts,
+  generationalName,
+  healthTimeoutMs,
+  nextGeneration,
+  retentionExpired,
+  retentionMs,
+  supportsBlueGreen,
+} from '$lib/server/generations';
 
 /** Parse memory string like "512m", "2g" -> bytes */
 function parseMemory(mem: string): number | undefined {
@@ -172,14 +187,30 @@ function parseHealthcheck(raw: string | null | undefined): {
 
 // ── Host port allocation ─────────────────────────────────────────────────────
 
+/**
+ * Host port range for published containers.
+ *
+ * Ends below 32768 deliberately: that is the floor of Linux's default
+ * `net.ipv4.ip_local_port_range`, so anything above it can be held transiently
+ * by an outbound connection from the host. The old range ran to 40000 and
+ * overlapped it, and a container would then fail to start with
+ * `bind: address already in use` naming a port no container had — a failure
+ * that looks like a Podman fault and is not reproducible.
+ *
+ * Ports already recorded above this range keep working; they are still counted
+ * as reserved, they are simply never handed out again.
+ */
 const PORT_RANGE_START = 30000;
-const PORT_RANGE_END = 40000;
+const PORT_RANGE_END = 32768;
 
 /**
  * Host ports already bound by containers on this worker.
  *
  * `excludeApplicationId` releases the ports held by the application being
- * redeployed, whose containers are torn down earlier in the same deploy.
+ * redeployed, and is only correct on the legacy path, where those containers
+ * are torn down earlier in the same deploy. A blue/green deploy must pass
+ * nothing: the previous generation is still running on its ports, and reusing
+ * one would collide the moment the new container tried to bind it.
  */
 async function reservedPortsForWorker(
   workerId: string,
@@ -229,6 +260,211 @@ function pickFreePort(taken: Set<number>): number {
   throw new Error(
     `No free host port available in range ${PORT_RANGE_START}-${PORT_RANGE_END} on this worker.`,
   );
+}
+
+// ── Blue/green machinery ─────────────────────────────────────────────────────
+
+type PodmanRestClient = ReturnType<typeof getRestPodmanClient>;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** A container this deploy created — enough to verify it, or to undo it. */
+interface CreatedContainer {
+  /** `containers.id`, the database row. */
+  rowId: string;
+  /** Podman's container id. */
+  containerId: string;
+  /** Podman's container name, for messages a human has to act on. */
+  name: string;
+}
+
+/**
+ * Wait until every container of the new generation is serving, or fail.
+ *
+ * Two signals, in order of strength:
+ *
+ * 1. **The container's own health check**, when the image or the application
+ *    defines one. This is the real answer — the process said it is ready.
+ * 2. **Still up after a settle window.** Weaker, and used only when there is no
+ *    health check to consult.
+ *
+ * The plan for this work called for falling back to a TCP connect against the
+ * mapped host port. That is not available to the control plane: published ports
+ * are bound on the worker's loopback interface and the only thing Rudder can
+ * reach on a worker is the mTLS Podman API. Probing them would need a helper on
+ * the worker itself. Defining a health check on the application is the way to
+ * get a real readiness signal today, and this is the honest fallback when there
+ * is none.
+ *
+ * `RestartCount` is watched throughout, because `restart: always` turns a crash
+ * loop into a container that is running again by the next poll.
+ */
+async function verifyGeneration(
+  client: PodmanRestClient,
+  created: CreatedContainer[],
+  timeoutMs: number,
+): Promise<void> {
+  if (created.length === 0) return;
+
+  const deadline = Date.now() + timeoutMs;
+  const settledBy = Date.now() + SETTLE_MS;
+  const baselineRestarts = new Map<string, number>();
+  const waiting = new Map(created.map((c) => [c.containerId, c.name]));
+
+  while (waiting.size > 0) {
+    for (const [id, name] of [...waiting]) {
+      let inspect;
+      try {
+        inspect = await client.getContainer(id);
+      } catch (e: any) {
+        throw new Error(`Container '${name}' vanished while starting: ${e.message}`);
+      }
+
+      const restarts = inspect.RestartCount ?? 0;
+      const baseline = baselineRestarts.get(id);
+      if (baseline === undefined) {
+        baselineRestarts.set(id, restarts);
+      } else if (restarts > baseline) {
+        throw new Error(
+          `Container '${name}' is restarting (${restarts} restarts) rather than staying up. ` +
+          `Check its logs for why it exits.`,
+        );
+      }
+
+      const state = inspect.State;
+      if (!state.Running) {
+        throw new Error(
+          `Container '${name}' exited with code ${state.ExitCode} before it could serve traffic.`,
+        );
+      }
+
+      const health = state.Health?.Status;
+      if (health === 'unhealthy') {
+        throw new Error(`Container '${name}' started but failed its health check.`);
+      }
+      if (health === 'healthy') {
+        waiting.delete(id);
+        continue;
+      }
+      // No health check defined: accept once it has simply stayed up.
+      if (!health && Date.now() >= settledBy) {
+        waiting.delete(id);
+      }
+    }
+
+    if (waiting.size === 0) break;
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Timed out after ${Math.round(timeoutMs / 1000)}s waiting for ` +
+        `${[...waiting.values()].join(', ')} to report healthy. ` +
+        `The previous version is still serving.`,
+      );
+    }
+    await sleep(HEALTH_POLL_MS);
+  }
+}
+
+/**
+ * Remove containers this deploy created, and their rows.
+ *
+ * Best-effort by design: this runs while handling a failure, and a second
+ * failure here must not replace the original error, which is the one that
+ * explains what went wrong.
+ */
+async function discardGeneration(
+  client: PodmanRestClient,
+  created: CreatedContainer[],
+): Promise<void> {
+  for (const c of created) {
+    try {
+      await client.removeContainer(c.containerId, true);
+    } catch (e: any) {
+      console.warn(`[deploy] Could not remove abandoned container ${c.name}:`, e.message);
+    }
+    try {
+      await db.delete(containers).where(eq(containers.id, c.rowId));
+    } catch (e: any) {
+      console.warn(`[deploy] Could not delete row for abandoned container ${c.name}:`, e.message);
+    }
+  }
+}
+
+/**
+ * Block until the worker has fetched routing configuration written after
+ * `since`, so the caller knows traffic has actually moved.
+ *
+ * Returns false on timeout. The caller continues anyway: the configuration is
+ * correct in the database and the worker will converge on its next successful
+ * poll. What must not happen is reaping the old generation while the worker is
+ * still routing to it, so a false return suppresses the reap.
+ */
+async function waitForConfigConvergence(workerId: string, since: Date): Promise<boolean> {
+  const deadline = Date.now() + CUTOVER_CONVERGENCE_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const row = await db
+      .select({ fetchedAt: workers.configFetchedAt })
+      .from(workers)
+      .where(eq(workers.id, workerId))
+      .get();
+    if (row?.fetchedAt && row.fetchedAt.getTime() >= since.getTime()) {
+      await sleep(TRAEFIK_RELOAD_MARGIN_MS);
+      return true;
+    }
+    await sleep(CONVERGENCE_POLL_MS);
+  }
+  return false;
+}
+
+/** Stop and remove containers, and delete their rows. Releases their ports. */
+async function reapContainers(
+  client: PodmanRestClient,
+  rows: Array<typeof containers.$inferSelect>,
+): Promise<void> {
+  for (const row of rows) {
+    try {
+      await client.removeContainer(row.containerId, true);
+    } catch (e: any) {
+      console.warn(`[deploy] Could not remove superseded container ${row.name}:`, e.message);
+    }
+    await db.delete(containers).where(eq(containers.id, row.id));
+  }
+}
+
+/**
+ * Remove draining generations whose retention window has passed.
+ *
+ * Called at the start of each deploy and from the metrics loop, so a retained
+ * generation is cleaned up whether or not the application is deployed again.
+ */
+export async function sweepExpiredGenerations(): Promise<number> {
+  const draining = await db
+    .select({ container: containers, app: applications, worker: workers })
+    .from(containers)
+    .innerJoin(applications, eq(containers.applicationId, applications.id))
+    .innerJoin(workers, eq(containers.workerId, workers.id))
+    .where(eq(containers.state, 'draining'))
+    .all();
+
+  const now = new Date();
+  let reaped = 0;
+  const byWorker = new Map<string, { worker: typeof workers.$inferSelect; rows: Array<typeof containers.$inferSelect> }>();
+
+  for (const row of draining) {
+    if (!retentionExpired(row.app, row.container.updatedAt, now)) continue;
+    const bucket = byWorker.get(row.worker.id) ?? { worker: row.worker, rows: [] };
+    bucket.rows.push(row.container);
+    byWorker.set(row.worker.id, bucket);
+  }
+
+  for (const { worker, rows } of byWorker.values()) {
+    try {
+      await reapContainers(getRestPodmanClient(worker), rows);
+      reaped += rows.length;
+    } catch (e: any) {
+      console.warn(`[deploy] Sweep failed for worker ${worker.name}:`, e.message);
+    }
+  }
+  return reaped;
 }
 
 /** Parse CPU string like "0.5", "2" -> cpuQuota (period=100000) */
@@ -336,6 +572,36 @@ export async function executeApplicationDeploy(
     return { success: false, message: 'No manifest found', statusCode: 400 };
   }
 
+  // Blue/green needs somewhere to express "this generation serves traffic and
+  // that one does not" without recreating containers, which is exactly what
+  // control-plane routing provides — so it turns on with the same per-worker
+  // switch. A labels-mode worker keeps the destroy-then-create path.
+  //
+  // Applications that bind fixed host ports are excluded regardless of routing
+  // mode — two generations cannot both hold the same port. That is every k8s
+  // application, because parseK8sManifest publishes each container port on the
+  // identical host port, and any single-container application that asked for a
+  // specific host port.
+  const blueGreen =
+    supportsBlueGreen(worker) && app.type !== 'k8s' && !declaresFixedHostPorts(app);
+
+  // Containers already deployed for this application. On the legacy path they
+  // are removed before anything new is created; on the blue/green path they go
+  // on serving until the new generation is verified.
+  const existingContainers = await db
+    .select()
+    .from(containers)
+    .where(eq(containers.applicationId, app.id))
+    .all();
+
+  const generation = nextGeneration(existingContainers.map((c) => c.generation));
+  /** Only blue/green needs distinct names — see the module comment. */
+  const nameFor = (base: string) => (blueGreen ? generationalName(base, generation) : base);
+  /** New containers are invisible to the routing config until cutover. */
+  const initialState = blueGreen ? 'pending' : 'active';
+  /** Everything created by this deploy, so a failure can undo exactly it. */
+  const createdContainers: CreatedContainer[] = [];
+
   // ── Record deployment ──────────────────────────────────
   const lastDeployment = await db.select({ version: deployments.version })
     .from(deployments)
@@ -380,31 +646,43 @@ export async function executeApplicationDeploy(
     // Resolve SSH config once; used for post-teardown Netavark cleanup
     const workerSSHConfig = await resolveWorkerSSHConfig(worker);
 
-    // ── Clean up existing containers before redeploy ──────────
-    const existingContainers = await db
-      .select()
-      .from(containers)
-      .where(eq(containers.applicationId, app.id))
-      .all();
-
-    // Disconnect old containers from their network, then remove it.
-    // Pass workerSSHConfig so teardownAppNetwork can run the Netavark iptables
-    // cleanup over SSH immediately after the network is deleted, preventing
-    // stale DNAT rules from shadowing the new container's port bindings.
-    const oldContainerIds = existingContainers.map(c => c.containerId);
-    try {
-      await teardownAppNetwork(podmanClient, app.id, app.stackId, oldContainerIds, workerSSHConfig);
-    } catch (e: any) {
-      console.warn('Failed to teardown old network:', e.message);
-    }
-
-    for (const existing of existingContainers) {
+    if (blueGreen) {
+      // Nothing is torn down here. The previous generation keeps serving until
+      // the new one has proved it can, which is the whole point.
+      //
+      // The network is not touched either: both generations attach to the same
+      // one. Recreating it between generations is what made the Netavark stale
+      // DNAT rules bite, so not doing it removes that failure mode as well.
+      //
+      // What is cleaned up first is any generation left behind by an earlier
+      // deploy's retention window, so its ports come back before this deploy
+      // allocates.
       try {
-        await podmanClient.removeContainer(existing.containerId, true);
+        await sweepExpiredGenerations();
       } catch (e: any) {
-        console.warn(`Failed to remove old container ${existing.containerId}:`, e.message);
+        console.warn('[deploy] Could not sweep expired generations:', e.message);
       }
-      await db.delete(containers).where(eq(containers.id, existing.id));
+    } else {
+      // ── Legacy path: clean up existing containers before redeploy ──────────
+      // Disconnect old containers from their network, then remove it.
+      // Pass workerSSHConfig so teardownAppNetwork can run the Netavark iptables
+      // cleanup over SSH immediately after the network is deleted, preventing
+      // stale DNAT rules from shadowing the new container's port bindings.
+      const oldContainerIds = existingContainers.map(c => c.containerId);
+      try {
+        await teardownAppNetwork(podmanClient, app.id, app.stackId, oldContainerIds, workerSSHConfig);
+      } catch (e: any) {
+        console.warn('Failed to teardown old network:', e.message);
+      }
+
+      for (const existing of existingContainers) {
+        try {
+          await podmanClient.removeContainer(existing.containerId, true);
+        } catch (e: any) {
+          console.warn(`Failed to remove old container ${existing.containerId}:`, e.message);
+        }
+        await db.delete(containers).where(eq(containers.id, existing.id));
+      }
     }
 
     let teamSlug: string | undefined;
@@ -430,7 +708,10 @@ export async function executeApplicationDeploy(
       // Same collision-checked allocator the single-container path uses. Compose
       // previously drew host ports at random with no check, so two services in
       // one file could be handed the same port.
-      const composeTakenPorts = await reservedPortsForWorker(worker.id, app.id);
+      const composeTakenPorts = await reservedPortsForWorker(
+        worker.id,
+        blueGreen ? undefined : app.id,
+      );
       const parsedContainers = parseCompose(app.manifest, {
         appName: app.name,
         teamSlug,
@@ -471,8 +752,9 @@ export async function executeApplicationDeploy(
             .filter(([hostPath]) => hostPath)
             .map(([hostPath, v]) => buildHostBind(hostPath, v.bind, v.options));
 
+          const composeName = nameFor(container.name);
           const containerResult = await podmanClient.createContainer({
-            name: container.name,
+            name: composeName,
             image: composeImage,
             env: mergedContainerEnv,
             ports: container.ports,
@@ -500,20 +782,29 @@ export async function executeApplicationDeploy(
           const composeDigest = await podmanClient.resolveImageDigest(composeImage);
           if (composeDigest) deployedDigests.set(digestKey, composeDigest);
 
+          const composeRowId = crypto.randomUUID();
           await db.insert(containers).values({
-            id: crypto.randomUUID(),
+            id: composeRowId,
             applicationId: app.id,
             workerId: worker.id,
             containerId: containerResult.Id,
-            name: container.name,
+            name: composeName,
             image: composeImage,
             status: 'created',
             exposedPort: container.exposedPort ?? null,
             domain: container.domain ?? null,
             routerName: container.routerName ?? null,
             labels: JSON.stringify(redactSecretLabels(container.labels)),
+            generation,
+            state: initialState,
+            deploymentId,
             createdAt: new Date(),
             updatedAt: new Date(),
+          });
+          createdContainers.push({
+            rowId: composeRowId,
+            containerId: containerResult.Id,
+            name: composeName,
           });
 
           await podmanClient.startContainer(containerResult.Id);
@@ -643,7 +934,10 @@ export async function executeApplicationDeploy(
       // Ports already taken on this worker, so a fresh allocation cannot land
       // on one.  Previously each port was an unchecked random draw, which
       // collided silently once a worker held a few dozen containers.
-      const takenPorts = await reservedPortsForWorker(worker.id, app.id);
+      const takenPorts = await reservedPortsForWorker(
+        worker.id,
+        blueGreen ? undefined : app.id,
+      );
       const allocatePort = () => {
         const port = pickFreePort(takenPorts);
         takenPorts.add(port);
@@ -651,7 +945,11 @@ export async function executeApplicationDeploy(
       };
 
       for (let replicaIdx = 1; replicaIdx <= replicaCount; replicaIdx++) {
-        const containerName = replicaCount > 1 ? `${app.name}-${app.id.slice(0, 8)}-${replicaIdx}` : `${app.name}-${app.id.slice(0, 8)}`;
+        const containerName = nameFor(
+          replicaCount > 1
+            ? `${app.name}-${app.id.slice(0, 8)}-${replicaIdx}`
+            : `${app.name}-${app.id.slice(0, 8)}`,
+        );
 
         // Each replica gets its own random host port(s)
         const portBindings: Record<string, Array<{ hostPort: string }>> = {};
@@ -742,8 +1040,9 @@ export async function executeApplicationDeploy(
           if (digest) deployedDigests.set(SINGLE_IMAGE_KEY, digest);
         }
 
+        const singleRowId = crypto.randomUUID();
         await db.insert(containers).values({
-          id: crypto.randomUUID(),
+          id: singleRowId,
           applicationId: app.id,
           workerId: worker.id,
           containerId: containerResult.Id,
@@ -754,8 +1053,16 @@ export async function executeApplicationDeploy(
           domain: appDomain,
           routerName: safeName,
           labels: JSON.stringify(redactSecretLabels(labels)),
+          generation,
+          state: initialState,
+          deploymentId,
           createdAt: new Date(),
           updatedAt: new Date(),
+        });
+        createdContainers.push({
+          rowId: singleRowId,
+          containerId: containerResult.Id,
+          name: containerName,
         });
 
         await podmanClient.startContainer(containerResult.Id);
@@ -838,8 +1145,9 @@ export async function executeApplicationDeploy(
             .filter(([hostPath]) => hostPath)
             .map(([hostPath, v]) => buildHostBind(hostPath, v.bind, v.options));
 
+          const k8sContainerName = nameFor(`${app.name}-${app.id.slice(0, 8)}-${container.name}`);
           const containerResult = await podmanClient.createContainer({
-            name: `${app.name}-${app.id.slice(0, 8)}-${container.name}`,
+            name: k8sContainerName,
             image: k8sImage,
             env: mergedK8sEnv,
             ports: Object.keys(container.ports).length > 0 ? container.ports : undefined,
@@ -862,8 +1170,9 @@ export async function executeApplicationDeploy(
           const k8sDigest = await podmanClient.resolveImageDigest(k8sImage);
           if (k8sDigest) deployedDigests.set(container.name, k8sDigest);
 
+          const k8sRowId = crypto.randomUUID();
           await db.insert(containers).values({
-            id: crypto.randomUUID(),
+            id: k8sRowId,
             applicationId: app.id,
             workerId: worker.id,
             containerId: containerResult.Id,
@@ -874,8 +1183,16 @@ export async function executeApplicationDeploy(
             domain: k8sDomain,
             routerName: k8sRouter,
             labels: JSON.stringify(redactSecretLabels(labels)),
+            generation,
+            state: initialState,
+            deploymentId,
             createdAt: new Date(),
             updatedAt: new Date(),
+          });
+          createdContainers.push({
+            rowId: k8sRowId,
+            containerId: containerResult.Id,
+            name: k8sContainerName,
           });
 
           await podmanClient.startContainer(containerResult.Id);
@@ -886,6 +1203,84 @@ export async function executeApplicationDeploy(
         } catch (e: any) {
           console.error(`Failed to create container ${container.name}:`, e);
           throw new Error(`Container '${container.name}' failed to deploy: ${e.message}`);
+        }
+      }
+    }
+
+    if (blueGreen) {
+      // ── Verify ────────────────────────────────────────────────────────────
+      // Nothing routes to the new containers yet. A failure here throws, and
+      // the catch below removes them; the previous generation never stopped.
+      await verifyGeneration(podmanClient, createdContainers, healthTimeoutMs(app));
+
+      // ── Cut over ──────────────────────────────────────────────────────────
+      // One pair of updates moves the traffic. The worker's next fetch sees the
+      // new servers and stops seeing the old ones — no container is recreated,
+      // which is what makes the switch atomic from Traefik's point of view.
+      const cutoverAt = new Date();
+      const newRowIds = new Set(createdContainers.map((c) => c.rowId));
+      // Re-read rather than reusing the pre-deploy snapshot: the sweep above
+      // may already have removed a generation that was being retained, and
+      // reaping a row that no longer exists would report failures that are not.
+      const superseded = (
+        await db.select().from(containers).where(eq(containers.applicationId, app.id)).all()
+      ).filter((c) => !newRowIds.has(c.id));
+
+      await db
+        .update(containers)
+        .set({ state: 'active', updatedAt: cutoverAt })
+        .where(inArray(containers.id, [...newRowIds]));
+      if (superseded.length > 0) {
+        await db
+          .update(containers)
+          .set({ state: 'draining', updatedAt: cutoverAt })
+          .where(inArray(containers.id, superseded.map((c) => c.id)));
+      }
+
+      // ── Reap ──────────────────────────────────────────────────────────────
+      if (superseded.length > 0) {
+        const converged = await waitForConfigConvergence(worker.id, cutoverAt);
+        if (!converged) {
+          // The worker has not fetched since the cutover, so its Traefik is
+          // still working from the configuration that names the old
+          // generation. Put that generation back into service rather than
+          // reaping it: both versions then serve, which is untidy but keeps
+          // the application up, where removing the one the worker is actually
+          // routing to would take it down. The next deploy supersedes both.
+          console.warn(
+            `[deploy] Worker ${worker.name} did not fetch routing configuration within ` +
+            `${Math.round(CUTOVER_CONVERGENCE_TIMEOUT_MS / 1000)}s of cutover; ` +
+            `keeping generation ${superseded[0].generation} in service alongside ${generation}.`,
+          );
+          await db
+            .update(containers)
+            .set({ state: 'active', updatedAt: new Date() })
+            .where(inArray(containers.id, superseded.map((c) => c.id)));
+        } else {
+          // Traffic is on the new generation. The old containers are still
+          // finishing whatever they had in flight when the routing changed —
+          // Traefik does not drain connections, so this wait is what protects
+          // those requests.
+          await sleep(DRAIN_GRACE_MS);
+
+          if (retentionMs(app) > 0) {
+            // Kept for a fast rollback: stopped, so it holds no CPU and serves
+            // nothing, but present, so restarting it is seconds rather than a
+            // pull and a recreate. Its ports stay reserved for the same reason.
+            for (const old of superseded) {
+              try {
+                await podmanClient.stopContainer(old.containerId);
+                await db
+                  .update(containers)
+                  .set({ status: 'stopped', updatedAt: new Date() })
+                  .where(eq(containers.id, old.id));
+              } catch (e: any) {
+                console.warn(`[deploy] Could not stop retained container ${old.name}:`, e.message);
+              }
+            }
+          } else {
+            await reapContainers(podmanClient, superseded);
+          }
         }
       }
     }
@@ -909,6 +1304,18 @@ export async function executeApplicationDeploy(
   } catch (error: any) {
     console.error('Deployment error:', error);
 
+    // Undo exactly what this deploy created. Only on the blue/green path: the
+    // legacy path has already removed the previous generation, so tearing the
+    // new one down would leave the application with nothing running at all,
+    // where leaving the partial deploy in place at least keeps some of it up.
+    if (blueGreen && createdContainers.length > 0) {
+      try {
+        await discardGeneration(getRestPodmanClient(worker), createdContainers);
+      } catch (e: any) {
+        console.warn('[deploy] Could not fully discard the failed generation:', e.message);
+      }
+    }
+
     // Mark deployment as failed
     try {
       await db.update(deployments)
@@ -924,4 +1331,149 @@ export async function executeApplicationDeploy(
 
     throw error;
   }
+}
+
+// ── Fast rollback ────────────────────────────────────────────────────────────
+
+/**
+ * Deployments whose containers are still on the worker, stopped, and can be
+ * restarted instead of rebuilt.
+ *
+ * The application page uses this to say which entries in the history roll back
+ * in seconds and which mean a full redeploy — a distinction that matters most
+ * at exactly the moment nobody wants to discover it, so it is shown before the
+ * user commits rather than implied by how long the button takes.
+ */
+export async function fastRollbackTargets(applicationId: string): Promise<string[]> {
+  const rows = await db
+    .select({ deploymentId: containers.deploymentId })
+    .from(containers)
+    .where(and(eq(containers.applicationId, applicationId), eq(containers.state, 'draining')))
+    .all();
+  return [...new Set(rows.map((r) => r.deploymentId).filter((d): d is string => !!d))];
+}
+
+/**
+ * Restart a retained generation and move traffic back to it.
+ *
+ * No image is pulled and no container is created: the containers of that
+ * deployment are still on the worker, stopped, holding the ports they were
+ * given. Starting them and regenerating the routing configuration is the whole
+ * operation, which is why it takes seconds.
+ *
+ * Returns a failure result rather than throwing when the retained generation is
+ * not usable, so the caller can fall back to a full redeploy.
+ */
+export async function executeFastRollback(
+  applicationId: string,
+  targetDeploymentId: string,
+): Promise<DeployResult> {
+  const app = await db.select().from(applications).where(eq(applications.id, applicationId)).get();
+  if (!app?.workerId) return { success: false, message: 'Application not found', statusCode: 404 };
+
+  const worker = await db.select().from(workers).where(eq(workers.id, app.workerId)).get();
+  if (!worker) return { success: false, message: 'Worker not found', statusCode: 404 };
+  if (!supportsBlueGreen(worker)) {
+    return { success: false, message: 'Worker does not use control-plane routing', statusCode: 409 };
+  }
+
+  const retained = await db
+    .select()
+    .from(containers)
+    .where(
+      and(
+        eq(containers.applicationId, applicationId),
+        eq(containers.deploymentId, targetDeploymentId),
+        eq(containers.state, 'draining'),
+      ),
+    )
+    .all();
+  if (retained.length === 0) {
+    return { success: false, message: 'That version is no longer on the worker', statusCode: 409 };
+  }
+
+  const current = await db
+    .select()
+    .from(containers)
+    .where(and(eq(containers.applicationId, applicationId), eq(containers.state, 'active')))
+    .all();
+
+  const podmanClient = getRestPodmanClient(worker);
+  const restarted: CreatedContainer[] = [];
+
+  try {
+    for (const row of retained) {
+      await podmanClient.startContainer(row.containerId);
+      await db
+        .update(containers)
+        .set({ status: 'running', updatedAt: new Date() })
+        .where(eq(containers.id, row.id));
+      restarted.push({ rowId: row.id, containerId: row.containerId, name: row.name });
+    }
+
+    await verifyGeneration(podmanClient, restarted, healthTimeoutMs(app));
+  } catch (error: any) {
+    // Put it back the way it was. The current generation was never touched, so
+    // the application is still serving whatever it was serving.
+    for (const row of restarted) {
+      try {
+        await podmanClient.stopContainer(row.containerId);
+        await db
+          .update(containers)
+          .set({ status: 'stopped', updatedAt: new Date() })
+          .where(eq(containers.id, row.rowId));
+      } catch { /* best-effort */ }
+    }
+    return {
+      success: false,
+      message: `The retained version did not come back up: ${error.message}`,
+      statusCode: 500,
+    };
+  }
+
+  const cutoverAt = new Date();
+  await db
+    .update(containers)
+    .set({ state: 'active', updatedAt: cutoverAt })
+    .where(inArray(containers.id, retained.map((c) => c.id)));
+  if (current.length > 0) {
+    await db
+      .update(containers)
+      .set({ state: 'draining', updatedAt: cutoverAt })
+      .where(inArray(containers.id, current.map((c) => c.id)));
+  }
+
+  if (current.length > 0) {
+    const converged = await waitForConfigConvergence(worker.id, cutoverAt);
+    if (!converged) {
+      // Same reasoning as a deploy that cannot confirm its cutover: keep both
+      // generations serving rather than remove the one the worker is using.
+      await db
+        .update(containers)
+        .set({ state: 'active', updatedAt: new Date() })
+        .where(inArray(containers.id, current.map((c) => c.id)));
+    } else {
+      await sleep(DRAIN_GRACE_MS);
+      if (retentionMs(app) > 0) {
+        // Retained in turn, so rolling forward again is also fast.
+        for (const row of current) {
+          try {
+            await podmanClient.stopContainer(row.containerId);
+            await db
+              .update(containers)
+              .set({ status: 'stopped', updatedAt: new Date() })
+              .where(eq(containers.id, row.id));
+          } catch (e: any) {
+            console.warn(`[rollback] Could not stop ${row.name}:`, e.message);
+          }
+        }
+      } else {
+        await reapContainers(podmanClient, current);
+      }
+    }
+  }
+
+  await db.update(applications).set({ updatedAt: new Date() }).where(eq(applications.id, applicationId));
+
+  return { success: true, message: 'Rolled back to the retained version' };
 }
