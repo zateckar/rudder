@@ -1,3 +1,5 @@
+import { unreservedPort, type PortAllocator } from './ports';
+
 export interface K8sMetadata {
   name?: string;
   namespace?: string;
@@ -53,6 +55,17 @@ export interface ParsedK8sContainer {
   name: string;
   image: string;
   env: Record<string, string>;
+  /**
+   * Podman port bindings, keyed `<containerPort>/<protocol>`.
+   *
+   * The host port is allocated, never taken from the manifest. A Pod spec's
+   * `containerPort` describes the port *inside* the container — Kubernetes has
+   * no concept of publishing it on the identical host port, and doing so meant
+   * two applications that both listened on 80 could not share a worker, and one
+   * application could not run two generations at once. Traefik reaches the
+   * container through whatever host port it was given, so nothing outside this
+   * record needs to know which.
+   */
   ports: Record<string, Array<{ hostPort: string }>>;
   volumes: Record<string, { bind: string; options: string }>;
   restartPolicy: string;
@@ -64,7 +77,24 @@ export interface ParsedK8sContainer {
   cpuShares?: number;
 }
 
-export function parseK8sManifest(manifest: string, appName: string, teamSlug?: string): ParsedK8sContainer[] {
+export interface ParseK8sOptions {
+  /**
+   * Allocates a free host port on the target worker. Supplied by the caller so
+   * allocation can consult the ports other containers already hold — including
+   * the generation being replaced, which is still running during a blue/green
+   * deploy. Without it ports are drawn at random, which is only safe when the
+   * result is being inspected rather than deployed.
+   */
+  allocatePort?: PortAllocator;
+}
+
+export function parseK8sManifest(
+  manifest: string,
+  appName: string,
+  teamSlug?: string,
+  options: ParseK8sOptions = {},
+): ParsedK8sContainer[] {
+  const allocatePort = options.allocatePort ?? unreservedPort;
   // Detect JSON vs YAML — kubectl manifest is stored as JSON, UI YAML upload is YAML
   const isJson = manifest.trim().startsWith('{') || manifest.trim().startsWith('[{');
 
@@ -106,7 +136,7 @@ export function parseK8sManifest(manifest: string, appName: string, teamSlug?: s
 
       if (podSpec.containers) {
         for (const container of podSpec.containers) {
-          const parsed = parseK8sContainer(container, metadata, volumes, podSpec.restartPolicy);
+          const parsed = parseK8sContainer(container, metadata, volumes, allocatePort, podSpec.restartPolicy);
           parsed.labels = { ...labels, ...parsed.labels };
           containers.push(parsed);
         }
@@ -125,7 +155,7 @@ export function parseK8sManifest(manifest: string, appName: string, teamSlug?: s
 
         if (podSpec.containers) {
           for (const container of podSpec.containers) {
-            const parsed = parseK8sContainer(container, metadata, volumes, podSpec.restartPolicy);
+            const parsed = parseK8sContainer(container, metadata, volumes, allocatePort, podSpec.restartPolicy);
             // Strip any traefik.* labels from user metadata to prevent route hijacking
             const safeMetaLabels = Object.fromEntries(
               Object.entries(metadata.labels || {}).filter(
@@ -158,10 +188,56 @@ export function parseK8sManifest(manifest: string, appName: string, teamSlug?: s
   return containers;
 }
 
+/**
+ * The image and declared ports of a manifest's first container, without
+ * allocating anything.
+ *
+ * For the kubectl compatibility API, which has to echo back a Deployment that
+ * looks like the one that was applied. It cannot read those from the
+ * application row — a k8s application stores the whole Deployment body as its
+ * manifest, so the single-container `{ image, ports }` shape the other
+ * application types use is not there — and it must not read them from the
+ * container row either, because that holds the allocated *host* port.
+ *
+ * Returns null when the manifest is not a Pod or Deployment.
+ */
+export function k8sPodTemplate(
+  manifest: string | null | undefined,
+): { image: string; ports: Array<{ containerPort: number; protocol: string }> } | null {
+  if (!manifest?.trim()) return null;
+
+  let docs: any[];
+  try {
+    docs = manifest.trim().startsWith('{')
+      ? [JSON.parse(manifest)]
+      : manifest.split('---').map((doc) => Bun.YAML.parse(doc) as any).filter(Boolean);
+  } catch {
+    return null;
+  }
+
+  for (const doc of docs) {
+    const kind = doc?.kind?.toLowerCase();
+    const podSpec = kind === 'pod' ? doc.spec : kind === 'deployment' ? doc.spec?.template?.spec : null;
+    const container = podSpec?.containers?.[0];
+    if (!container) continue;
+    return {
+      image: container.image ?? '',
+      ports: (container.ports ?? [])
+        .map((p: any) => ({
+          containerPort: parseInt(p?.containerPort),
+          protocol: String(p?.protocol ?? 'TCP').toUpperCase(),
+        }))
+        .filter((p: any) => Number.isInteger(p.containerPort)),
+    };
+  }
+  return null;
+}
+
 function parseK8sContainer(
   container: K8sContainer,
   metadata: K8sMetadata,
   volumes: Record<string, string>,
+  allocatePort: PortAllocator,
   restartPolicy?: string
 ): ParsedK8sContainer {
   const env: Record<string, string> = {};
@@ -173,10 +249,10 @@ function parseK8sContainer(
   }
 
   const ports: Record<string, Array<{ hostPort: string }>> = {};
-  
+
   if (container.ports) {
     for (const port of container.ports) {
-      ports[`${port.containerPort}/tcp`] = [{ hostPort: String(port.containerPort) }];
+      ports[`${port.containerPort}/tcp`] = [{ hostPort: String(allocatePort()) }];
     }
   }
 

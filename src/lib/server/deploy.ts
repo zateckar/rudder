@@ -24,6 +24,7 @@ import {
   serializeDigestRecord,
 } from '$lib/server/image-digests';
 import { buildTar, MAX_TAR_NAME } from '$lib/server/tar';
+import { pickFreePort } from '$lib/server/ports';
 // Traefik needs the OIDC client secret in the container's labels; Rudder's own
 // database does not, and used to keep a plaintext copy of it there.
 import { redactSecretLabels } from '$lib/server/redaction';
@@ -188,22 +189,6 @@ function parseHealthcheck(raw: string | null | undefined): {
 // ── Host port allocation ─────────────────────────────────────────────────────
 
 /**
- * Host port range for published containers.
- *
- * Ends below 32768 deliberately: that is the floor of Linux's default
- * `net.ipv4.ip_local_port_range`, so anything above it can be held transiently
- * by an outbound connection from the host. The old range ran to 40000 and
- * overlapped it, and a container would then fail to start with
- * `bind: address already in use` naming a port no container had — a failure
- * that looks like a Podman fault and is not reproducible.
- *
- * Ports already recorded above this range keep working; they are still counted
- * as reserved, they are simply never handed out again.
- */
-const PORT_RANGE_START = 30000;
-const PORT_RANGE_END = 32768;
-
-/**
  * Host ports already bound by containers on this worker.
  *
  * `excludeApplicationId` releases the ports held by the application being
@@ -245,21 +230,6 @@ async function reservedPortsForWorker(
     }
   }
   return taken;
-}
-
-/** Pick a free host port, falling back to a linear scan if draws keep colliding. */
-function pickFreePort(taken: Set<number>): number {
-  const span = PORT_RANGE_END - PORT_RANGE_START;
-  for (let attempt = 0; attempt < 50; attempt++) {
-    const candidate = PORT_RANGE_START + Math.floor(Math.random() * span);
-    if (!taken.has(candidate)) return candidate;
-  }
-  for (let port = PORT_RANGE_START; port < PORT_RANGE_END; port++) {
-    if (!taken.has(port)) return port;
-  }
-  throw new Error(
-    `No free host port available in range ${PORT_RANGE_START}-${PORT_RANGE_END} on this worker.`,
-  );
 }
 
 // ── Blue/green machinery ─────────────────────────────────────────────────────
@@ -578,12 +548,10 @@ export async function executeApplicationDeploy(
   // switch. A labels-mode worker keeps the destroy-then-create path.
   //
   // Applications that bind fixed host ports are excluded regardless of routing
-  // mode — two generations cannot both hold the same port. That is every k8s
-  // application, because parseK8sManifest publishes each container port on the
-  // identical host port, and any single-container application that asked for a
-  // specific host port.
-  const blueGreen =
-    supportsBlueGreen(worker) && app.type !== 'k8s' && !declaresFixedHostPorts(app);
+  // mode — two generations cannot both hold the same port. Only a
+  // single-container application can ask for one; compose and Kubernetes
+  // manifests both have their host ports allocated.
+  const blueGreen = supportsBlueGreen(worker) && !declaresFixedHostPorts(app);
 
   // Containers already deployed for this application. On the legacy path they
   // are removed before anything new is created; on the blue/green path they go
@@ -791,6 +759,10 @@ export async function executeApplicationDeploy(
             name: composeName,
             image: composeImage,
             status: 'created',
+            // Every binding, not just the routed one: `reservedPortsForWorker`
+            // reads this column, and a container's second published port has to
+            // stay reserved too or a later deploy will be handed it.
+            ports: Object.keys(container.ports).length > 0 ? JSON.stringify(container.ports) : null,
             exposedPort: container.exposedPort ?? null,
             domain: container.domain ?? null,
             routerName: container.routerName ?? null,
@@ -1049,6 +1021,7 @@ export async function executeApplicationDeploy(
           name: containerName,
           image: singleImage,
           status: 'created',
+          ports: Object.keys(portBindings).length > 0 ? JSON.stringify(portBindings) : null,
           exposedPort: mainExposedPort,
           domain: appDomain,
           routerName: safeName,
@@ -1078,7 +1051,21 @@ export async function executeApplicationDeploy(
       }
 
       const baseDomain = process.env.TRAEFIK_BASE_DOMAIN || worker.baseDomain || worker.hostname;
-      const parsedContainers = parseK8sManifest(app.manifest, app.name, teamSlug);
+
+      // Same collision-checked allocator the other two paths use. A manifest's
+      // `containerPort` used to become the host port verbatim, so two
+      // applications both listening on 80 could not share a worker.
+      const k8sTakenPorts = await reservedPortsForWorker(
+        worker.id,
+        blueGreen ? undefined : app.id,
+      );
+      const parsedContainers = parseK8sManifest(app.manifest, app.name, teamSlug, {
+        allocatePort: () => {
+          const port = pickFreePort(k8sTakenPorts);
+          k8sTakenPorts.add(port);
+          return port;
+        },
+      });
 
       // Create isolated network for this app
       const k8sNetworkName = await ensureAppNetwork(podmanClient, app.id, app.stackId);
@@ -1114,10 +1101,9 @@ export async function executeApplicationDeploy(
           let k8sRouter: string | null = null;
           let k8sPort: number | null = null;
           if (portKeys.length > 0) {
-            const firstPort = portKeys[0];
-            // parseK8sManifest publishes hostPort = containerPort, so the key
-            // is the host port too.
-            k8sPort = parseInt(firstPort.split('/')[0]);
+            // The binding's value, not its key: the key is the port inside the
+            // container and the value is the host port Traefik has to reach.
+            k8sPort = parseInt(container.ports[portKeys[0]][0].hostPort);
             const isPrimary = !primaryRouteTaken;
             primaryRouteTaken = true;
             k8sDomain = isPrimary
@@ -1179,6 +1165,7 @@ export async function executeApplicationDeploy(
             name: `${app.name}-${container.name}`,
             image: k8sImage,
             status: 'created',
+            ports: portKeys.length > 0 ? JSON.stringify(container.ports) : null,
             exposedPort: k8sPort,
             domain: k8sDomain,
             routerName: k8sRouter,

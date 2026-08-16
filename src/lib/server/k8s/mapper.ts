@@ -5,6 +5,7 @@
  *   Application → Deployment
  *   Container   → Pod
  */
+import { k8sPodTemplate } from '../kubernetes';
 
 // ── Path matching utility ──────────────────────────────────────
 
@@ -59,6 +60,22 @@ export function teamToNamespace(team: {
 
 // ── Application → Deployment ───────────────────────────────────
 
+/**
+ * A manifest that is itself an image reference, or the empty string.
+ *
+ * The oldest single-container applications stored their manifest as a bare
+ * `repo/name:tag`. Everything else that fails to parse as JSON is a document,
+ * and a document must never be presented as an image name — see the call site.
+ */
+export function imageReferenceOrBlank(manifest: string | null | undefined): string {
+  const trimmed = (manifest ?? '').trim();
+  if (!trimmed || /\s/.test(trimmed) || trimmed.length > 255) return '';
+  // repo[:tag] / repo@sha256:… — no path traversal, no scheme, one line.
+  return /^[a-zA-Z0-9][a-zA-Z0-9._\-/]*(:[a-zA-Z0-9._-]+)?(@sha256:[a-f0-9]{64})?$/.test(trimmed)
+    ? trimmed
+    : '';
+}
+
 export function applicationToDeployment(
   app: {
     id: string;
@@ -86,17 +103,32 @@ export function applicationToDeployment(
   let image = '';
   let ports: Array<{ containerPort: number; protocol: string }> = [];
 
-  try {
-    const cfg = JSON.parse(app.manifest || '{}');
-    image = cfg.image || '';
-    if (cfg.ports) {
-      ports = cfg.ports.map((p: any) => ({
-        containerPort: parseInt(p.containerPort),
-        protocol: (p.protocol || 'TCP').toUpperCase(),
-      }));
+  // A k8s application's manifest is the whole Deployment or Pod body, not the
+  // `{ image, ports }` object the other types store, so it has to be read as
+  // one. Falling through to the generic branch reported an empty image and a
+  // hardcoded port 80 for every kubectl-applied deployment.
+  const podTemplate = app.type === 'k8s' ? k8sPodTemplate(app.manifest) : null;
+  if (podTemplate) {
+    image = podTemplate.image;
+    ports = podTemplate.ports;
+  } else {
+    try {
+      const cfg = JSON.parse(app.manifest || '{}');
+      image = cfg.image || '';
+      if (cfg.ports) {
+        ports = cfg.ports.map((p: any) => ({
+          containerPort: parseInt(p.containerPort),
+          protocol: (p.protocol || 'TCP').toUpperCase(),
+        }));
+      }
+    } catch {
+      // A manifest that is not JSON is either a legacy single-container app
+      // whose manifest is a bare image reference, or a compose file. Only the
+      // first is an image. Echoing the second put the whole compose document —
+      // environment blocks, API keys and all — into `kubectl get deploy -o yaml`
+      // for anyone with a key for that team.
+      image = imageReferenceOrBlank(app.manifest);
     }
-  } catch {
-    image = app.manifest || '';
   }
 
   let envVars: Array<{ name: string; value: string }> = [];
@@ -206,6 +238,48 @@ export function podNameOf(containerName: string): string {
   return containerName.replace(/^\/+/, '');
 }
 
+/**
+ * The port inside the container, recovered from the stored Podman bindings.
+ *
+ * `exposed_port` is the *host* port Traefik connects to; Kubernetes'
+ * `containerPort` is the port the process listens on inside the container.
+ * Those were the same number for k8s applications while a manifest's
+ * `containerPort` was published verbatim. Now that host ports are allocated
+ * they are not, and reporting the host port here would have
+ * `kubectl get pod -o yaml` describe a port nothing in the container listens on.
+ *
+ * Falls back to the host port for rows written before bindings were recorded —
+ * which is exactly what those rows used to report.
+ */
+export function containerPortOf(
+  ports: string | null | undefined,
+  exposedPort: number | null,
+): number | null {
+  if (!ports) return exposedPort;
+
+  let parsed: Record<string, Array<{ hostPort?: string; HostPort?: string }> | null>;
+  try {
+    parsed = JSON.parse(ports);
+  } catch {
+    return exposedPort;
+  }
+  if (!parsed || typeof parsed !== 'object') return exposedPort;
+
+  const entries = Object.entries(parsed)
+    .map(([key, bindings]) => ({
+      containerPort: parseInt(String(key).split('/')[0]),
+      hostPorts: (bindings ?? []).map((b) => parseInt(String(b?.hostPort ?? b?.HostPort))),
+    }))
+    .filter((e) => Number.isInteger(e.containerPort));
+
+  if (entries.length === 0) return exposedPort;
+
+  // A container can publish several ports and only one of them is the one
+  // Traefik routes to, so match on the host port before falling back to order.
+  const routed = entries.find((e) => exposedPort !== null && e.hostPorts.includes(exposedPort));
+  return (routed ?? entries[0]).containerPort;
+}
+
 export function containerToPod(
   container: {
     id: string;
@@ -213,6 +287,7 @@ export function containerToPod(
     containerId: string;
     image: string;
     status: string;
+    ports?: string | null;
     exposedPort: number | null;
     workerId: string | null;
     createdAt: Date;
@@ -221,14 +296,19 @@ export function containerToPod(
   appName: string,
   teamSlug: string,
 ) {
+  // `stopped` is what a generation retained for a fast rollback looks like, and
+  // it is finished in the same sense `exited` is — reporting it as Unknown
+  // would make `kubectl get pods` look broken during a retention window.
   const phase =
     container.status === 'running'
       ? 'Running'
-      : container.status === 'exited'
+      : container.status === 'exited' || container.status === 'stopped'
         ? 'Succeeded'
         : container.status === 'created'
           ? 'Pending'
           : 'Unknown';
+
+  const containerPort = containerPortOf(container.ports, container.exposedPort);
 
   const containerState =
     phase === 'Running'
@@ -272,11 +352,11 @@ export function containerToPod(
         {
           name: podNameOf(container.name),
           image: container.image,
-          ...(container.exposedPort
+          ...(containerPort
             ? {
                 ports: [
                   {
-                    containerPort: container.exposedPort,
+                    containerPort,
                     protocol: 'TCP',
                   },
                 ],

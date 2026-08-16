@@ -131,12 +131,11 @@ export function supportsBlueGreen(worker: { routingMode?: string | null }): bool
  * asks for one has to keep the destroy-then-create path — honouring the request
  * and reallocating the port silently are both worse than saying so.
  *
- * Only single-container applications can do this. Compose host ports are always
- * allocated by Rudder regardless of what the file says, because Traefik does
- * the routing and the host port is an implementation detail; multi-replica
- * applications allocate for the same reason. K8s applications publish every
- * container port on the identical host port and are excluded from blue/green
- * outright.
+ * Only single-container applications can do this. Compose and Kubernetes
+ * manifests have their host ports allocated by Rudder regardless of what the
+ * file says, because Traefik does the routing and the host port is an
+ * implementation detail; multi-replica applications allocate for the same
+ * reason.
  */
 export function declaresFixedHostPorts(app: {
   type?: string | null;

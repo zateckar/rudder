@@ -1,5 +1,6 @@
 import { generateTraefikLabelsForApp } from './provisioning';
 import { buildAppDomain, buildServiceDomain, routerName } from './domains';
+import { unreservedPort, type PortAllocator } from './ports';
 
 export interface ComposeService {
   image?: string;
@@ -97,7 +98,7 @@ export interface ParseComposeOptions {
    * allocation can consult ports already taken by other containers; without it
    * ports are drawn at random, which is only safe in tests.
    */
-  allocatePort?: () => number;
+  allocatePort?: PortAllocator;
 }
 
 export function parseCompose(
@@ -198,7 +199,7 @@ export function parseCompose(
         // could collide with another service in the same file, or with an
         // existing container, and the resulting bind failure surfaced as an
         // unrelated-looking container start error.
-        const hostPort = allocatePort ? allocatePort() : 30000 + Math.floor(Math.random() * 10000);
+        const hostPort = allocatePort ? allocatePort() : unreservedPort();
         ports[`${containerPort}/${proto}`] = [{ hostPort: String(hostPort) }];
       }
     }

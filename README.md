@@ -311,8 +311,12 @@ behaviour, and say so rather than pretending otherwise:
 | Case | Why |
 | --- | --- |
 | Worker in `labels` routing mode | Routing lives in container labels, so two generations would define the same Traefik router and service with different backends |
-| Kubernetes-manifest applications | Each container port is published on the identical host port, which two generations cannot both bind |
-| A single-container app with an explicit host port | Same reason; the port was asked for deliberately, so it is honoured rather than reallocated |
+| A single-container app with an explicit host port | Two generations cannot both bind one host port, and the port was asked for deliberately, so it is honoured rather than reallocated |
+
+Compose and Kubernetes manifests are not affected: Rudder allocates their host
+ports regardless of what the file says, because Traefik does the routing and the
+host port is an implementation detail. A Pod spec's `containerPort` describes the
+port *inside* the container, and that is what `kubectl get pod -o yaml` reports.
 
 Because a health check is the only real readiness signal available — Rudder
 reaches a worker through the Podman API and cannot connect to a published port
