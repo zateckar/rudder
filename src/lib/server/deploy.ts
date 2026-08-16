@@ -282,7 +282,7 @@ async function warnOnAliasCollisions(
       continue;
     }
     if (typeof alias !== 'string' || !wanted.has(alias)) continue;
-    const key = `${alias} ${row.appName}`;
+    const key = `${alias}|${row.appName}`;
     if (reported.has(key)) continue;
     reported.add(key);
     console.warn(
