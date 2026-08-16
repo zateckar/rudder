@@ -8,6 +8,7 @@
     submitLabel = 'Continue',
     onsubmit,
     oncancel,
+    extra,
   }: {
     workerId: string;
     title?: string;
@@ -15,6 +16,8 @@
     submitLabel?: string;
     onsubmit: (key: string) => void;
     oncancel: () => void;
+    /** Extra controls for this particular operation, rendered above the buttons. */
+    extra?: import('svelte').Snippet;
   } = $props();
 
   let sshKey = $state('');
@@ -109,6 +112,8 @@
       <input type="checkbox" bind:checked={rememberKey} />
       <span>Remember this key (encrypted in browser)</span>
     </label>
+
+    {@render extra?.()}
 
     <div class="modal-actions">
       <button class="btn-secondary" onclick={oncancel}>Cancel</button>

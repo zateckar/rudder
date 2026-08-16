@@ -94,6 +94,11 @@ export async function getHostStatsHttp(worker: MetricsWorker): Promise<HostStats
       diskPercent: stats.disk_percent ?? null,
       netRxBytes: stats.net_rx_bytes ?? null,
       netTxBytes: stats.net_tx_bytes ?? null,
+      // Absent on workers whose patch scan has not run; `?? null` keeps that
+      // distinct from a scan that found nothing pending.
+      updatesPending: stats.updates_pending ?? null,
+      updatesSecurity: stats.updates_security ?? null,
+      rebootRequired: stats.reboot_required ?? null,
     };
   } catch (e: any) {
     // Suppress expected startup errors (404, 502) - these are normal on newly provisioned workers

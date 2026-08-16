@@ -2,7 +2,7 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { createPodmanClient } from '$lib/server/podman';
+import { getRestPodmanClient } from '$lib/server/podman-client';
 
 export async function POST({ request, cookies, locals }: { request: Request; cookies: any; locals: any }) {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -36,15 +36,9 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
     let isOnline = false;
 
     // Try REST API first if credentials are available
-    if (worker.podmanApiUrl && worker.podmanCaCert && worker.podmanClientCert && worker.podmanClientKey) {
+    if (worker.podmanApiUrl) {
       try {
-        const podmanClient = createPodmanClient({
-          apiUrl: worker.podmanApiUrl,
-          caCert: worker.podmanCaCert,
-          clientCert: worker.podmanClientCert,
-          clientKey: worker.podmanClientKey,
-        });
-
+        const podmanClient = getRestPodmanClient(worker);
         isOnline = await podmanClient.ping();
         podmanClient.destroy();
       } catch (e) {

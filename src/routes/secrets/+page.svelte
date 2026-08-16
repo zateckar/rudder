@@ -18,6 +18,7 @@
   let fValue = $state('');
   let fDesc = $state('');
   let fScope = $state<'global' | 'team'>('team');
+  let fDelivery = $state<'env' | 'file'>('env');
   let fTeamId = $state('');
 
   let isAdmin = $derived(data.user?.role === 'admin');
@@ -33,14 +34,14 @@
   }
 
   function resetForm() {
-    fName = ''; fValue = ''; fDesc = ''; fScope = 'team'; fTeamId = '';
+    fName = ''; fValue = ''; fDesc = ''; fScope = 'team'; fDelivery = 'env'; fTeamId = '';
     editing = null; showForm = false; error = '';
   }
 
   async function startEdit(s: any) {
     editing = s;
     fName = s.name; fDesc = s.description || '';
-    fScope = s.scope; fTeamId = s.teamId || '';
+    fScope = s.scope; fDelivery = s.deliveryMode === 'file' ? 'file' : 'env'; fTeamId = s.teamId || '';
     // Pull the current value so an edit that only changes the description
     // does not blank out the secret.
     fValue = revealed[s.id] ?? (await revealValue(s.id)) ?? '';
@@ -74,14 +75,14 @@
         const res = await fetch('/api/secrets', {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: editing.id, name: fName, value: fValue, description: fDesc }),
+          body: JSON.stringify({ id: editing.id, name: fName, value: fValue, description: fDesc, deliveryMode: fDelivery }),
         });
         if (!res.ok) { const b = await res.json(); error = b.error || 'Failed'; }
       } else {
         const res = await fetch('/api/secrets', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: fName, value: fValue, description: fDesc, scope: fScope, teamId: fTeamId || undefined }),
+          body: JSON.stringify({ name: fName, value: fValue, description: fDesc, scope: fScope, deliveryMode: fDelivery, teamId: fTeamId || undefined }),
         });
         if (!res.ok) { const b = await res.json(); error = b.error || 'Failed'; }
       }
@@ -114,7 +115,8 @@
 </header>
 
 <p class="page-desc">
-  Environment variables injected into containers. <b>Global</b> secrets are injected into every
+  Values delivered to containers at deploy time, as an environment variable or as a file in
+  <code>/run/secrets</code>. <b>Global</b> secrets are injected into every
   application; their values are readable by admins only. <b>Team</b> secrets are injected into that
   team's applications and readable by its members. Values are fetched individually and each read is
   recorded in the audit log.
@@ -139,6 +141,23 @@
     <div class="form-group">
       <label for="secret-desc">Description</label>
       <input id="secret-desc" type="text" bind:value={fDesc} placeholder="e.g. Main database connection string" />
+    </div>
+    <div class="form-group">
+      <label for="secret-delivery">Delivery</label>
+      <select id="secret-delivery" bind:value={fDelivery}>
+        <option value="env">Environment variable</option>
+        <option value="file">File in /run/secrets</option>
+      </select>
+      <span class="hint">
+        {#if fDelivery === 'file'}
+          Written to <code>/run/secrets/{fName || 'NAME'}</code> on a tmpfs, mode 0400 — not in
+          <code>podman inspect</code> and not in the process environment. The application must read
+          the file. Takes effect on the next deploy.
+        {:else}
+          Injected as <code>{fName || 'NAME'}=…</code>. Visible in <code>podman inspect</code> and to
+          every process in the container.
+        {/if}
+      </span>
     </div>
     {#if !editing}
       <div class="form-row">
@@ -181,6 +200,7 @@
           <th>Name</th>
           <th>Value</th>
           <th>Scope</th>
+          <th>Delivery</th>
           <th>Description</th>
           <th>Updated</th>
           <th></th>
@@ -201,6 +221,13 @@
               {/if}
             </td>
             <td><span class="badge {s.scope}">{s.scope}</span></td>
+            <td>
+              {#if s.deliveryMode === 'file'}
+                <span class="badge file" title="Written to /run/secrets/{s.name}, mode 0400">file</span>
+              {:else}
+                <span class="badge env" title="Injected as an environment variable">env</span>
+              {/if}
+            </td>
             <td class="muted">{s.description || '—'}</td>
             <td class="muted">{new Date(s.updatedAt).toLocaleDateString()}</td>
             <td class="actions">
@@ -277,6 +304,8 @@ const apiKey = process.env.API_KEY;</pre>
   }
   .badge.global { background: var(--accent-subtle); color: var(--accent-text); }
   .badge.team { background: var(--bg-overlay); color: var(--text-muted); }
+  .badge.file { background: var(--accent-subtle); color: var(--accent-text); }
+  .badge.env { background: var(--bg-overlay); color: var(--text-muted); }
 
   .btn-icon {
     padding: 3px 8px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm);

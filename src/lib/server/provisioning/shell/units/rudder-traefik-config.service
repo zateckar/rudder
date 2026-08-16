@@ -1,0 +1,11 @@
+[Unit]
+Description=Fetch Traefik routing configuration from the Rudder control plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rudder-traefik-config.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rudder-traefik-config

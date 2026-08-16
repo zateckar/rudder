@@ -2,30 +2,14 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { createPodmanClient, type PodmanClient } from '$lib/server/podman';
+import { type PodmanClient } from '$lib/server/podman';
+import { getRestPodmanClient } from '$lib/server/podman-client';
 
 function getPodmanClient(worker: typeof workers.$inferSelect): { client: PodmanClient; useRestApi: boolean } | null {
-  if (worker.podmanApiUrl && worker.podmanCaCert && worker.podmanClientCert && worker.podmanClientKey) {
-    return {
-      client: createPodmanClient({
-        apiUrl: worker.podmanApiUrl,
-        caCert: worker.podmanCaCert,
-        clientCert: worker.podmanClientCert,
-        clientKey: worker.podmanClientKey,
-      }),
-      useRestApi: true,
-    };
-  }
-
-  if (worker.podmanApiUrl) {
-    // Dev/local mode — no mTLS
-    return {
-      client: createPodmanClient({ apiUrl: worker.podmanApiUrl }),
-      useRestApi: true,
-    };
-  }
-
-  return null;
+  if (!worker.podmanApiUrl) return null;
+  // getRestPodmanClient decrypts the stored client key and refuses to fall back
+  // to unauthenticated HTTP; both were done wrong here.
+  return { client: getRestPodmanClient(worker), useRestApi: true };
 }
 
 export async function GET({ url, cookies, locals }: { url: URL; cookies: any; locals: any }) {

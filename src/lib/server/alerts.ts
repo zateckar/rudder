@@ -167,6 +167,11 @@ function extractWorkerMetric(row: typeof workerMetrics.$inferSelect, metric: str
     case 'disk_usage_bytes': return row.diskUsageBytes ?? null;
     case 'containers_running': return row.containersRunning ?? null;
     case 'containers_total': return row.containersTotal ?? null;
+    // Patch state. Null when the worker never reported it — returning 0 would
+    // read as "fully patched" and silence a rule for a host nobody scanned.
+    case 'updates_pending': return row.updatesPending ?? null;
+    case 'updates_security': return row.updatesSecurity ?? null;
+    case 'reboot_required': return row.rebootRequired ?? null;
     default: return null;
   }
 }

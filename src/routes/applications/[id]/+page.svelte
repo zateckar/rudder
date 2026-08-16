@@ -125,12 +125,37 @@
     version: number;
     status: 'pending' | 'running' | 'succeeded' | 'failed' | 'rolled_back';
     image: string | null;
+    /**
+     * What actually ran: a `repo@sha256:…` reference, or a JSON map of them
+     * for multi-service applications. Null for deployments recorded before
+     * digests were tracked — those roll back by tag, as they always did.
+     */
+    imageDigest: string | null;
     deployedBy: string | null;
     deployedByName: string | null;
     errorMessage: string | null;
     createdAt: string;
     finishedAt: string | null;
   }
+  /**
+   * Render a stored digest record for a table cell: `sha256:1a2b3c4d…`, or a
+   * count when the application has one digest per service and listing them all
+   * would swamp the row. The full value is in the cell's title attribute.
+   */
+  function shortDigest(raw: string): string {
+    if (raw.trim().startsWith('{')) {
+      try {
+        const n = Object.keys(JSON.parse(raw)).length;
+        return `${n} pinned image${n === 1 ? '' : 's'}`;
+      } catch {
+        return 'digest recorded';
+      }
+    }
+    const at = raw.indexOf('@');
+    const digest = at === -1 ? raw : raw.slice(at + 1);
+    return digest.length > 21 ? `${digest.slice(0, 21)}…` : digest;
+  }
+
   let deploymentsList = $state<Deployment[]>([]);
   let deploymentsLoading = $state(false);
   let deploymentsLoaded = $state(false);
@@ -1020,11 +1045,19 @@
                 <td>
                   <span class="deploy-status-badge {dep.status}">{dep.status.replace('_', ' ')}</span>
                 </td>
-                <td class="mono image-cell" title={dep.image ?? ''}>
+                <td class="mono image-cell" title={dep.imageDigest ? `${dep.image ?? ''}\n${dep.imageDigest}` : (dep.image ?? '')}>
                   {#if dep.image}
                     {dep.image.length > 40 ? dep.image.substring(0, 40) + '...' : dep.image}
                   {:else}
                     <span class="text-muted">—</span>
+                  {/if}
+                  <!-- The tag is what the user recognises; the digest is what
+                       ran, and is what a rollback restores. Both are shown
+                       because a tag alone cannot answer "which bytes?". -->
+                  {#if dep.imageDigest}
+                    <span class="digest-line">{shortDigest(dep.imageDigest)}</span>
+                  {:else}
+                    <span class="digest-line muted">no digest recorded — rolls back by tag</span>
                   {/if}
                 </td>
                 <td>
@@ -1700,6 +1733,14 @@
     letter-spacing: 0.03em;
   }
   .image-cell { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+  .digest-line {
+    display: block;
+    font-size: 10px;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .digest-line.muted { color: var(--text-muted); font-style: italic; }
 
   .deploy-status-badge {
     padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600;

@@ -2,6 +2,7 @@ import { redirect, fail } from '@sveltejs/kit';
 import { db, safeWorkerColumns, safeUserColumns } from '$lib/db';
 import { applicationTemplates, applications, users, teams, teamMembers, workers } from '$lib/db/schema';
 import { eq, inArray, or } from 'drizzle-orm';
+import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
 
 async function canModifyTemplate(userId: string, template: any): Promise<boolean> {
   // Global admins can modify any template
@@ -309,7 +310,10 @@ export const actions = {
     if (!worker) return fail(400, { error: 'Worker not found' });
     if (!worker.baseDomain) return fail(400, { error: 'Worker must have a base domain configured' });
 
-    const domain = `${name}.${worker.baseDomain}`;
+    const domain = buildAppDomain(name, worker.baseDomain);
+    const domainConflict = await assertDomainAvailable(domain);
+    if (domainConflict) return fail(400, { error: domainConflict });
+
     const appId = crypto.randomUUID();
 
     await db.insert(applications).values({

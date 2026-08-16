@@ -39,6 +39,7 @@ import { eq, and } from 'drizzle-orm';
 import { executeApplicationDeploy } from '$lib/server/deploy';
 import { getRestPodmanClient } from '$lib/server/podman-client';
 import { checkApplicationQuota } from '$lib/server/quota';
+import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
 
 // ── GET ────────────────────────────────────────────────────────
 
@@ -203,11 +204,15 @@ export async function POST({
       );
     }
 
-    const domain =
-      parsed.domain ||
-      (worker.baseDomain
-        ? `${parsed.name}.${team.slug}.${worker.baseDomain}`
-        : null);
+    // Same canonical hostname as every other deployment path: <app>.<baseDomain>.
+    // The namespace (team) is not part of the hostname, so the host has to be
+    // free globally even though the *name* check above is per-namespace.
+    const domain = parsed.domain || buildAppDomain(parsed.name, worker.baseDomain);
+    const domainConflict = await assertDomainAvailable(domain);
+    if (domainConflict) {
+      return k8sError(409, domainConflict, 'AlreadyExists');
+    }
+
     const appId = crypto.randomUUID();
 
     await db.insert(applications).values({
@@ -462,7 +467,11 @@ async function handleUpdateDeployment(
     updatedAt: new Date(),
   };
   if (parsed.environment !== undefined) updates.environment = parsed.environment;
-  if (parsed.domain) updates.domain = parsed.domain;
+  if (parsed.domain) {
+    const domainConflict = await assertDomainAvailable(parsed.domain, app.id);
+    if (domainConflict) return k8sError(409, domainConflict, 'AlreadyExists');
+    updates.domain = parsed.domain;
+  }
   if (parsed.description) updates.description = parsed.description;
 
   await db

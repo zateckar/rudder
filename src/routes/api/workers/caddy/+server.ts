@@ -1,10 +1,18 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
-import { applications, workers } from '$lib/db/schema';
+import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { executeSSHCommand, createTempKeyFile, deleteTempKeyFile } from '$lib/server/ssh';
-import { generateTraefikConfig } from '$lib/server/provisioning';
+import { executeSSHCommand } from '$lib/server/ssh';
 
+/**
+ * POST /api/workers/caddy — restart Traefik on a worker.
+ *
+ * Traefik picks up application routes from container labels and dynamic files
+ * on its own, so this is only a manual recovery hatch.  The former `config`
+ * action, which generated a whole `manual.yml` against a hardcoded
+ * `example.com`, has been removed: it could only ever write routes for the
+ * wrong domain, and shadowed the real label-derived ones.
+ */
 export async function POST({ request, cookies, locals }: { request: Request; cookies: any; locals: any }) {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
 
@@ -21,7 +29,7 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
   }
 
   const body = await request.json();
-  const { workerId, apps, action, sshPrivateKey } = body;
+  const { workerId, sshPrivateKey } = body;
 
   if (!workerId) {
     return json({ error: 'Worker ID required' }, { status: 400 });
@@ -37,67 +45,27 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
     return json({ error: 'Worker not found' }, { status: 404 });
   }
 
-  let tempKeyPath: string | undefined;
-
   try {
-    tempKeyPath = createTempKeyFile(sshPrivateKey);
+    // The unit runs Traefik in a container and defines no ExecReload, so
+    // `systemctl reload` would fail — restart is the supported operation.
+    const result = await executeSSHCommand(
+      {
+        host: worker.hostname,
+        port: worker.sshPort,
+        username: worker.sshUser,
+        privateKey: sshPrivateKey,
+      },
+      'sudo systemctl restart traefik-container.service'
+    );
 
-    if (action === 'reload') {
-      // Just reload Traefik — it auto-detects new containers via labels
-      const result = await executeSSHCommand(
-        {
-          host: worker.hostname,
-          port: worker.sshPort,
-          username: worker.sshUser,
-          privateKey: sshPrivateKey,
-        },
-        'systemctl reload traefik'
-      );
-
-      if (result.exitCode !== 0) {
-        console.error('Traefik reload failed:', result.stderr);
-        return json({ error: 'Failed to reload Traefik: ' + result.stderr }, { status: 500 });
-      }
-
-      return json({ success: true, message: 'Traefik configuration reloaded' });
-    } else if (action === 'config' && apps && Array.isArray(apps)) {
-      // Generate and apply a complete Traefik configuration
-      const traefikConfig = generateTraefikConfig('example.com', apps);
-      const encodedConfig = Buffer.from(traefikConfig).toString('base64');
-
-      const result = await executeSSHCommand(
-        {
-          host: worker.hostname,
-          port: worker.sshPort,
-          username: worker.sshUser,
-          privateKey: sshPrivateKey,
-        },
-        `echo "${encodedConfig}" | base64 -d > /etc/traefik/dynamic/manual.yml && systemctl reload traefik`
-      );
-
-      if (result.exitCode !== 0) {
-        console.error('Traefik config failed:', result.stderr);
-        return json({ error: 'Failed to apply Traefik configuration: ' + result.stderr }, { status: 500 });
-      }
-
-      return json({ success: true, message: 'Traefik configuration applied' });
-    } else {
-      // Default: reload Traefik (auto-detects container labels)
-      return await POST({
-        request: new Request(request.url, {
-          method: 'POST',
-          body: JSON.stringify({ workerId, action: 'reload', sshPrivateKey })
-        }),
-        cookies,
-        locals
-      });
+    if (result.exitCode !== 0) {
+      console.error('Traefik restart failed:', result.stderr);
+      return json({ error: 'Failed to restart Traefik: ' + result.stderr }, { status: 500 });
     }
+
+    return json({ success: true, message: 'Traefik restarted' });
   } catch (error: any) {
-    console.error('Traefik config error:', error);
+    console.error('Traefik restart error:', error);
     return json({ error: error.message }, { status: 500 });
-  } finally {
-    if (tempKeyPath) {
-      deleteTempKeyFile(tempKeyPath);
-    }
   }
 }

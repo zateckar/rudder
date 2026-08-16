@@ -143,7 +143,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
     throw error;
   }
 
-  const { name, value, description, scope, teamId } = body;
+  const { name, value, description, scope, teamId, deliveryMode } = body;
   const finalScope = scope === 'global' ? 'global' : 'team';
 
   if (finalScope === 'global' && ctx.user.role !== 'admin') {
@@ -173,6 +173,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
     value: encrypt(value),
     description: description || null,
     scope: finalScope,
+    deliveryMode,
     teamId: finalScope === 'team' ? teamId! : null,
     createdBy: ctx.user.id,
     createdAt: now,
@@ -194,8 +195,11 @@ export const PATCH: RequestHandler = async ({ request, cookies }) => {
   }
 
   const body = await request.json();
-  const { id, name, value, description } = body;
+  const { id, name, value, description, deliveryMode } = body;
   if (!id) return json({ error: 'Secret ID required' }, { status: 400 });
+  if (deliveryMode !== undefined && deliveryMode !== 'env' && deliveryMode !== 'file') {
+    return json({ error: "deliveryMode must be 'env' or 'file'" }, { status: 400 });
+  }
 
   const existing = await db.select().from(secrets).where(eq(secrets.id, id)).get();
   if (!existing) return json({ error: 'Secret not found' }, { status: 404 });
@@ -210,6 +214,9 @@ export const PATCH: RequestHandler = async ({ request, cookies }) => {
   if (name !== undefined) updates.name = name;
   if (value !== undefined) updates.value = encrypt(value);
   if (description !== undefined) updates.description = description;
+  // Takes effect on the next deploy — a running container's environment and
+  // mounts cannot be changed in place.
+  if (deliveryMode !== undefined) updates.deliveryMode = deliveryMode;
 
   await db.update(secrets).set(updates).where(eq(secrets.id, id));
   return json({ success: true });

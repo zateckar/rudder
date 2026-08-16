@@ -300,6 +300,9 @@ async function collectWorkerMetrics(): Promise<void> {
       let hostMemTotal: number | null = memTotal;
       let hostMemUsed: number | null = memUsed;
       let hostMemPercent: number | null = memPercent;
+      let updatesPending: number | null = null;
+      let updatesSecurity: number | null = null;
+      let rebootRequired: number | null = null;
 
       // Prefer HTTP metrics endpoint (installed during provisioning)
       // Fall back to SSH for workers not yet re-provisioned
@@ -315,6 +318,11 @@ async function collectWorkerMetrics(): Promise<void> {
             if (httpStats.memTotal != null) hostMemTotal = httpStats.memTotal;
             if (httpStats.memUsed != null) hostMemUsed = httpStats.memUsed;
             if (httpStats.memPercent != null) hostMemPercent = httpStats.memPercent;
+            // Left null when the worker did not report them, so "never
+            // scanned" stays distinguishable from "nothing pending".
+            updatesPending = httpStats.updatesPending ?? null;
+            updatesSecurity = httpStats.updatesSecurity ?? null;
+            rebootRequired = httpStats.rebootRequired ?? null;
           }
         } catch (e) {
           console.warn(`[metrics] HTTP host stats failed for ${worker.name}:`, (e as any).message || e);
@@ -338,6 +346,9 @@ async function collectWorkerMetrics(): Promise<void> {
         containersTotal: store.containerStore?.number ?? null,
         imagesCount: store.imageStore?.number ?? null,
         volumesCount: store.volumeStore?.number ?? null,
+        updatesPending,
+        updatesSecurity,
+        rebootRequired,
       });
     } catch (e) {
       console.error(`[metrics] Failed to collect metrics for worker ${worker.name}:`, (e as any).message || e);

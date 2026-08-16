@@ -3,7 +3,7 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { workers, users } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { createPodmanClient } from '$lib/server/podman';
+import { getRestPodmanClient } from '$lib/server/podman-client';
 
 export const GET: RequestHandler = async ({ params, url, cookies }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -29,18 +29,8 @@ export const GET: RequestHandler = async ({ params, url, cookies }) => {
 
     let events: any[] = [];
 
-    if (worker.podmanApiUrl && worker.podmanCaCert && worker.podmanClientCert && worker.podmanClientKey) {
-      const client = createPodmanClient({
-        apiUrl: worker.podmanApiUrl,
-        caCert: worker.podmanCaCert,
-        clientCert: worker.podmanClientCert,
-        clientKey: worker.podmanClientKey,
-      });
-      events = await client.events(since, undefined, Object.keys(filters).length > 0 ? filters : undefined);
-      client.destroy();
-    } else if (worker.podmanApiUrl) {
-      // Dev/local mode — no mTLS
-      const client = createPodmanClient({ apiUrl: worker.podmanApiUrl });
+    if (worker.podmanApiUrl) {
+      const client = getRestPodmanClient(worker);
       events = await client.events(since, undefined, Object.keys(filters).length > 0 ? filters : undefined);
       client.destroy();
     }

@@ -193,6 +193,19 @@ export function applicationToDeployment(
 
 // ── Container → Pod ────────────────────────────────────────────
 
+/**
+ * The pod name for a container row.
+ *
+ * Containers discovered from a worker keep Podman's leading slash
+ * (`/whoami`), while containers Rudder created do not. A slash is not legal in
+ * a Kubernetes object name and makes the pod unaddressable — `kubectl logs
+ * /whoami` sends a path segment the server cannot route — so it is stripped
+ * here, and every lookup compares through this function.
+ */
+export function podNameOf(containerName: string): string {
+  return containerName.replace(/^\/+/, '');
+}
+
 export function containerToPod(
   container: {
     id: string;
@@ -234,7 +247,7 @@ export function containerToPod(
     apiVersion: 'v1',
     kind: 'Pod',
     metadata: {
-      name: container.name,
+      name: podNameOf(container.name),
       namespace: teamSlug,
       uid: container.id,
       creationTimestamp: container.createdAt.toISOString(),
@@ -257,7 +270,7 @@ export function containerToPod(
     spec: {
       containers: [
         {
-          name: container.name,
+          name: podNameOf(container.name),
           image: container.image,
           ...(container.exposedPort
             ? {
@@ -300,7 +313,7 @@ export function containerToPod(
       ],
       containerStatuses: [
         {
-          name: container.name,
+          name: podNameOf(container.name),
           image: container.image,
           imageID: `podman://${container.image}`,
           containerID: `podman://${container.containerId}`,
@@ -406,3 +419,4 @@ export function deploymentToScale(
     status: { replicas: currentReplicas },
   };
 }
+

@@ -3,7 +3,7 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { workers, users } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { createPodmanClient } from '$lib/server/podman';
+import { getRestPodmanClient } from '$lib/server/podman-client';
 
 export const POST: RequestHandler = async ({ params, cookies }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -19,19 +19,10 @@ export const POST: RequestHandler = async ({ params, cookies }) => {
   if (!worker) return json({ error: 'Worker not found' }, { status: 404 });
 
   try {
-    let client;
-    if (worker.podmanApiUrl && worker.podmanCaCert && worker.podmanClientCert && worker.podmanClientKey) {
-      client = createPodmanClient({
-        apiUrl: worker.podmanApiUrl,
-        caCert: worker.podmanCaCert,
-        clientCert: worker.podmanClientCert,
-        clientKey: worker.podmanClientKey,
-      });
-    } else if (worker.podmanApiUrl) {
-      client = createPodmanClient({ apiUrl: worker.podmanApiUrl });
-    } else {
+    if (!worker.podmanApiUrl) {
       return json({ error: 'Prune requires REST API connection' }, { status: 400 });
     }
+    const client = getRestPodmanClient(worker);
 
     const result = await client.systemPrune(true);
     client.destroy();

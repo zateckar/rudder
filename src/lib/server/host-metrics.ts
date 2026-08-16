@@ -24,6 +24,16 @@ export interface HostStats {
   diskPercent: number | null;
   netRxBytes: number | null;
   netTxBytes: number | null;
+  /**
+   * Patch state from the worker's daily scan. Null means the worker did not
+   * report it — an older provisioning, or a scan that has never succeeded —
+   * which is not the same as 0 pending.
+   *
+   * Only the HTTP collector fills these; the SSH fallback predates them.
+   */
+  updatesPending?: number | null;
+  updatesSecurity?: number | null;
+  rebootRequired?: number | null;
 }
 
 /**

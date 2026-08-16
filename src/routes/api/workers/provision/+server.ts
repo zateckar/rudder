@@ -9,6 +9,13 @@ import { randomBytes } from 'crypto';
 import { withLock, LockError } from '$lib/server/locks';
 import { parseJsonBody, ValidationError, schemas } from '$lib/server/validation';
 import { encryptField, decryptField } from '$lib/server/encryption';
+import { normalizeOidcSecret } from '$lib/server/oidc';
+import { redactProvisioningOutput } from '$lib/server/redaction';
+import {
+  checkPublicUrlReachable,
+  configEndpointUrl,
+  generateConfigToken,
+} from '$lib/server/worker-config-endpoint';
 
 /** Parse mTLS certificates and bouncer key from provisioning script stdout */
 function parseCertsFromOutput(stdout: string): {
@@ -69,7 +76,7 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
     throw error;
   }
 
-  const { workerId, sshPrivateKey: adHocKey } = body;
+  const { workerId, sshPrivateKey: adHocKey, applyUpdates } = body;
 
   try {
     return await withLock(
@@ -114,21 +121,65 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
           const bouncerKey =
             decryptField(worker.crowdsecBouncerKey) || randomBytes(20).toString('hex');
 
-          const workerOidcConfig = (worker.oidcEnabled && worker.oidcProviderUrl && worker.oidcClientId && worker.oidcClientSecret)
+          // Only ship an OIDC middleware when it can actually be built: the
+          // plugin needs a base domain for the shared callback host and a
+          // 32-character secret, and a middleware that fails to build makes
+          // Traefik discard the whole dynamic file.
+          const oidcComplete = !!(
+            worker.oidcEnabled &&
+            worker.oidcProviderUrl &&
+            worker.oidcClientId &&
+            worker.oidcClientSecret &&
+            worker.baseDomain
+          );
+          const oidcClientSecret = oidcComplete ? decryptField(worker.oidcClientSecret) : null;
+          const oidcSecret = oidcComplete
+            ? normalizeOidcSecret(decryptField(worker.oidcEncryptionKey))
+            : null;
+
+          if (oidcSecret?.rotated) {
+            await db.update(workers)
+              .set({ oidcEncryptionKey: encryptField(oidcSecret.secret) })
+              .where(eq(workers.id, worker.id));
+          }
+
+          const workerOidcConfig = (oidcComplete && oidcClientSecret && oidcSecret)
             ? {
-                providerURL: worker.oidcProviderUrl,
-                clientID: worker.oidcClientId,
-                clientSecret: decryptField(worker.oidcClientSecret) || '',
-                encryptionKey: decryptField(worker.oidcEncryptionKey) || '',
+                providerURL: worker.oidcProviderUrl!,
+                clientID: worker.oidcClientId!,
+                clientSecret: oidcClientSecret,
+                secret: oidcSecret.secret,
               }
             : undefined;
 
-          const script = generateProvisioningScript(
-            worker.name,
-            worker.baseDomain || undefined,
+          // Workers in http routing mode fetch their routes from the control
+          // plane, so provisioning has to plant an endpoint and a credential.
+          // Refuse rather than provision a worker that will quietly serve
+          // nothing because it cannot reach us.
+          let routingConfig: { endpoint: string; token: string } | undefined;
+          if (worker.routingMode === 'http') {
+            const unreachable = checkPublicUrlReachable();
+            if (unreachable) {
+              await db.update(workers).set({ status: 'error' }).where(eq(workers.id, workerId));
+              return json({ error: unreachable }, { status: 400 });
+            }
+            // Re-provisioning rotates the token: the old one may be on a host
+            // that is being rebuilt, and nothing else depends on its value.
+            const token = generateConfigToken();
+            await db.update(workers)
+              .set({ configToken: encryptField(token) })
+              .where(eq(workers.id, workerId));
+            routingConfig = { endpoint: configEndpointUrl(worker.id, env.PUBLIC_URL), token };
+          }
+
+          const script = generateProvisioningScript(worker.name, {
+            baseDomain: worker.baseDomain || undefined,
             bouncerKey,
-            workerOidcConfig
-          );
+            oidcConfig: workerOidcConfig,
+            sshPort: worker.sshPort,
+            routingConfig,
+            applyUpdates,
+          });
           
           const result = await executeSSHCommand(
             {
@@ -141,12 +192,23 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
             script
           );
 
-          console.log('SSH exec result - exitCode:', result.exitCode, 'stdout (last 2000):', result.stdout.substring(Math.max(0, result.stdout.length - 2000)), 'stderr:', result.stderr.substring(0, 500));
+          // The script echoes the mTLS client key and the bouncer key on stdout;
+          // logging that tail verbatim wrote a worker's root-equivalent private
+          // key into the application log on every provisioning run.
+          console.log(
+            'SSH exec result - exitCode:', result.exitCode,
+            'stdout (last 2000):',
+            redactProvisioningOutput(result.stdout.substring(Math.max(0, result.stdout.length - 2000))),
+            'stderr:', redactProvisioningOutput(result.stderr.substring(0, 500)),
+          );
 
           if (result.exitCode !== 0) {
-            console.error('Provisioning failed:', result.stderr);
+            // stderr is redacted for the same reason as stdout, and again on the
+            // way out: this string is rendered in the provisioning dialog.
+            const failure = redactProvisioningOutput(result.stderr);
+            console.error('Provisioning failed:', failure);
             await db.update(workers).set({ status: 'error' }).where(eq(workers.id, workerId));
-            return json({ error: 'Provisioning failed: ' + result.stderr }, { status: 500 });
+            return json({ error: 'Provisioning failed: ' + failure }, { status: 500 });
           }
 
           const certs = parseCertsFromOutput(result.stdout);
@@ -178,6 +240,9 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
               podmanClientKey: encryptField(certs.clientKey),
             } : {}),
             crowdsecBouncerKey: encryptField(storedBouncerKey),
+            // Provisioning writes global-oidc.yml itself when the config is
+            // complete, so deploys may attach the middleware from now on.
+            ...(workerOidcConfig ? { oidcAppliedAt: new Date() } : {}),
             provisionedAt: new Date(),
             lastSeenAt: new Date(),
           }).where(eq(workers.id, workerId));

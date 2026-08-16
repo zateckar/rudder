@@ -4,7 +4,9 @@ import { db } from '$lib/db';
 import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { executeSSHCommand } from '$lib/server/ssh';
-import { decryptField } from '$lib/server/encryption';
+import { decryptField, encryptField } from '$lib/server/encryption';
+import { renderGlobalOidcConfig } from '$lib/server/provisioning';
+import { normalizeOidcSecret, oidcCallbackHost, oidcCallbackUrl } from '$lib/server/oidc';
 
 /** POST /api/workers/[id]/oidc/apply — push global-oidc.yml to the worker via SSH.
  *  Traefik watches /etc/traefik/dynamic/ and hot-reloads within seconds. */
@@ -32,35 +34,27 @@ export const POST: RequestHandler = async ({ params, request, cookies, locals })
     return json({ error: 'SSH private key is required' }, { status: 400 });
   }
 
-  const baseDomain = worker.baseDomain;
-  const encKey = decryptField(worker.oidcEncryptionKey) || '';
+  const clientSecret = decryptField(worker.oidcClientSecret);
+  if (!clientSecret) {
+    return json({ error: 'Stored client secret could not be decrypted. Re-enter it and save.' }, { status: 400 });
+  }
 
-  // Build the global-oidc.yml content (matches the provisioning template)
-  const oidcYml = `http:
-  middlewares:
-    global-oidc:
-      plugin:
-        traefikoidc:
-          providerURL: "${worker.oidcProviderUrl}"
-          clientID: "${worker.oidcClientId}"
-          clientSecret: "${decryptField(worker.oidcClientSecret)}"
-          sessionEncryptionKey: "${encKey}"
-          callbackURL: "https://auth.${baseDomain}/oauth2/callback"
-          cookieDomain: ".${baseDomain}"
-          forceHTTPS: "true"
-          enablePKCE: "true"
-          logLevel: "info"
-  routers:
-    global-oidc-callback:
-      rule: "Host(\`auth.${baseDomain}\`) && Path(\`/oauth2/callback\`)"
-      entrypoints:
-        - websecure
-      tls:
-        certResolver: letsencrypt
-      service: noop@internal
-      middlewares:
-        - global-oidc
-`;
+  // Keys minted before the plugin switch were 64 hex characters, which the
+  // plugin rejects. Rotate to a valid 32-character secret and persist it —
+  // regenerating on every apply would invalidate every session each time.
+  const { secret, rotated } = normalizeOidcSecret(decryptField(worker.oidcEncryptionKey));
+  if (rotated) {
+    await db.update(workers)
+      .set({ oidcEncryptionKey: encryptField(secret) })
+      .where(eq(workers.id, worker.id));
+  }
+
+  const oidcYml = renderGlobalOidcConfig(worker.baseDomain, {
+    providerURL: worker.oidcProviderUrl,
+    clientID: worker.oidcClientId,
+    clientSecret,
+    secret,
+  });
 
   // Write via stdin → sudo tee (avoids shell quoting issues with YAML content)
   const writeCmd = 'sudo tee /etc/traefik/dynamic/global-oidc.yml > /dev/null && echo "OIDC_APPLIED"';
@@ -77,9 +71,23 @@ export const POST: RequestHandler = async ({ params, request, cookies, locals })
       return json({ error: 'Failed to write config on worker: ' + (result.stderr || 'unknown error') }, { status: 500 });
     }
 
+    // Deploys check this before attaching global-oidc@file to a router.
+    await db.update(workers)
+      .set({ oidcAppliedAt: new Date() })
+      .where(eq(workers.id, worker.id));
+
     return json({
       success: true,
-      message: 'OIDC configuration applied to Traefik. Changes take effect within seconds.',
+      rotatedSecret: rotated,
+      callbackUrl: oidcCallbackUrl(worker.baseDomain),
+      callbackHost: oidcCallbackHost(worker.baseDomain),
+      message:
+        `OIDC configuration applied to Traefik; it takes effect within seconds. ` +
+        `Make sure ${oidcCallbackHost(worker.baseDomain)} has a DNS A record pointing at this worker, ` +
+        `and that ${oidcCallbackUrl(worker.baseDomain)} is registered as a redirect URI with your identity provider.` +
+        (rotated
+          ? ' The session encryption key was rotated to the 32-character format the Traefik plugin requires — existing sessions were signed out.'
+          : ''),
     });
   } catch (e: any) {
     console.error('[oidc/apply] Error:', e);

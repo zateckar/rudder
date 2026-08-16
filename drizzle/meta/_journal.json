@@ -57,6 +57,41 @@
       "when": 1774300000000,
       "tag": "0007_worker_oidc",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1774400000000,
+      "tag": "0008_oidc_applied_and_unique_domains",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1774500000000,
+      "tag": "0009_worker_routing_mode",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1774600000000,
+      "tag": "0010_deployment_digest",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1774700000000,
+      "tag": "0011_worker_patch_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1774800000000,
+      "tag": "0012_secret_delivery_mode",
+      "breakpoints": true
     }
   ]
 }

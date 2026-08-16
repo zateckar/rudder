@@ -56,8 +56,7 @@
   let oidcClientID = $state('');
   let oidcClientSecret = $state('');
   let oidcSessionKey = $state('');
-  let oidcCallbackURL = $state('/oauth2/callback');
-  let oidcAllowedDomains = $state('');
+  let oidcCallbackURL = $state('/oidc/callback');
   let oidcAllowedUsers = $state('');
   let oidcExcludedURLs = $state('');
 
@@ -66,8 +65,7 @@
     clientID: oidcClientID,
     clientSecret: oidcClientSecret,
     sessionEncryptionKey: oidcSessionKey,
-    callbackURL: oidcCallbackURL || '/oauth2/callback',
-    allowedUserDomains: oidcAllowedDomains ? oidcAllowedDomains.split(',').map((s: string) => s.trim()).filter(Boolean) : [],
+    callbackURL: oidcCallbackURL || '/oidc/callback',
     allowedUsers: oidcAllowedUsers ? oidcAllowedUsers.split(',').map((s: string) => s.trim()).filter(Boolean) : [],
     excludedURLs: oidcExcludedURLs ? oidcExcludedURLs.split(',').map((s: string) => s.trim()).filter(Boolean) : [],
   }) : '');
@@ -717,7 +715,8 @@ spec:
             </div>
             <div class="form-group">
               <label for="oidcCallbackURL">Callback Path</label>
-              <input type="text" id="oidcCallbackURL" placeholder="/oauth2/callback" bind:value={oidcCallbackURL} />
+              <input type="text" id="oidcCallbackURL" placeholder="/oidc/callback" bind:value={oidcCallbackURL} />
+              <p class="help-text">Path on this app's own host. Register it as a redirect URI with your provider.</p>
             </div>
           </div>
           <div class="form-row">
@@ -732,20 +731,17 @@ spec:
           </div>
           <div class="form-group">
             <label for="oidcSessionKey">Session Encryption Key <span class="required">*</span></label>
-            <input type="password" id="oidcSessionKey" placeholder="at least 32 characters" bind:value={oidcSessionKey} required minlength="32" />
-            <p class="help-text">Used to encrypt session cookies. Must be at least 32 characters.</p>
+            <input type="password" id="oidcSessionKey" placeholder="exactly 32 characters" bind:value={oidcSessionKey} required minlength="32" maxlength="32" />
+            <p class="help-text">Used to encrypt session cookies. Must be exactly 32 characters — the Traefik plugin uses it directly as an AES-256 key.</p>
           </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label for="oidcAllowedDomains">Allowed Email Domains</label>
-              <input type="text" id="oidcAllowedDomains" placeholder="company.com, subsidiary.com" bind:value={oidcAllowedDomains} />
-              <p class="help-text">Comma-separated. Leave empty to allow all domains.</p>
-            </div>
-            <div class="form-group">
-              <label for="oidcAllowedUsers">Allowed Users</label>
-              <input type="text" id="oidcAllowedUsers" placeholder="user@company.com, admin@company.com" bind:value={oidcAllowedUsers} />
-              <p class="help-text">Comma-separated email addresses. Leave empty to allow all.</p>
-            </div>
+          <div class="form-group">
+            <label for="oidcAllowedUsers">Allowed Users</label>
+            <input type="text" id="oidcAllowedUsers" placeholder="user@company.com, admin@company.com" bind:value={oidcAllowedUsers} />
+            <p class="help-text">
+              Comma-separated email addresses. Leave empty to allow anyone your identity provider authenticates.
+              Whole-domain rules are not available: the plugin compares claims by exact value, so restrict by
+              domain at the identity provider instead.
+            </p>
           </div>
           <div class="form-group">
             <label for="oidcExcludedURLs">Public Paths (bypass auth)</label>

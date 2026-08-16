@@ -34,6 +34,10 @@ RUN addgroup -g 1001 -S rudder && \
 COPY --from=builder --chown=rudder:rudder /app/build ./build
 COPY --from=builder --chown=rudder:rudder /app/node_modules ./node_modules
 COPY --from=builder --chown=rudder:rudder /app/package.json ./
+# The entry point: adapter-node's own build/index.js cannot serve WebSocket
+# upgrades, so the container terminal and `kubectl exec` would hang. server.js
+# is that handler plus one `upgrade` listener.
+COPY --from=builder --chown=rudder:rudder /app/server.js ./
 
 # drizzle/ is deliberately not copied.  Nothing calls drizzle's migrate() at
 # runtime — src/lib/db/index.ts applies the schema itself on startup — and
@@ -63,4 +67,4 @@ USER rudder
 EXPOSE 3000
 
 # Start the application
-CMD ["bun", "run", "build/index.js"]
+CMD ["bun", "run", "server.js"]

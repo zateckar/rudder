@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "rudder-dev",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["--bun", "vite", "dev", "--port", "5173"],
+      "port": 5173
+    }
+  ]
+}

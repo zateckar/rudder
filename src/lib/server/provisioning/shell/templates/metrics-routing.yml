@@ -1,15 +1,40 @@
 http:
   routers:
+    # Traefik's own Prometheus metrics, on the same mTLS-protected host as the
+    # JSON host metrics. Higher priority than rudder-metrics so the more
+    # specific rule wins; without it both match /prometheus/metrics and
+    # Traefik picks by rule length, which is not something to rely on.
+    rudder-traefik-metrics:
+      rule: "Host(`metrics.{{BASE_DOMAIN}}`) && PathPrefix(`/prometheus`)"
+      priority: 200
+      entryPoints:
+        - websecure
+      middlewares:
+        - rudder-metrics-strip
+      service: rudder-traefik-metrics
+      tls:
+        certResolver: letsencrypt
+        options: podman-mtls
     rudder-metrics:
       rule: "Host(`metrics.{{BASE_DOMAIN}}`)"
+      priority: 100
       entryPoints:
         - websecure
       service: rudder-metrics
       tls:
         certResolver: letsencrypt
         options: podman-mtls
+  middlewares:
+    rudder-metrics-strip:
+      stripPrefix:
+        prefixes:
+          - "/prometheus"
   services:
     rudder-metrics:
       loadBalancer:
         servers:
           - url: "http://127.0.0.1:9100"
+    rudder-traefik-metrics:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:8082"

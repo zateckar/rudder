@@ -12,6 +12,9 @@ import { eq, and, desc } from 'drizzle-orm';
 import { getRestPodmanClient } from '$lib/server/podman-client';
 import type { Container, ContainerInspect } from '$lib/server/podman';
 import { randomBytes } from 'crypto';
+// A discovered container's labels can carry an OIDC client secret stamped in by
+// a previous deploy; keep it out of Rudder's database.
+import { redactSecretLabels } from '$lib/server/redaction';
 
 interface ParsedTraefikConfig {
   domain: string | null;
@@ -122,7 +125,7 @@ function parseTraefikLabels(labels: Record<string, string>): ParsedTraefikConfig
     }
 
     // Detect OIDC (but we can't recover secrets)
-    if (key.includes('-oidc.plugin.traefikoidc.')) {
+    if (key.includes('-oidc.plugin.traefik-oidc-auth.')) {
       config.authType = 'oidc';
       // Note: We can't recover clientSecret and sessionEncryptionKey from labels
       // so authConfig will remain null, requiring manual reconfiguration
@@ -478,7 +481,7 @@ export async function discoverApplicationsOnWorker(
                 name: app.containerInfo.name,
                 image: app.containerInfo.image,
                 status: app.containerInfo.status,
-                labels: JSON.stringify(app.containerInfo.labels),
+                labels: JSON.stringify(redactSecretLabels(app.containerInfo.labels)),
                 updatedAt: new Date(),
               })
               .where(eq(containers.id, existingContainer.id));
@@ -491,7 +494,7 @@ export async function discoverApplicationsOnWorker(
               name: app.containerInfo.name,
               image: app.containerInfo.image,
               status: app.containerInfo.status,
-              labels: JSON.stringify(app.containerInfo.labels),
+              labels: JSON.stringify(redactSecretLabels(app.containerInfo.labels)),
               createdAt: new Date(),
               updatedAt: new Date(),
             });
@@ -562,7 +565,7 @@ export async function discoverApplicationsOnWorker(
           name: app.containerInfo.name,
           image: app.containerInfo.image,
           status: app.containerInfo.status,
-          labels: JSON.stringify(app.containerInfo.labels),
+          labels: JSON.stringify(redactSecretLabels(app.containerInfo.labels)),
           createdAt: new Date(),
           updatedAt: new Date(),
         });

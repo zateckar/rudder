@@ -1,18 +1,13 @@
 import { json } from '@sveltejs/kit';
 import { workers } from '$lib/db/schema';
-import { createPodmanClient, type PodmanClient } from '$lib/server/podman';
+import { type PodmanClient } from '$lib/server/podman';
+import { getRestPodmanClient } from '$lib/server/podman-client';
 import { authErrorResponse, requireContainerAccess } from '$lib/server/auth';
 
 function getPodmanClient(worker: typeof workers.$inferSelect): { client: PodmanClient } | null {
   if (worker.podmanApiUrl && worker.podmanCaCert && worker.podmanClientCert && worker.podmanClientKey) {
-    return {
-      client: createPodmanClient({
-        apiUrl: worker.podmanApiUrl,
-        caCert: worker.podmanCaCert,
-        clientCert: worker.podmanClientCert,
-        clientKey: worker.podmanClientKey,
-      }),
-    };
+    // The stored client key is encrypted at rest; getRestPodmanClient decrypts it.
+    return { client: getRestPodmanClient(worker) };
   }
   return null;
 }

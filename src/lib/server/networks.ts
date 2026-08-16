@@ -4,8 +4,14 @@
  * Each standalone application gets its own bridge network:  rudder-{appId[:8]}
  * Applications within a stack share a network:              rudder-s-{stackId[:8]}
  *
- * Traefik is connected to each app's network so it can resolve
- * containers by name and route traffic without host port mapping.
+ * The network exists so containers can reach each other by service name.
+ * Traefik is *not* on it: it runs with host networking and proxies to each
+ * container's 127.0.0.1 host port, so it needs no bridge membership — and
+ * could not have one, since Podman refuses to attach a host-networked
+ * container to a bridge network.
+ *
+ * Containers are attached at creation time via `NetworkMode`, so there is no
+ * separate join step.
  */
 import type { PodmanClient } from './podman';
 import { executeSSHCommand, type SSHConnectionConfig } from './ssh';
@@ -102,27 +108,6 @@ export async function ensureAppNetwork(
   const name = stackId ? stackNetworkName(stackId) : appNetworkName(appId);
   await client.createNetwork(name);
   return name;
-}
-
-/**
- * Connect a container (and Traefik) to the app network.
- */
-export async function joinNetwork(
-  client: PodmanClient,
-  containerId: string,
-  networkName: string,
-): Promise<void> {
-  await client.connectContainerToNetwork(containerId, networkName);
-}
-
-/**
- * Connect Traefik to a network so it can route to containers on it.
- */
-export async function connectTraefik(
-  client: PodmanClient,
-  networkName: string,
-): Promise<void> {
-  await client.connectContainerToNetwork('traefik', networkName);
 }
 
 /**

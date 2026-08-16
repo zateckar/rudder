@@ -1,5 +1,28 @@
-appsec_config: crowdsecurity/appsec-default
+# Two AppSec configurations run side by side:
+#
+#   appsec-default  inband  — virtual patching (vpatch-*, generic-*). Blocks the
+#                             offending request outright with a 403.
+#   crs             outofband — the OWASP Core Rule Set. Scores each request for
+#                             SQLi, XSS, LFI, RCE and friends, and raises an
+#                             alert; the `crowdsec-appsec-outofband` scenario
+#                             turns repeated hits into a ban.
+#
+# Without the CRS entry the engine only recognises known exploit signatures, so
+# a plain `?id=1' OR '1'='1` or `<script>alert(1)</script>` reaches the
+# application untouched — verified on a live worker.
+#
+# Out-of-band is the deliberate default: CRS is regex-heavy and false positives
+# are common on rich-text and JSON payloads, and out-of-band a false positive
+# costs a visible, removable ban decision rather than a broken request. To block
+# inline instead, install `crowdsecurity/appsec-crs-inband` in the CrowdSec
+# container's COLLECTIONS and use `crowdsecurity/crs-inband` here.
+appsec_configs:
+  - crowdsecurity/appsec-default
+  - crowdsecurity/crs
 labels:
   type: appsec
-listen_addr: 0.0.0.0:7422
+# Loopback only — the AppSec endpoint is consumed by the bouncer plugin inside
+# Traefik (host networking). Exposing it publicly let anyone submit requests
+# for inspection, or flood it.
+listen_addr: 127.0.0.1:7422
 source: appsec

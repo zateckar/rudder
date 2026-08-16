@@ -43,6 +43,12 @@
   let provisioning = $state(false);
   let provisionMsg = $state('');
   let showProvisionModal = $state(false);
+  /**
+   * On by default: re-provisioning should patch. Off is for environments with
+   * their own patch pipeline, and for runs where the extra minutes matter — the
+   * pending count is still reported either way.
+   */
+  let applyUpdates = $state(true);
 
   let metricsClient = $state<any[] | null>(null);
   let metricsLoading = $state(false);
@@ -63,12 +69,29 @@
   let oidcClientSecret = $state('');
   let oidcClientSecretSet = $state(false);
   let oidcEncryptionKeySet = $state(false);
+  let oidcAppliedAt = $state<string | null>(null);
+  // Shared callback host/URL, resolved server-side so the UI and the generated
+  // Traefik config can never disagree about what to register with the IdP.
+  let oidcCallbackHost = $state('');
+  let oidcCallbackUrl = $state('');
   let oidcSaving = $state(false);
   let oidcSaveMsg = $state('');
   let oidcLoaded = $state(false);
   let showOidcApplyPrompt = $state(false);
   let oidcApplying = $state(false);
   let oidcApplyMsg = $state('');
+
+  // ── Routing mode ─────────────────────────────────────────────────
+  // The server value is the source of truth; the override holds the answer
+  // from the switch endpoint until the page is reloaded.
+  let routingOverride = $state<'labels' | 'http' | null>(null);
+  let routingFetchCleared = $state(false);
+  const routingMode = $derived(routingOverride ?? data.worker.routingMode ?? 'labels');
+  const configFetchedAt = $derived(
+    routingFetchCleared ? null : (data.worker.configFetchedAt ?? null),
+  );
+  let routingSaving = $state(false);
+  let routingMsg = $state('');
 
   // Images tab state
   let images = $state<any[]>([]);
@@ -374,7 +397,7 @@
       const res = await fetch('/api/workers/provision', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workerId, sshPrivateKey: sshKey }),
+        body: JSON.stringify({ workerId, sshPrivateKey: sshKey, applyUpdates }),
       });
       const body = await res.json();
       if (body.success) {
@@ -418,6 +441,9 @@
       oidcClientId = body.oidcClientId ?? '';
       oidcClientSecretSet = body.oidcClientSecretSet ?? false;
       oidcEncryptionKeySet = body.oidcEncryptionKeySet ?? false;
+      oidcAppliedAt = body.oidcAppliedAt ?? null;
+      oidcCallbackHost = body.callbackHost ?? '';
+      oidcCallbackUrl = body.callbackUrl ?? '';
       oidcLoaded = true;
     } catch { /* ignore */ }
   }
@@ -437,8 +463,13 @@
       if (!res.ok) throw new Error(data.error || 'Save failed');
       oidcClientSecretSet = data.oidcClientSecretSet;
       oidcEncryptionKeySet = data.oidcEncryptionKeySet;
+      oidcAppliedAt = data.oidcAppliedAt ?? null;
+      oidcCallbackHost = data.callbackHost ?? oidcCallbackHost;
+      oidcCallbackUrl = data.callbackUrl ?? oidcCallbackUrl;
       oidcClientSecret = '';
-      oidcSaveMsg = 'Saved. Redeploy applications or click “Apply to Traefik” to activate immediately.';
+      oidcSaveMsg = routingMode === 'http'
+        ? 'Saved. The worker picks this up on its next fetch — within about ten seconds.'
+        : 'Saved. Now click “Apply to Traefik” — deployments stay blocked until the config reaches the worker.';
     } catch (e: any) {
       oidcSaveMsg = 'Error: ' + e.message;
     } finally {
@@ -459,10 +490,32 @@
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Apply failed');
       oidcApplyMsg = data.message || 'Applied successfully.';
+      oidcAppliedAt = new Date().toISOString();
     } catch (e: any) {
       oidcApplyMsg = 'Error: ' + e.message;
     } finally {
       oidcApplying = false;
+    }
+  }
+
+  async function setRoutingMode(mode: 'labels' | 'http') {
+    routingSaving = true;
+    routingMsg = '';
+    try {
+      const res = await fetch(`/api/workers/${workerId}/routing-mode`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ routingMode: mode }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || 'Switch failed');
+      routingOverride = body.routingMode;
+      routingFetchCleared = true;
+      routingMsg = body.message;
+    } catch (e: any) {
+      routingMsg = 'Error: ' + e.message;
+    } finally {
+      routingSaving = false;
     }
   }
 
@@ -477,6 +530,7 @@
       oidcClientSecret = '';
       oidcClientSecretSet = false;
       oidcEncryptionKeySet = false;
+      oidcAppliedAt = null;
       oidcSaveMsg = 'OIDC configuration cleared.';
     } catch (e: any) {
       oidcSaveMsg = 'Error: ' + e.message;
@@ -769,6 +823,19 @@
 
 </script>
 
+{#snippet provisionOptions()}
+  <label class="provision-option">
+    <input type="checkbox" bind:checked={applyUpdates} />
+    <span>
+      Install pending host security updates
+      <em>
+        Re-provisioning is otherwise not a patching event — it refreshes configuration and container
+        images but leaves the host's packages where they are. Adds a few minutes. Never reboots.
+      </em>
+    </span>
+  </label>
+{/snippet}
+
 {#if showProvisionModal}
 <SshKeyPrompt
   workerId={workerId}
@@ -777,6 +844,7 @@
   submitLabel="Start Provisioning"
   onsubmit={provisionWorker}
   oncancel={() => showProvisionModal = false}
+  extra={provisionOptions}
 />
 {/if}
 
@@ -910,6 +978,63 @@
         <div class="cfg"><span class="cfg-label">Last Seen</span><span class="cfg-value">{data.worker.lastSeenAt ? new Date(data.worker.lastSeenAt).toLocaleString() : 'Never'}</span></div>
       </div>
     </div>
+
+    <!-- Patching and platform versions.
+         Nothing else in the UI answers "is this host patched?" or "would
+         re-provisioning move Traefik?", and both are invisible from the
+         container list. -->
+    {#if systemInfo?.patch || systemInfo?.platform?.length}
+      <div class="section">
+        <h3>Patching &amp; Platform</h3>
+        <div class="config-grid">
+          <div class="cfg">
+            <span class="cfg-label">Security updates pending</span>
+            <span class="cfg-value">
+              {#if systemInfo.patch?.updatesSecurity == null}
+                <span class="patch-unknown" title="This worker has never reported a patch scan. Re-provision to install the daily scan.">not reported</span>
+              {:else if systemInfo.patch.updatesSecurity > 0}
+                <span class="patch-warn">{systemInfo.patch.updatesSecurity}</span>
+              {:else}
+                0
+              {/if}
+            </span>
+          </div>
+          <div class="cfg">
+            <span class="cfg-label">All updates pending</span>
+            <span class="cfg-value">
+              {systemInfo.patch?.updatesPending ?? '—'}
+            </span>
+          </div>
+          <div class="cfg">
+            <span class="cfg-label">Reboot required</span>
+            <span class="cfg-value">
+              {#if systemInfo.patch?.rebootRequired == null}
+                <span class="patch-unknown">not reported</span>
+              {:else if systemInfo.patch.rebootRequired}
+                <span class="patch-warn" title="Rudder never reboots a worker — applications are running here.">yes</span>
+              {:else}
+                no
+              {/if}
+            </span>
+          </div>
+          {#each systemInfo.platform ?? [] as comp (comp.component)}
+            <div class="cfg">
+              <span class="cfg-label">{comp.component}</span>
+              <span class="cfg-value">
+                {comp.runningVersion ?? 'unknown'}
+                {#if comp.upToDate === false}
+                  <span class="patch-warn" title={`Re-provisioning would install ${comp.expectedImage}`}>
+                    → {comp.expectedVersion}
+                  </span>
+                {:else if comp.upToDate === null}
+                  <span class="patch-unknown" title={`This control plane installs ${comp.expectedImage}`}>version unknown</span>
+                {/if}
+              </span>
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/if}
 
     {#if loadingInfo}
       <div class="section"><p class="loading">Fetching system info…</p></div>
@@ -1538,14 +1663,120 @@
   {:else if activeTab === 'settings'}
     <div class="section">
       <div class="section-header">
+        <h3>Routing Configuration</h3>
+        <span class="section-hint">Where this worker's Traefik gets its routes</span>
+      </div>
+
+      <div class="routing-modes">
+        <div class="routing-mode" class:is-active={routingMode === 'labels'}>
+          <h4>Container labels {#if routingMode === 'labels'}<span class="routing-badge">current</span>{/if}</h4>
+          <p>
+            Routes are stamped into each container as <code class="mono-inline">traefik.*</code> labels when it is
+            created. Changing a rate limit, an auth mode or the worker's OIDC settings needs a redeploy, and worker
+            OIDC needs the manual <strong>Apply to Traefik</strong> push below.
+          </p>
+        </div>
+        <div class="routing-mode" class:is-active={routingMode === 'http'}>
+          <h4>Control plane {#if routingMode === 'http'}<span class="routing-badge">current</span>{/if}</h4>
+          <p>
+            The worker fetches its routes from Rudder every 10 seconds and writes them to
+            <code class="mono-inline">/etc/traefik/dynamic/routes.yml</code>. Rate limits, auth mode and worker OIDC
+            take effect without touching a running container. The file on disk means a reboot during a Rudder
+            outage still comes back serving.
+          </p>
+          {#if routingMode === 'http'}
+            <p class="routing-status" class:is-stale={!configFetchedAt || Date.now() - new Date(configFetchedAt).getTime() > 60000}>
+              {#if configFetchedAt}
+                Last fetched {new Date(configFetchedAt).toLocaleString()}
+              {:else}
+                Never fetched — re-provision the worker to install the fetch timer.
+              {/if}
+            </p>
+          {/if}
+        </div>
+      </div>
+
+      <div class="form-actions">
+        {#if routingMode === 'labels'}
+          <button class="btn btn-primary" onclick={() => setRoutingMode('http')} disabled={routingSaving}>
+            {routingSaving ? 'Switching…' : 'Switch to control-plane routing'}
+          </button>
+        {:else}
+          <button class="btn btn-secondary" onclick={() => setRoutingMode('labels')} disabled={routingSaving}>
+            {routingSaving ? 'Switching…' : 'Revert to container labels'}
+          </button>
+        {/if}
+      </div>
+
+      <p class="oidc-intro">
+        Switching only records the intent. <strong>Re-provision the worker</strong> to install or remove the fetch
+        timer, then <strong>redeploy its applications</strong> so their labels are dropped or restored. Both modes
+        must never be live at once: two providers defining the same router name give Traefik one
+        <code class="mono-inline">Host()</code> rule with arbitrary resolution between them.
+      </p>
+
+      {#if routingMsg}
+        <p class="settings-msg" class:is-error={routingMsg.startsWith('Error')}>{routingMsg}</p>
+      {/if}
+    </div>
+
+    <div class="section">
+      <div class="section-header">
         <h3>Global OIDC Authentication</h3>
         <span class="section-hint">Protect all applications on this worker via an identity provider</span>
       </div>
       <p class="oidc-intro">
         When enabled, applications with <strong>Auth Type = “Default”</strong> will require users to sign in
-        before they can access them. Register the following callback URL with your identity provider:
-        <code class="mono-inline">https://auth.{data.worker.baseDomain ?? '<base-domain>'}/oauth2/callback</code>
+        before they can access them. Every application on this worker shares one callback URL, so your
+        identity provider needs only a single redirect URI registered.
       </p>
+
+      {#if data.worker.baseDomain}
+        <div class="oidc-prereq">
+          <h4>Before enabling — two prerequisites</h4>
+          <ol>
+            <li>
+              <strong>DNS A record.</strong> <code class="mono-inline">{oidcCallbackHost}</code> must resolve to
+              this worker at <code class="mono-inline">{data.worker.hostname}</code>. The callback host is a real
+              Traefik route: it terminates TLS with its own Let's Encrypt certificate, which can only be issued
+              once the record exists. Without it every login attempt fails to resolve.
+            </li>
+            <li>
+              <strong>Redirect URI.</strong> Register
+              <code class="mono-inline">{oidcCallbackUrl}</code>
+              with your identity provider — exactly this URL, for the client ID below.
+            </li>
+          </ol>
+        </div>
+      {:else}
+        <div class="oidc-prereq is-warning">
+          <h4>No base domain configured</h4>
+          <p>
+            This worker needs a base domain before OIDC can be enabled — the shared callback host is derived
+            from it. Set one in the worker's configuration first.
+          </p>
+        </div>
+      {/if}
+
+      {#if oidcEnabled && oidcClientSecretSet && routingMode === 'http'}
+        <div class="oidc-prereq">
+          <h4>Delivered with the routes</h4>
+          <p>
+            This worker fetches its routing configuration from Rudder, and the OIDC middleware travels with it.
+            Saving here takes effect within one poll — no push, no redeploy, and no window where a router
+            references a middleware the worker does not have.
+          </p>
+        </div>
+      {:else if oidcEnabled && oidcClientSecretSet && !oidcAppliedAt}
+        <div class="oidc-prereq is-warning">
+          <h4>Not yet pushed to Traefik</h4>
+          <p>
+            This configuration is saved but has not reached the worker. Deployments are blocked until you click
+            <strong>Apply to Traefik</strong> — deploying now would either take applications offline or publish
+            them without authentication.
+          </p>
+        </div>
+      {/if}
 
       <div class="settings-form">
         <div class="form-field">
@@ -1587,7 +1818,10 @@
               <label for="oidcEncKey">Session Encryption Key</label>
               <input type="password" id="oidcEncKey" disabled
                 placeholder={oidcEncryptionKeySet ? '••••• (auto-managed)' : 'Will be auto-generated on save'} />
-              <p class="field-hint">Auto-generated 32-byte key for encrypting session cookies. Managed automatically.</p>
+              <p class="field-hint">
+                Auto-generated 32-character key for encrypting session cookies. Managed automatically.
+                Rotating it signs every user out.
+              </p>
             </div>
           </div>
         {/if}
@@ -1596,7 +1830,7 @@
           <button class="btn btn-primary" onclick={saveOidcSettings} disabled={oidcSaving}>
             {oidcSaving ? 'Saving…' : 'Save Settings'}
           </button>
-          {#if oidcEnabled && oidcClientSecretSet}
+          {#if oidcEnabled && oidcClientSecretSet && routingMode !== 'http'}
             <button class="btn btn-secondary" onclick={() => showOidcApplyPrompt = true} disabled={oidcApplying}
               title="Push OIDC config to Traefik on this worker via SSH (takes effect immediately, no redeploy needed)">
               {oidcApplying ? 'Applying…' : 'Apply to Traefik'}
@@ -1637,7 +1871,18 @@
           <div class="help-icon">🔑</div>
           <div>
             <strong>Auth Type = Custom OIDC</strong>
-            <p>Uses per-app credentials. Independent of this worker setting.</p>
+            <p>Uses per-app credentials and its own callback on the app's own host. Independent of this worker setting.</p>
+          </div>
+        </div>
+        <div class="help-item">
+          <div class="help-icon">🍪</div>
+          <div>
+            <strong>One session, all apps</strong>
+            <p>
+              The session cookie is shared across every subdomain of this worker, so signing in to one
+              “Default” app signs the user in to all of them. Use <em>Custom OIDC</em> with allowed users,
+              or a separate worker, where apps must not share an audience.
+            </p>
           </div>
         </div>
       </div>
@@ -1796,6 +2041,21 @@
     padding: 32px 0;
   }
   .empty-state .empty { padding: 0 0 16px 0; }
+
+  .patch-warn { color: var(--yellow-text, var(--accent)); font-weight: 600; }
+  .patch-unknown { color: var(--text-muted); font-style: italic; }
+
+  /* ── Provisioning dialog extras ────────────────── */
+
+  .provision-option {
+    display: flex; align-items: flex-start; gap: 8px; margin: 4px 0 0;
+    font-size: 12px; color: var(--text-secondary); cursor: pointer;
+  }
+  .provision-option input { accent-color: var(--accent); margin-top: 2px; }
+  .provision-option em {
+    display: block; font-style: normal; color: var(--text-muted);
+    font-size: 11px; line-height: 1.5; margin-top: 2px;
+  }
 
   /* ── Config grid ───────────────────────────────── */
 
@@ -2121,6 +2381,38 @@
   .oidc-fields { display: flex; flex-direction: column; gap: 14px; padding: 16px; background: var(--bg-overlay, rgba(0,0,0,0.1)); border-radius: 8px; border: 1px solid var(--border); }
   .field-hint { font-size: 11px; color: var(--text-muted); margin: 2px 0 0; }
   .oidc-intro { font-size: 13px; color: var(--text-secondary); line-height: 1.5; margin-bottom: 4px; }
+  .oidc-prereq {
+    margin: 12px 0 16px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent, #4a9eff);
+    border-radius: 8px;
+    background: var(--bg-overlay, rgba(0, 0, 0, 0.1));
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+  }
+  .oidc-prereq h4 { margin: 0 0 8px; font-size: 13px; color: var(--text-primary); }
+  .oidc-prereq ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; }
+  .oidc-prereq p { margin: 0; }
+  .oidc-prereq.is-warning { border-left-color: var(--warning, #e0a030); }
+  .routing-modes { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin: 12px 0 16px; }
+  .routing-mode {
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-overlay, rgba(0, 0, 0, 0.1));
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+    opacity: 0.65;
+  }
+  .routing-mode.is-active { opacity: 1; border-color: var(--accent, #4a9eff); }
+  .routing-mode h4 { margin: 0 0 8px; font-size: 13px; color: var(--text-primary); display: flex; align-items: center; gap: 8px; }
+  .routing-mode p { margin: 0 0 6px; }
+  .routing-badge { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 10px; background: var(--accent, #4a9eff); color: #fff; font-weight: 600; }
+  .routing-status { font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); }
+  .routing-status.is-stale { color: var(--warning, #e0a030); }
   .mono-inline { font-family: var(--font-mono); font-size: 12px; background: var(--bg-overlay, rgba(0,0,0,0.2)); padding: 2px 6px; border-radius: 4px; display: inline-block; margin-top: 4px; word-break: break-all; }
   .req { color: var(--red, #f87171); }
   .form-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding-top: 4px; }

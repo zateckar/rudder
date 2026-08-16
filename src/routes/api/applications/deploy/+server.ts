@@ -11,7 +11,7 @@ import { checkDeployQuota } from '$lib/server/quota';
 
 export async function POST({ request, cookies }: { request: Request; cookies: any }) {
   const body = await request.json();
-  const { applicationId, action } = body;
+  const { applicationId, action, fromDeploymentId } = body;
 
   if (!applicationId || !action) {
     return json({ error: 'Application ID and action required' }, { status: 400 });
@@ -40,7 +40,22 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
 
       const deployUserId = ctx.user.id;
 
-      const result = await executeApplicationDeploy(applicationId, deployUserId);
+      // A rollback names the deployment it is restoring, and the digests come
+      // from that row — never from the request body. Taking a digest from the
+      // caller would let anyone who can deploy an application run arbitrary
+      // image bytes under its name.
+      let pinnedDigests: string | null = null;
+      if (fromDeploymentId) {
+        const source = await db.select().from(deployments)
+          .where(eq(deployments.id, fromDeploymentId))
+          .get();
+        if (!source || source.applicationId !== applicationId) {
+          return json({ error: 'Source deployment not found for this application' }, { status: 400 });
+        }
+        pinnedDigests = source.imageDigest ?? null;
+      }
+
+      const result = await executeApplicationDeploy(applicationId, deployUserId, { pinnedDigests });
       if (!result.success) {
         return json({ error: result.message }, { status: result.statusCode || 500 });
       }

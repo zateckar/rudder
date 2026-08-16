@@ -19,6 +19,7 @@ export async function GET({ params, cookies }: { params: { id: string }; cookies
     version: deployments.version,
     status: deployments.status,
     image: deployments.image,
+    imageDigest: deployments.imageDigest,
     deployedBy: deployments.deployedBy,
     errorMessage: deployments.errorMessage,
     createdAt: deployments.createdAt,
@@ -107,6 +108,10 @@ export async function POST({ params, request, cookies }: { params: { id: string 
     environment: source.environment,
     volumes: source.volumes,
     image: source.image,
+    // Carried forward so this row records the same bytes the redeploy below is
+    // pinned to; without it the rollback's own history entry would claim only
+    // a tag, and rolling back to *it* later would resolve the tag afresh.
+    imageDigest: source.imageDigest,
     status: 'rolled_back',
     deployedBy: userId,
     createdAt: new Date(),
@@ -121,7 +126,13 @@ export async function POST({ params, request, cookies }: { params: { id: string 
         'Content-Type': 'application/json',
         Cookie: request.headers.get('Cookie') || '',
       },
-      body: JSON.stringify({ applicationId: params.id, action: 'deploy' }),
+      // fromDeploymentId, not the digest itself: the deploy endpoint reads the
+      // digest out of the row it names, so a caller cannot pin arbitrary bytes.
+      body: JSON.stringify({
+        applicationId: params.id,
+        action: 'deploy',
+        fromDeploymentId: source.id,
+      }),
     });
 
     if (!deployRes.ok) {

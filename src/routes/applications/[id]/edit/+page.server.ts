@@ -2,6 +2,8 @@ import { redirect, fail } from '@sveltejs/kit';
 import { db, safeWorkerColumns, safeUserColumns } from '$lib/db';
 import { applications, users, workers, teams, teamMembers, volumes, stacks } from '$lib/db/schema';
 import { eq, inArray, or, isNull } from 'drizzle-orm';
+import { assertDomainAvailable } from '$lib/server/domains';
+import { ALLOWED_DOMAINS_UNSUPPORTED } from '$lib/server/oidc';
 
 export const load = async ({ params, cookies }: { params: { id: string }; cookies: any }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -119,6 +121,13 @@ export const actions = {
       return fail(400, { error: 'Missing required fields' });
     }
 
+    // Hostnames are global — two applications sharing one would produce two
+    // Traefik routers with the same Host rule and arbitrary routing between them.
+    const domainConflict = await assertDomainAvailable(domain, app.id);
+    if (domainConflict) {
+      return fail(400, { error: domainConflict });
+    }
+
     // Git-based source fields
     const gitRepo = formData.get('gitRepo')?.toString() || null;
     const gitBranch = formData.get('gitBranch')?.toString() || null;
@@ -226,8 +235,12 @@ export const actions = {
         if (!cfg.providerURL || !cfg.clientID || !cfg.clientSecret || !cfg.sessionEncryptionKey) {
           return fail(400, { error: 'OIDC authentication requires Provider URL, Client ID, Client Secret, and Session Encryption Key' });
         }
-        if (cfg.sessionEncryptionKey.length < 32) {
-          return fail(400, { error: 'Session Encryption Key must be at least 32 characters' });
+        // The Traefik OIDC plugin uses this value directly as an AES-256 key.
+        if (cfg.sessionEncryptionKey.length !== 32) {
+          return fail(400, { error: 'Session Encryption Key must be exactly 32 characters' });
+        }
+        if (cfg.allowedUserDomains?.length) {
+          return fail(400, { error: ALLOWED_DOMAINS_UNSUPPORTED });
         }
       } catch {
         return fail(400, { error: 'Invalid OIDC configuration' });

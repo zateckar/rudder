@@ -1,4 +1,5 @@
-import { env } from '../env';
+import { routerName } from '../domains';
+import { OIDC_CALLBACK_PATH } from '../oidc';
 
 // Shell assets imported as raw strings (Vite inlines at build time)
 import provisionShTemplate from './shell/provision.sh?raw';
@@ -14,12 +15,15 @@ import crowdsecAcquisTemplate from './shell/templates/crowdsec-acquis.yml?raw';
 import crowdsecAppsecAcquisTemplate from './shell/templates/crowdsec-appsec-acquis.yml?raw';
 import crowdsecConfigLocalTemplate from './shell/templates/crowdsec-config-local.yml?raw';
 import registriesTemplate from './shell/templates/registries.conf?raw';
+import unattendedUpgradesTemplate from './shell/templates/unattended-upgrades.conf?raw';
 
 // Helper scripts
 import crowdsecRegisterSh from './shell/scripts/rudder-crowdsec-register.sh?raw';
 import netavarkCleanupSh from './shell/scripts/rudder-netavark-cleanup.sh?raw';
 import metricsSh from './shell/scripts/rudder-metrics.sh?raw';
 import metricsHttpSh from './shell/scripts/rudder-metrics-http.sh?raw';
+import traefikConfigSh from './shell/scripts/rudder-traefik-config.sh?raw';
+import updatesSh from './shell/scripts/rudder-updates.sh?raw';
 
 // Systemd units
 import podmanApiSocketUnit from './shell/units/podman-api-socket.service?raw';
@@ -32,6 +36,10 @@ import netavarkCleanupTimerUnit from './shell/units/rudder-netavark-cleanup.time
 import metricsUnit from './shell/units/rudder-metrics.service?raw';
 import metricsTimerUnit from './shell/units/rudder-metrics.timer?raw';
 import metricsHttpUnit from './shell/units/rudder-metrics-http.service?raw';
+import traefikConfigUnit from './shell/units/rudder-traefik-config.service?raw';
+import traefikConfigTimerUnit from './shell/units/rudder-traefik-config.timer?raw';
+import updatesUnit from './shell/units/rudder-updates.service?raw';
+import updatesTimerUnit from './shell/units/rudder-updates.timer?raw';
 
 /**
  * Replace {{UPPER_SNAKE_CASE}} placeholders in a template string.
@@ -48,17 +56,96 @@ function toBase64(content: string): string {
   return Buffer.from(content).toString('base64');
 }
 
+/**
+ * Container images this control plane installs on a worker.
+ *
+ * Pinned rather than `latest`: provisioning pulls unconditionally, so a
+ * floating tag turns any re-provision into an unplanned upgrade — a Traefik
+ * major version can arrive during a run triggered to change something
+ * unrelated. Moving a version here is a reviewable diff, and the worker page
+ * compares these against what a worker is actually running so an operator can
+ * see when a re-provision would change something.
+ *
+ * The exact bytes are pinned further at provisioning time: the tag is resolved
+ * to a repo digest after the pull and that digest goes into the systemd unit.
+ */
+export const PLATFORM_IMAGES = {
+  traefik: { repo: 'docker.io/traefik', version: 'v3.7.10' },
+  crowdsec: { repo: 'docker.io/crowdsecurity/crowdsec', version: 'v1.7.8' },
+} as const;
+
+export type PlatformComponent = keyof typeof PLATFORM_IMAGES;
+
+/** Worker-level OIDC settings, already decrypted. */
+export interface GlobalOidcConfig {
+  providerURL: string;
+  clientID: string;
+  clientSecret: string;
+  /** The plugin's `Secret` — must be exactly 32 characters. */
+  secret: string;
+}
+
+/**
+ * Render `/etc/traefik/dynamic/global-oidc.yml` for a worker.
+ *
+ * Single source of truth for the global OIDC middleware: used both when
+ * provisioning a worker from scratch and when pushing a config change to a
+ * running worker over SSH, so the two can never drift apart.
+ */
+export function renderGlobalOidcConfig(
+  baseDomain: string,
+  oidcConfig: GlobalOidcConfig,
+): string {
+  return replacePlaceholders(globalOidcMiddlewareTemplate, {
+    BASE_DOMAIN: baseDomain,
+    OIDC_PROVIDER_URL: oidcConfig.providerURL,
+    OIDC_CLIENT_ID: oidcConfig.clientID,
+    OIDC_CLIENT_SECRET: oidcConfig.clientSecret,
+    OIDC_SECRET: oidcConfig.secret,
+  });
+}
+
+export interface ProvisioningOptions {
+  baseDomain?: string;
+  bouncerKey?: string;
+  oidcConfig?: GlobalOidcConfig;
+  /** SSH port to keep open in the host firewall alongside 22. */
+  sshPort?: number;
+  /**
+   * Install pending host package updates during this run. Defaults to true —
+   * re-provisioning should be a patching event, not a config refresh that
+   * leaves a year-old kernel in place.
+   *
+   * Turning it off still reports what is pending; it only skips the install,
+   * for environments that patch on their own schedule and for runs where the
+   * extra minutes matter.
+   */
+  applyUpdates?: boolean;
+  /**
+   * Routing configuration delivery, for workers in `http` routing mode. When
+   * absent the worker stays on container labels and any previously installed
+   * routes.yml is removed — the two must never both define a router.
+   */
+  routingConfig?: {
+    /** Absolute URL of this worker's config endpoint on the control plane. */
+    endpoint: string;
+    /** Bearer token, already decrypted. */
+    token: string;
+  };
+}
+
 export function generateProvisioningScript(
   workerName: string,
-  baseDomain?: string,
-  bouncerKeyParam?: string,
-  oidcConfig?: {
-    providerURL: string;
-    clientID: string;
-    clientSecret: string;
-    encryptionKey: string;
-  }
+  options: ProvisioningOptions = {},
 ): string {
+  const {
+    baseDomain,
+    bouncerKey: bouncerKeyParam,
+    oidcConfig,
+    sshPort,
+    routingConfig,
+    applyUpdates = true,
+  } = options;
   const bouncerKey = bouncerKeyParam || '';
   const podmanApiDomain = baseDomain ? `podman-api.${baseDomain}` : '';
   const acmeEmail = baseDomain ? `admin@${baseDomain}` : `admin@${workerName}.local`;
@@ -70,12 +157,6 @@ export function generateProvisioningScript(
     BASE_DOMAIN: baseDomain || '',
     PODMAN_API_DOMAIN: podmanApiDomain,
     WORKER_NAME: workerName,
-    ...(oidcConfig ? {
-      OIDC_PROVIDER_URL: oidcConfig.providerURL,
-      OIDC_CLIENT_ID: oidcConfig.clientID,
-      OIDC_CLIENT_SECRET: oidcConfig.clientSecret,
-      OIDC_ENCRYPTION_KEY: oidcConfig.encryptionKey,
-    } : {}),
   };
 
   // Render config templates with runtime values
@@ -88,7 +169,7 @@ export function generateProvisioningScript(
     : '';
   const crowdsecMiddleware = replacePlaceholders(crowdsecMiddlewareTemplate, templateVars);
   const globalOidcMiddleware = (oidcConfig && baseDomain)
-    ? replacePlaceholders(globalOidcMiddlewareTemplate, templateVars)
+    ? renderGlobalOidcConfig(baseDomain, oidcConfig)
     : '';
 
   // Render scripts/units that need variable substitution
@@ -100,6 +181,12 @@ export function generateProvisioningScript(
     WORKER_NAME: workerName,
     BOUNCER_KEY: bouncerKey,
     BASE_DOMAIN: baseDomain || '',
+    SSH_PORT: String(sshPort && sshPort > 0 ? sshPort : 22),
+    CONFIG_ENDPOINT: routingConfig?.endpoint ?? '',
+    CONFIG_TOKEN: routingConfig?.token ?? '',
+    APPLY_UPDATES: applyUpdates ? '1' : '0',
+    TRAEFIK_IMAGE_VERSION: PLATFORM_IMAGES.traefik.version,
+    CROWDSEC_IMAGE_VERSION: PLATFORM_IMAGES.crowdsec.version,
 
     // Config templates (base64-encoded)
     TRAEFIK_YML_B64: toBase64(traefikYml),
@@ -111,6 +198,7 @@ export function generateProvisioningScript(
     CROWDSEC_APPSEC_ACQUIS_B64: toBase64(crowdsecAppsecAcquisTemplate),
     CROWDSEC_CONFIG_LOCAL_B64: toBase64(crowdsecConfigLocalTemplate),
     REGISTRIES_B64: toBase64(registriesTemplate),
+    UNATTENDED_UPGRADES_B64: toBase64(unattendedUpgradesTemplate),
 
     // Systemd units (base64-encoded)
     PODMAN_API_SOCKET_SERVICE_B64: toBase64(podmanApiSocketUnit),
@@ -123,12 +211,18 @@ export function generateProvisioningScript(
     METRICS_SERVICE_B64: toBase64(metricsUnit),
     METRICS_TIMER_B64: toBase64(metricsTimerUnit),
     METRICS_HTTP_SERVICE_B64: toBase64(metricsHttpUnit),
+    TRAEFIK_CONFIG_SERVICE_B64: toBase64(traefikConfigUnit),
+    TRAEFIK_CONFIG_TIMER_B64: toBase64(traefikConfigTimerUnit),
+    UPDATES_SERVICE_B64: toBase64(updatesUnit),
+    UPDATES_TIMER_B64: toBase64(updatesTimerUnit),
 
     // Helper scripts (base64-encoded)
     CROWDSEC_REGISTER_SCRIPT_B64: toBase64(crowdsecRegister),
     NETAVARK_CLEANUP_SCRIPT_B64: toBase64(netavarkCleanupSh),
     METRICS_SCRIPT_B64: toBase64(metricsSh),
     METRICS_HTTP_SCRIPT_B64: toBase64(metricsHttpSh),
+    TRAEFIK_CONFIG_SCRIPT_B64: toBase64(traefikConfigSh),
+    UPDATES_SCRIPT_B64: toBase64(updatesSh),
   };
 
   return replacePlaceholders(provisionShTemplate, provisionVars);
@@ -144,15 +238,26 @@ export interface AppMiddlewareOptions {
   rateLimitAvg?: number;      // requests/second average (Traefik rateLimit)
   rateLimitBurst?: number;    // max burst size
   authType?: 'none' | 'oidc';
-  authConfig?: {              // OIDC provider settings
+  authConfig?: {              // Per-app OIDC provider settings
     providerURL: string;      // e.g. https://accounts.google.com
     clientID: string;
     clientSecret: string;
+    /** Plugin `Secret` — must be exactly 32 characters. */
     sessionEncryptionKey: string;
-    callbackURL?: string;     // default: /oauth2/callback
+    /**
+     * Callback path on the application's own host.  Per-app OIDC deliberately
+     * does *not* use the worker's shared `auth.<base>` callback: that host
+     * carries the global middleware and a different IdP client.
+     */
+    callbackURL?: string;     // default: /oidc/callback
+    /**
+     * Not supported by the plugin — `AssertClaims` matches claim values by
+     * exact string equality, with no suffix or pattern matching.  Deploys that
+     * set this are rejected rather than silently losing the restriction.
+     */
     allowedUserDomains?: string[];
-    allowedUsers?: string[];
-    excludedURLs?: string[];
+    allowedUsers?: string[];  // → Authorization.AssertClaims on the `email` claim
+    excludedURLs?: string[];  // → BypassAuthenticationRule (PathPrefix)
     scopes?: string[];
   };
   healthCheckPath?: string;   // Traefik health check endpoint, e.g. /health
@@ -167,7 +272,7 @@ export function generateTraefikLabelsForApp(
   middlewareOpts?: AppMiddlewareOptions,
   globalOidcEnabled: boolean = false
 ): Record<string, string> {
-  const safeName = appName.replace(/[^a-zA-Z0-9-]/g, '-');
+  const safeName = routerName(appName);
 
   // Build middleware chain: crowdsec first, then security headers
   const middlewares: string[] = ['crowdsec@file', 'security-headers@file'];
@@ -211,38 +316,50 @@ export function generateTraefikLabelsForApp(
     middlewares.push('global-oidc@file');
   }
 
-  // Per-app OIDC auth (traefik-oidc plugin)
+  // Per-app OIDC auth (sevensolutions/traefik-oidc-auth plugin).
+  //
+  // Unlike the worker-global middleware this uses a *relative* CallbackUri, so
+  // the plugin intercepts /oidc/callback on the application's own host.  The
+  // shared auth.<base> host belongs to the global middleware and a different
+  // IdP client registration.
   if (middlewareOpts?.authType === 'oidc' && middlewareOpts.authConfig) {
     const oidcName = `${safeName}-oidc`;
     const cfg = middlewareOpts.authConfig;
-    labels[`traefik.http.middlewares.${oidcName}.plugin.traefikoidc.providerURL`] = cfg.providerURL;
-    labels[`traefik.http.middlewares.${oidcName}.plugin.traefikoidc.clientID`] = cfg.clientID;
-    labels[`traefik.http.middlewares.${oidcName}.plugin.traefikoidc.clientSecret`] = cfg.clientSecret;
-    labels[`traefik.http.middlewares.${oidcName}.plugin.traefikoidc.sessionEncryptionKey`] = cfg.sessionEncryptionKey;
-    labels[`traefik.http.middlewares.${oidcName}.plugin.traefikoidc.callbackURL`] = cfg.callbackURL || '/oauth2/callback';
-    labels[`traefik.http.middlewares.${oidcName}.plugin.traefikoidc.forceHTTPS`] = 'true';
-    labels[`traefik.http.middlewares.${oidcName}.plugin.traefikoidc.enablePKCE`] = 'true';
-    labels[`traefik.http.middlewares.${oidcName}.plugin.traefikoidc.logLevel`] = 'info';
-    if (cfg.scopes?.length) {
-      cfg.scopes.forEach((scope, i) => {
-        labels[`traefik.http.middlewares.${oidcName}.plugin.traefikoidc.scopes[${i}]`] = scope;
-      });
-    }
-    if (cfg.allowedUserDomains?.length) {
-      cfg.allowedUserDomains.forEach((d, i) => {
-        labels[`traefik.http.middlewares.${oidcName}.plugin.traefikoidc.allowedUserDomains[${i}]`] = d;
-      });
-    }
+    const p = `traefik.http.middlewares.${oidcName}.plugin.traefik-oidc-auth`;
+
+    labels[`${p}.LogLevel`] = 'INFO';
+    labels[`${p}.Secret`] = cfg.sessionEncryptionKey;
+    labels[`${p}.Provider.Url`] = cfg.providerURL;
+    labels[`${p}.Provider.ClientId`] = cfg.clientID;
+    labels[`${p}.Provider.ClientSecret`] = cfg.clientSecret;
+    labels[`${p}.Provider.UsePkce`] = 'true';
+    labels[`${p}.CallbackUri`] = cfg.callbackURL || OIDC_CALLBACK_PATH;
+    labels[`${p}.SessionCookie.Secure`] = 'true';
+    labels[`${p}.SessionCookie.HttpOnly`] = 'true';
+    labels[`${p}.SessionCookie.SameSite`] = 'lax';
+
+    const scopes = cfg.scopes?.length ? cfg.scopes : ['openid', 'profile', 'email'];
+    scopes.forEach((scope, i) => {
+      labels[`${p}.Scopes[${i}]`] = scope;
+    });
+
+    // Claim assertions are only re-evaluated per request when asked; without
+    // this a session minted before a claim changed keeps its access.
+    labels[`${p}.Authorization.CheckOnEveryRequest`] = 'true';
     if (cfg.allowedUsers?.length) {
+      labels[`${p}.Authorization.AssertClaims[0].Name`] = 'email';
       cfg.allowedUsers.forEach((u, i) => {
-        labels[`traefik.http.middlewares.${oidcName}.plugin.traefikoidc.allowedUsers[${i}]`] = u;
+        labels[`${p}.Authorization.AssertClaims[0].AnyOf[${i}]`] = u;
       });
     }
+
+    // excludedURLs are path prefixes; the plugin takes a single Traefik-style rule.
     if (cfg.excludedURLs?.length) {
-      cfg.excludedURLs.forEach((p, i) => {
-        labels[`traefik.http.middlewares.${oidcName}.plugin.traefikoidc.excludedURLs[${i}]`] = p;
-      });
+      labels[`${p}.BypassAuthenticationRule`] = cfg.excludedURLs
+        .map((path) => `PathPrefix(\`${path}\`)`)
+        .join(' || ');
     }
+
     middlewares.push(`${oidcName}@docker`);
   }
 
@@ -263,87 +380,4 @@ export function generateTraefikLabelsForApp(
   }
 
   return labels;
-}
-
-export function generateTraefikLabelsForApps(
-  baseDomain: string,
-  apps: Array<{ name: string; subdomain: string; port: number; enableWs?: boolean }>
-): Record<string, string> {
-  const allLabels: Record<string, string> = {};
-  const globalOidcEnabled = !!(env.OIDC_PROVIDER_URL && env.OIDC_CLIENT_ID && env.OIDC_CLIENT_SECRET && baseDomain);
-  for (const app of apps) {
-    const fullDomain = app.subdomain + '.' + baseDomain;
-    const labels = generateTraefikLabelsForApp(app.name, fullDomain, app.port, app.enableWs, undefined, globalOidcEnabled);
-    Object.assign(allLabels, labels);
-  }
-  return allLabels;
-}
-
-export function generateTraefikConfig(
-  baseDomain: string,
-  apps: Array<{ subdomain: string; port: number; enableWs?: boolean }>
-): string {
-  const routers = apps.map(app => {
-    const fullDomain = app.subdomain + '.' + baseDomain;
-    return `
-    ${app.subdomain}-secure:
-      rule: "Host(\`${fullDomain}\`)"
-      entrypoints:
-        - "websecure"
-      tls:
-        certResolver: letsencrypt
-      middlewares:
-        - crowdsec
-        - security-headers
-      service: "${app.subdomain}"`;
-  }).join('\n');
-
-  const services = apps.map(app => `
-    ${app.subdomain}:
-      loadBalancer:
-        servers:
-          - url: "http://127.0.0.1:${app.port}"`).join('\n');
-
-  return `http:
-  routers:
-${routers}
-
-  services:
-${services}`;
-}
-
-export function generateCaddyfile(
-  baseDomain: string,
-  apps: Array<{ subdomain: string; port: number; enableWs?: boolean }>
-): string {
-  const appBlocks = apps.map(app => {
-    const fullDomain = app.subdomain + '.' + baseDomain;
-    const websocketDirectives = app.enableWs ? `
-    @websocket {
-        header Connection *Upgrade*
-        header Upgrade websocket
-    }
-    reverse_proxy @websocket localhost:${app.port}
-` : '';
-    return `${fullDomain} {
-    encode zstd gzip
-    ${websocketDirectives}
-    reverse_proxy localhost:${app.port}
-}`;
-  }).join('\n\n');
-
-  return `{
-    admin off
-    auto_https off
-}
-
-:443 {
-    handle /health {
-        respond "OK" 200
-    }
-    respond "Not configured" 404
-}
-
-${appBlocks}
-`;
 }

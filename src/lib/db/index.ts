@@ -228,6 +228,24 @@ try {
   console.error('[db] Could not enforce unique team memberships:', e);
 }
 
+// Enforce one application per hostname.  Traefik routes by Host, so two
+// applications claiming the same domain produce two routers with an identical
+// rule and requests land on whichever Traefik happens to pick.  The index is
+// partial because `domain` is nullable (workers without a base domain).
+// It is best-effort: if pre-existing rows already collide the CREATE fails and
+// the application-level checks in $lib/server/domains still apply.
+try {
+  sqlite.run(`
+    CREATE UNIQUE INDEX IF NOT EXISTS applications_domain_unique
+      ON applications (domain) WHERE domain IS NOT NULL;
+  `);
+} catch (e) {
+  console.error(
+    '[db] Could not enforce unique application domains — resolve duplicate ' +
+    'applications.domain values and restart:', e
+  );
+}
+
 // Add description column to applications if it doesn't exist
 try {
   sqlite.run(`ALTER TABLE applications ADD COLUMN description TEXT;`);
@@ -249,6 +267,12 @@ for (const col of [
   `ALTER TABLE workers ADD COLUMN oidc_client_id TEXT;`,
   `ALTER TABLE workers ADD COLUMN oidc_client_secret TEXT;`,
   `ALTER TABLE workers ADD COLUMN oidc_encryption_key TEXT;`,
+  `ALTER TABLE workers ADD COLUMN oidc_applied_at INTEGER;`,
+  `ALTER TABLE workers ADD COLUMN routing_mode TEXT NOT NULL DEFAULT 'labels';`,
+  `ALTER TABLE workers ADD COLUMN config_token TEXT;`,
+  `ALTER TABLE workers ADD COLUMN config_fetched_at INTEGER;`,
+  `ALTER TABLE containers ADD COLUMN domain TEXT;`,
+  `ALTER TABLE containers ADD COLUMN router_name TEXT;`,
 ]) {
   try { sqlite.run(col); } catch { /* Column already exists */ }
 }
@@ -306,6 +330,7 @@ sqlite.run(`
     application_id TEXT NOT NULL REFERENCES applications(id),
     version INTEGER NOT NULL,
     manifest TEXT, environment TEXT, volumes TEXT, image TEXT,
+    image_digest TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     deployed_by TEXT REFERENCES users(id),
     error_message TEXT,
@@ -430,7 +455,10 @@ sqlite.run(`
     containers_running INTEGER,
     containers_total INTEGER,
     images_count INTEGER,
-    volumes_count INTEGER
+    volumes_count INTEGER,
+    updates_pending INTEGER,
+    updates_security INTEGER,
+    reboot_required INTEGER
   );
 
   CREATE INDEX IF NOT EXISTS worker_metrics_worker_collected_idx
@@ -462,12 +490,28 @@ sqlite.run(`
     value TEXT NOT NULL,
     description TEXT,
     scope TEXT NOT NULL DEFAULT 'team',
+    delivery_mode TEXT NOT NULL DEFAULT 'env',
     team_id TEXT REFERENCES teams(id),
     created_by TEXT NOT NULL REFERENCES users(id),
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   );
 `);
+
+// Columns added to tables that already existed on deployed control planes.
+// These run *after* the CREATE TABLE block above — an ALTER against a table
+// that has not been created yet fails silently here and would then be missed
+// entirely, because CREATE TABLE IF NOT EXISTS makes the new column only on a
+// database that never had the table.
+for (const col of [
+  `ALTER TABLE deployments ADD COLUMN image_digest TEXT;`,
+  `ALTER TABLE worker_metrics ADD COLUMN updates_pending INTEGER;`,
+  `ALTER TABLE worker_metrics ADD COLUMN updates_security INTEGER;`,
+  `ALTER TABLE worker_metrics ADD COLUMN reboot_required INTEGER;`,
+  `ALTER TABLE secrets ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'env';`,
+]) {
+  try { sqlite.run(col); } catch { /* Column already exists */ }
+}
 
 const db = drizzle(sqlite);
 
@@ -515,12 +559,16 @@ import { workers as _workersTable, users as _usersTable } from './schema';
 /**
  * Worker columns safe to serialise to the browser.
  * Excludes: podmanCaCert, podmanClientCert, podmanClientKey,
- *           crowdsecBouncerKey, oidcClientSecret, oidcEncryptionKey.
+ *           crowdsecBouncerKey, oidcClientSecret, oidcEncryptionKey, configToken.
+ *
+ * routingMode and configFetchedAt are deliberately included — the worker page
+ * shows both.
  */
 export const safeWorkerColumns = (() => {
   const {
     podmanCaCert: _a, podmanClientCert: _b, podmanClientKey: _c,
     crowdsecBouncerKey: _d, oidcClientSecret: _e, oidcEncryptionKey: _f,
+    configToken: _g,
     ...cols
   } = getTableColumns(_workersTable);
   return cols;

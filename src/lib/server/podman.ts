@@ -13,6 +13,17 @@ function resolveCert(value: string): string | Buffer {
   if (value.trim().startsWith('-----')) {
     return Buffer.from(value);   // inline PEM content
   }
+  // A caller that forgot to decryptField() lands here with `iv:tag:ciphertext`,
+  // which used to be handed to readFileSync and surfaced as a baffling
+  // "ENOENT: no such file or directory, open '0478930...'". Say what actually
+  // went wrong instead.
+  if (!value.startsWith('/') && !value.startsWith('.') && !/^[a-zA-Z]:[\\/]/.test(value)) {
+    throw new Error(
+      'Podman client credential is neither PEM content nor a file path. ' +
+        'Stored credentials are encrypted at rest — build the client with getRestPodmanClient(), ' +
+        'which decrypts them.',
+    );
+  }
   return readFileSync(value);    // file path (legacy/dev usage)
 }
 
@@ -69,7 +80,7 @@ export interface ContainerInspect {
     RestartPolicy?: {
       Name: string;
     };
-    PortBindings?: Record<string, Array<{ HostPort: string }>>;
+    PortBindings?: Record<string, Array<{ HostIp?: string; HostPort: string }>>;
     Binds?: string[];
     Memory?: number;
     CpuPeriod?: number;
@@ -141,6 +152,33 @@ export interface ImageInspect {
     Entrypoint?: string[];
     WorkingDir?: string;
   };
+}
+
+/**
+ * A live exec session: writes are stdin, callbacks are output.
+ *
+ * Deliberately not an EventEmitter or a Duplex — the two consumers (the UI
+ * terminal and `kubectl exec`) each need exactly these five operations, and a
+ * narrow surface is what lets the TTY and multiplexed cases hide behind one
+ * shape.
+ */
+export interface ExecStream {
+  execId: string;
+  /**
+   * False when the stream was opened without a hijack, which happens when the
+   * mTLS proxy in front of the Podman API refuses the upgrade. Output still
+   * flows; `write` is a no-op. Callers that need an interactive session must
+   * check this and tell the user, rather than swallowing their keystrokes.
+   */
+  stdinAvailable: boolean;
+  write: (data: Buffer | string) => void;
+  close: () => void;
+  onStdout: (fn: (data: Buffer) => void) => void;
+  /** Never called in TTY mode: the pty merges the streams before we see them. */
+  onStderr: (fn: (data: Buffer) => void) => void;
+  onEnd: (fn: () => void) => void;
+  /** Exit status, once the command has finished. */
+  inspect: () => Promise<{ exitCode: number; running: boolean }>;
 }
 
 export interface ImageHistoryEntry {
@@ -265,6 +303,60 @@ export class PodmanClient {
       });
       req.on('error', reject);
       if (body) req.write(body);
+      req.end();
+    });
+  }
+
+  /**
+   * Send a non-JSON body (a tar archive) and ignore the response body.
+   *
+   * `request` assumes a JSON request and response; secret material goes over
+   * this path, so it is a separate method rather than a widened one — nothing
+   * here ever stringifies the payload into a log line.
+   */
+  private async requestBinary(
+    path: string,
+    method: string,
+    body: Buffer,
+    contentType = 'application/x-tar',
+  ): Promise<void> {
+    const url = `${this.baseUrl}${path}`;
+    const nodeUrl = new URL(url);
+    const agent = this.getAgent(url);
+
+    return new Promise<void>((resolve, reject) => {
+      const reqModule = nodeUrl.protocol === 'https:' ? https : http;
+      const req = reqModule.request(
+        {
+          hostname: nodeUrl.hostname,
+          port: nodeUrl.port || (nodeUrl.protocol === 'https:' ? 443 : 80),
+          path: nodeUrl.pathname + nodeUrl.search,
+          method,
+          headers: {
+            'Content-Type': contentType,
+            'Content-Length': body.length,
+          },
+          agent,
+          timeout: 30_000,
+        },
+        (res) => {
+          let data = '';
+          res.on('data', (chunk) => { data += chunk; });
+          res.on('end', () => {
+            if (res.statusCode && res.statusCode >= 400) {
+              reject(new Error(`Podman API error: ${res.statusCode} - ${data}`));
+              return;
+            }
+            resolve();
+          });
+        },
+      );
+
+      req.on('timeout', () => {
+        req.destroy(new Error(`Podman API request timed out: ${method} ${path}`));
+      });
+      req.on('error', reject);
+      req.write(body);
       req.end();
     });
   }
@@ -415,13 +507,31 @@ export class PodmanClient {
     };
     networkMode?: string;
     networkAliases?: string[];
+    /** Mount point → mount options, e.g. `{'/run/secrets': 'rw,mode=0700'}`. */
+    tmpfs?: Record<string, string>;
   }): Promise<{ Id: string; Warnings: string[] }> {
     const resolvedImage = this.resolveImageName(config.image);
-    
+
     try {
       await this.pullImage(resolvedImage);
     } catch (e) {
-      console.warn(`Failed to pull image ${resolvedImage}:`, e);
+      // A failed pull is survivable only if the image is already on the worker.
+      // It matters most for digest references: a rollback asks for specific
+      // bytes, and quietly running something else — or failing later with
+      // podman's own opaque error — is exactly what pinning was meant to stop.
+      const present = await this.getImageJson(resolvedImage).then(() => true, () => false);
+      if (!present) {
+        const byDigest = resolvedImage.includes('@sha256:');
+        throw new Error(
+          byDigest
+            ? `Image ${resolvedImage} could not be pulled and is not present on this worker. ` +
+              `That digest may have been pruned from the registry or the tag deleted; ` +
+              `the exact bytes this deployment recorded are no longer available.`
+            : `Image ${resolvedImage} could not be pulled and is not present on this worker: ` +
+              `${(e as Error)?.message ?? e}`,
+        );
+      }
+      console.warn(`Failed to pull image ${resolvedImage}, using the copy already on the worker:`, e);
     }
 
     const containerConfig: any = {
@@ -465,7 +575,11 @@ export class PodmanClient {
     if (config.binds) {
       containerConfig.HostConfig.Binds = config.binds;
     }
-    
+
+    if (config.tmpfs && Object.keys(config.tmpfs).length > 0) {
+      containerConfig.HostConfig.Tmpfs = config.tmpfs;
+    }
+
     if (config.memory !== undefined) {
       containerConfig.HostConfig.Memory = config.memory;
     }
@@ -485,6 +599,12 @@ export class PodmanClient {
       for (const [containerPort, bindings] of Object.entries(config.ports)) {
         containerConfig.ExposedPorts[containerPort] = {};
         containerConfig.HostConfig.PortBindings[containerPort] = bindings.map(b => ({
+          // Loopback only. Podman defaults an omitted HostIp to 0.0.0.0, which
+          // published every application straight onto the worker's public IP at
+          // a random high port — bypassing Traefik, CrowdSec and OIDC entirely.
+          // Traefik runs with host networking and proxies to 127.0.0.1:<port>,
+          // so it still reaches them.
+          HostIp: '127.0.0.1',
           HostPort: b.hostPort,
         }));
       }
@@ -501,6 +621,26 @@ export class PodmanClient {
 
   async startContainer(id: string): Promise<void> {
     await this.request(`/containers/${id}/start`, { method: 'POST' });
+  }
+
+  /**
+   * Extract a tar archive into a container's filesystem.
+   *
+   * Used to deliver file-mode secrets before the container starts. The archive
+   * is built in memory and never touches the control plane's disk.
+   *
+   * Podman mounts the container's filesystem to service this, tmpfs mounts
+   * included, so an upload to a not-yet-started container lands *in* the tmpfs
+   * rather than in the image layer underneath it — verified against Podman
+   * 4.9.3. That is what makes secret files possible without either running a
+   * command in the container or giving up the tmpfs.
+   */
+  async putArchive(id: string, destPath: string, archive: Buffer): Promise<void> {
+    await this.requestBinary(
+      `/containers/${id}/archive?path=${encodeURIComponent(destPath)}`,
+      'PUT',
+      archive,
+    );
   }
 
   async stopContainer(id: string, timeout: number = 10): Promise<void> {
@@ -573,6 +713,20 @@ export class PodmanClient {
   }
 
   async pullImage(name: string, tag: string = 'latest'): Promise<void> {
+    // A digest reference goes as fromImage + tag=sha256:… rather than one
+    // combined string: `fromImage=repo@sha256:…` is accepted inconsistently,
+    // and pulling by digest is the whole point of pinned deployments.
+    const at = name.indexOf('@sha256:');
+    if (at !== -1) {
+      const repo = name.slice(0, at);
+      const digest = name.slice(at + 1);
+      await this.request(
+        `/images/create?fromImage=${encodeURIComponent(repo)}&tag=${encodeURIComponent(digest)}`,
+        { method: 'POST' },
+      );
+      return;
+    }
+
     const imageName = name.includes(':') ? name : `${name}:${tag}`;
     await this.request('/images/create?fromImage=' + encodeURIComponent(imageName), {
       method: 'POST',
@@ -759,84 +913,257 @@ export class PodmanClient {
     };
   }
 
-  attachContainer(
+
+  /**
+   * Start an exec and return its live stream.
+   *
+   * This replaces an `execContainer` that opened `GET /containers/{id}/exec` as
+   * a WebSocket, along with a matching `attachContainer`. Podman has no such
+   * endpoints — the request is answered with a plain HTTP status and the
+   * upgrade never happens, which is why the container terminal and
+   * `kubectl exec` both connected and then died with "unexpected EOF". Both
+   * methods are gone rather than left as traps.
+   *
+   * The real protocol is Docker's two-step hijack: create the exec, then POST
+   * to `/exec/{id}/start` asking to upgrade the connection. What comes back is
+   * the raw bidirectional stream — writes are stdin, reads are output.
+   *
+   * ── Why there is a fallback ────────────────────────────────────────────────
+   *
+   * Rudder reaches the Podman API through the worker's Traefik, for mTLS. That
+   * hop proxies WebSocket upgrades but answers a `Upgrade: tcp` hijack with a
+   * plain-text 500 — measured against Traefik 3.7.10 and Podman 4.9.3, with
+   * the identical request succeeding as a normal POST. So the hijack is tried,
+   * and when the proxy refuses it the same exec is started without the upgrade
+   * headers: Podman then streams the output over an ordinary 200 response.
+   *
+   * Output is complete either way. Only stdin needs the hijack, so the
+   * fallback reports `stdinAvailable: false` and callers say so rather than
+   * accepting keystrokes that go nowhere.
+   */
+  async execContainerStream(
     id: string,
-    options: {
-      stream?: boolean;
-      stdin?: boolean;
-      stdout?: boolean;
-      stderr?: boolean;
-    } = {}
-  ): Promise<WebSocket> {
-    const params = new URLSearchParams();
-    if (options.stream !== false) params.append('stream', '1');
-    if (options.stdin !== false) params.append('stdin', '1');
-    if (options.stdout !== false) params.append('stdout', '1');
-    if (options.stderr !== false) params.append('stderr', '1');
+    cmd: string[],
+    options: { tty?: boolean; stdin?: boolean } = {},
+  ): Promise<ExecStream> {
+    const tty = options.tty ?? true;
+    const attachStdin = options.stdin ?? true;
 
-    const wsUrl = `${this.baseUrl.replace('http', 'ws')}/containers/${id}/attach?${params}`;
-    
-    return new Promise((resolve, reject) => {
-      const wsOpts: any = {
-        rejectUnauthorized: false,
+    if (!attachStdin) {
+      // Nothing to hijack for, so skip straight to the path that always works.
+      return this.execStreamNoStdin(id, cmd, tty);
+    }
+
+    const created = await this.request<{ Id: string }>(`/containers/${id}/exec`, {
+      method: 'POST',
+      body: JSON.stringify({
+        AttachStdin: attachStdin,
+        AttachStdout: true,
+        AttachStderr: true,
+        Tty: tty,
+        Cmd: cmd,
+      }),
+    });
+    const execId = created.Id;
+
+    const url = `${this.baseUrl}/exec/${execId}/start`;
+    const nodeUrl = new URL(url);
+    const reqModule = nodeUrl.protocol === 'https:' ? https : http;
+    const body = JSON.stringify({ Detach: false, Tty: tty });
+
+    return new Promise<ExecStream>((resolve, reject) => {
+      const req = reqModule.request({
+        hostname: nodeUrl.hostname,
+        port: nodeUrl.port || (nodeUrl.protocol === 'https:' ? 443 : 80),
+        path: nodeUrl.pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+          Connection: 'Upgrade',
+          Upgrade: 'tcp',
+        },
+        agent: this.getAgent(url),
+      });
+
+      let settled = false;
+      const handlers = {
+        stdout: [] as Array<(d: Buffer) => void>,
+        stderr: [] as Array<(d: Buffer) => void>,
+        end: [] as Array<() => void>,
       };
-      
-      if (this.httpsAgent) {
-        wsOpts.agent = this.httpsAgent;
-        const agentOpts = (this.httpsAgent as any).options;
-        if (agentOpts) {
-          if (agentOpts.cert) wsOpts.cert = agentOpts.cert;
-          if (agentOpts.key) wsOpts.key = agentOpts.key;
-          if (agentOpts.ca) wsOpts.ca = agentOpts.ca;
-        }
-      }
-      
-      const ws = new WebSocket(wsUrl, wsOpts);
 
-      ws.on('open', () => resolve(ws));
-      ws.on('error', (err) => reject(err));
+      const emitEnd = () => {
+        for (const fn of handlers.end.splice(0)) fn();
+      };
+
+      /**
+       * Without a TTY, Docker multiplexes the two streams into frames of
+       * `[stream:1][pad:3][len:4 BE][payload]`. Reassembled here rather than in
+       * the caller: a frame can be split across TCP reads, and treating a
+       * partial header as payload puts binary garbage on the user's terminal.
+       */
+      const makeReader = () => {
+        let buffered = Buffer.alloc(0);
+        return (chunk: Buffer) => {
+          if (tty) {
+            for (const fn of handlers.stdout) fn(chunk);
+            return;
+          }
+          buffered = Buffer.concat([buffered, chunk]);
+          while (buffered.length >= 8) {
+            const size = buffered.readUInt32BE(4);
+            if (buffered.length < 8 + size) break;
+            const streamType = buffered[0];
+            const payload = buffered.subarray(8, 8 + size);
+            buffered = buffered.subarray(8 + size);
+            const target = streamType === 2 ? handlers.stderr : handlers.stdout;
+            for (const fn of target) fn(payload);
+          }
+        };
+      };
+
+      const attach = (socket: import('net').Socket, head: Buffer) => {
+        if (settled) return;
+        settled = true;
+        const read = makeReader();
+        if (head?.length) read(head);
+        socket.on('data', read);
+        socket.on('end', emitEnd);
+        socket.on('close', emitEnd);
+        socket.on('error', emitEnd);
+
+        resolve({
+          execId,
+          stdinAvailable: true,
+          write: (data) => { if (!socket.destroyed) socket.write(data); },
+          close: () => { try { socket.end(); } catch { /* already gone */ } },
+          onStdout: (fn) => handlers.stdout.push(fn),
+          onStderr: (fn) => handlers.stderr.push(fn),
+          onEnd: (fn) => handlers.end.push(fn),
+          inspect: () => this.inspectExec(execId),
+        });
+      };
+
+      // 101: the connection was hijacked, and `socket` is the raw stream.
+      req.on('upgrade', (_res, socket, head) => attach(socket as any, head));
+
+      // Anything that is not a 101 means the upgrade did not happen. The exec
+      // instance created above is still valid but was never started, so it is
+      // abandoned and a fresh one runs without stdin.
+      req.on('response', (res) => {
+        if (settled) return;
+        settled = true;
+        res.resume();
+        this.execStreamNoStdin(id, cmd, tty).then(resolve, reject);
+      });
+
+      req.on('error', (e) => { if (!settled) { settled = true; reject(e); } });
+      req.write(body);
+      req.end();
     });
   }
 
-  async execContainer(
-    id: string,
-    cmd: string[] = ['/bin/sh'],
-    options: {
-      attachStdout?: boolean;
-      attachStderr?: boolean;
-      attachStdin?: boolean;
-      tty?: boolean;
-    } = {}
-  ): Promise<WebSocket> {
-    const params = new URLSearchParams();
-    params.append('cmd', JSON.stringify(cmd));
-    if (options.attachStdout !== false) params.append('stdout', '1');
-    if (options.attachStderr !== false) params.append('stderr', '1');
-    if (options.attachStdin !== false) params.append('stdin', '1');
-    if (options.tty) params.append('tty', '1');
+  /** Exit status of an exec instance; 0 when it cannot be read. */
+  private async inspectExec(execId: string): Promise<{ exitCode: number; running: boolean }> {
+    try {
+      const res = await this.request<{ ExitCode: number | null; Running: boolean }>(
+        `/exec/${execId}/json`,
+      );
+      return { exitCode: res.ExitCode ?? 0, running: !!res.Running };
+    } catch {
+      return { exitCode: 0, running: false };
+    }
+  }
 
-    const wsUrl = `${this.baseUrl.replace('http', 'ws')}/containers/${id}/exec?${params}`;
-    
-    return new Promise((resolve, reject) => {
-      const wsOpts: any = {
-        rejectUnauthorized: false,
-      };
-      
-      if (this.httpsAgent) {
-        wsOpts.agent = this.httpsAgent;
-        // Explicitly pass TLS options for mTLS
-        const agentOpts = (this.httpsAgent as any).options;
-        if (agentOpts) {
-          if (agentOpts.cert) wsOpts.cert = agentOpts.cert;
-          if (agentOpts.key) wsOpts.key = agentOpts.key;
-          if (agentOpts.ca) wsOpts.ca = agentOpts.ca;
-        }
+  /**
+   * Run an exec and stream its output over an ordinary response.
+   *
+   * No hijack, so no stdin — but nothing in the path can refuse it, which is
+   * what makes it the fallback when the mTLS proxy rejects the upgrade.
+   */
+  private async execStreamNoStdin(id: string, cmd: string[], tty: boolean): Promise<ExecStream> {
+    const created = await this.request<{ Id: string }>(`/containers/${id}/exec`, {
+      method: 'POST',
+      body: JSON.stringify({
+        AttachStdin: false,
+        AttachStdout: true,
+        AttachStderr: true,
+        Tty: tty,
+        Cmd: cmd,
+      }),
+    });
+    const execId = created.Id;
+
+    const url = `${this.baseUrl}/exec/${execId}/start`;
+    const nodeUrl = new URL(url);
+    const reqModule = nodeUrl.protocol === 'https:' ? https : http;
+    const body = JSON.stringify({ Detach: false, Tty: tty });
+
+    const handlers = {
+      stdout: [] as Array<(d: Buffer) => void>,
+      stderr: [] as Array<(d: Buffer) => void>,
+      end: [] as Array<() => void>,
+    };
+    const emitEnd = () => { for (const fn of handlers.end.splice(0)) fn(); };
+
+    let buffered = Buffer.alloc(0);
+    const read = (chunk: Buffer) => {
+      if (tty) {
+        for (const fn of handlers.stdout) fn(chunk);
+        return;
       }
-      
-      const ws = new WebSocket(wsUrl, wsOpts);
+      buffered = Buffer.concat([buffered, chunk]);
+      while (buffered.length >= 8) {
+        const size = buffered.readUInt32BE(4);
+        if (buffered.length < 8 + size) break;
+        const streamType = buffered[0];
+        const payload = buffered.subarray(8, 8 + size);
+        buffered = buffered.subarray(8 + size);
+        for (const fn of streamType === 2 ? handlers.stderr : handlers.stdout) fn(payload);
+      }
+    };
 
-      ws.on('open', () => resolve(ws));
-      ws.on('error', (err) => reject(err));
+    return new Promise<ExecStream>((resolve, reject) => {
+      const req = reqModule.request({
+        hostname: nodeUrl.hostname,
+        port: nodeUrl.port || (nodeUrl.protocol === 'https:' ? 443 : 80),
+        path: nodeUrl.pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        },
+        agent: this.getAgent(url),
+      });
+
+      req.on('response', (res) => {
+        if (res.statusCode && res.statusCode >= 400) {
+          let text = '';
+          res.on('data', (c) => { text += c; });
+          res.on('end', () => reject(new Error(`exec start failed: ${res.statusCode} ${text}`)));
+          return;
+        }
+
+        res.on('data', read);
+        res.on('end', emitEnd);
+        res.on('error', emitEnd);
+
+        resolve({
+          execId,
+          stdinAvailable: false,
+          write: () => { /* no stdin on this path — callers check stdinAvailable */ },
+          close: () => { try { res.destroy(); } catch { /* already gone */ } },
+          onStdout: (fn) => handlers.stdout.push(fn),
+          onStderr: (fn) => handlers.stderr.push(fn),
+          onEnd: (fn) => handlers.end.push(fn),
+          inspect: () => this.inspectExec(execId),
+        });
+      });
+
+      req.on('error', reject);
+      req.write(body);
+      req.end();
     });
   }
 
@@ -923,6 +1250,27 @@ export class PodmanClient {
 
   async getImageJson(name: string): Promise<ImageInspect> {
     return this.request<ImageInspect>(`/images/${encodeURIComponent(name)}/json`);
+  }
+
+  /**
+   * The repo digest of a locally present image — `docker.io/library/nginx@sha256:…`.
+   *
+   * This is what makes a deployment record mean something: the tag says
+   * `nginx:latest`, the digest says which bytes that was. Call it after a pull,
+   * so the digest is the one this deploy fetched.
+   *
+   * Returns null when the image carries no repo digest at all: built on the
+   * worker, loaded from an archive, or a registry that did not return one.
+   * Callers fall back to the tag and should say so rather than pretend.
+   */
+  async resolveImageDigest(name: string): Promise<string | null> {
+    try {
+      const inspect = await this.getImageJson(name);
+      const digest = inspect.RepoDigests?.[0];
+      return digest && digest.includes('@sha256:') ? digest : null;
+    } catch {
+      return null;
+    }
   }
 
   async getImageHistory(name: string): Promise<ImageHistoryEntry[]> {
@@ -1063,7 +1411,8 @@ export class SSHPodmanClient {
         // Strip /tcp or /udp suffix from container port
         const port = containerPort.replace(/\/(tcp|udp)$/i, '');
         for (const binding of bindings) {
-          cmd += ` -p ${binding.hostPort}:${port}`;
+          // Loopback only — see the REST client's PortBindings for why.
+          cmd += ` -p 127.0.0.1:${binding.hostPort}:${port}`;
         }
       }
     }

@@ -50,33 +50,27 @@ export async function POST({ params, request, cookies }: { params: { id: string 
   }
 }
 
-// Handle WebSocket upgrade for interactive terminal
-export async function GET({ params, request, cookies }: { params: { id: string }; request: Request; cookies: any }) {
-  let worker;
+/**
+ * Interactive terminals do not run through this route.
+ *
+ * This handler used to return a bare 101, which SvelteKit passes through as an
+ * ordinary response — no upgrade ever happened and the socket was never
+ * connected. The working path is `/api/terminal/ws`, whose upgrade is handled
+ * on the HTTP server; see `src/lib/server/ws/registry.ts`.
+ */
+export async function GET({ params, cookies }: { params: { id: string }; cookies: any }) {
   try {
-    ({ worker } = await requireContainerAccess(cookies, params.id));
+    await requireContainerAccess(cookies, params.id);
   } catch (error) {
     return authErrorResponse(error);
   }
 
-  // Check if this is a WebSocket upgrade request
-  const upgradeHeader = request.headers.get('upgrade');
-  if (upgradeHeader !== 'websocket') {
-    return json({ error: 'WebSocket upgrade required' }, { status: 400 });
-  }
-
-  try {
-    getRestPodmanClient(worker).destroy();
-  } catch (e: any) {
-    return json({ error: `Client creation failed: ${e.message}` }, { status: 400 });
-  }
-
-  // Return 101 Switching Protocols - actual WebSocket handling will be done by SvelteKit
-  return new Response(null, {
-    status: 101,
-    headers: {
-      'Upgrade': 'websocket',
-      'Connection': 'Upgrade',
+  return json(
+    {
+      error:
+        'Interactive terminals use /api/terminal/ws. Obtain a token from ' +
+        'POST /api/terminal/token and connect there.',
     },
-  });
+    { status: 410 },
+  );
 }

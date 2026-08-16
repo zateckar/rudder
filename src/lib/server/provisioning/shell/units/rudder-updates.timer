@@ -1,0 +1,13 @@
+[Unit]
+Description=Scan for pending package updates once a day
+[Timer]
+# Five minutes after boot so a freshly provisioned worker reports its patch
+# state without waiting a day, then daily. RandomizedDelaySec keeps a fleet
+# from hitting the mirrors in lockstep.
+OnBootSec=5min
+OnUnitActiveSec=1d
+RandomizedDelaySec=30min
+AccuracySec=1min
+Persistent=true
+[Install]
+WantedBy=timers.target

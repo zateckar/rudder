@@ -86,6 +86,13 @@ export const schemas = {
   provisionWorker: z.object({
     workerId: z.string().uuid(),
     sshPrivateKey: z.string().min(1).max(50000),
+    /**
+     * Install pending host package updates as part of this run. Defaults to
+     * true so re-provisioning is a patching event; callers with their own
+     * patch pipeline, or in a hurry, can turn it off and still get the count
+     * reported in the log.
+     */
+    applyUpdates: z.boolean().default(true),
   }),
 
   terminalCommand: z.object({
@@ -125,6 +132,13 @@ export const schemas = {
     value: z.string().min(1).max(10000),
     description: z.string().max(500).optional(),
     scope: z.enum(['global', 'team']).default('team'),
+    /**
+     * `env` keeps the historical behaviour. `file` writes the value to
+     * /run/secrets/<name> instead, where it is absent from `podman inspect`
+     * and from the process environment. Defaults to `env` because switching
+     * delivery under a running application breaks it.
+     */
+    deliveryMode: z.enum(['env', 'file']).default('env'),
     teamId: z.string().uuid().optional(),
   }),
 

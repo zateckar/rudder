@@ -3,6 +3,7 @@ import { db } from '$lib/db';
 import { applications, workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { authErrorResponse, requireTeamMember } from '$lib/server/auth';
+import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
 
 export async function POST({ request, cookies }: { request: Request; cookies: any }) {
   const body = await request.json();
@@ -38,7 +39,11 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
     return json({ error: 'Worker not found' }, { status: 404 });
   }
 
-  const domain = worker.baseDomain ? `${name}.${worker.baseDomain}` : null;
+  const domain = buildAppDomain(name, worker.baseDomain);
+  const domainConflict = await assertDomainAvailable(domain);
+  if (domainConflict) {
+    return json({ error: domainConflict }, { status: 400 });
+  }
 
   // If the imported config has an image-based manifest, update image name for git apps
   let manifest = config.manifest || '';

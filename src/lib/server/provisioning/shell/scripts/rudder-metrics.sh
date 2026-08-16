@@ -33,7 +33,21 @@ disk_percent=$(echo "$disk_percent_raw" | tr -d '%')
 # Network from /proc/net/dev
 read -r net_rx net_tx <<< "$(awk 'NR>2 && $1!~/lo:/{rx+=$2; tx+=$10} END{print rx, tx}' /proc/net/dev)"
 
+# Patch state, produced by the daily rudder-updates.sh scan. Read from cache
+# rather than computed here: `apt-get -s upgrade` takes seconds and contends
+# for the apt lock, which has no business on a 30-second timer.
+#
+# A missing cache omits the fields entirely so the control plane records null.
+# Emitting zeros would claim "fully patched" for a host that was never scanned.
+patch_state=""
+if [ -r /var/lib/rudder/updates.json ]; then
+  cached=$(tr -d '{}\n' < /var/lib/rudder/updates.json)
+  case "$cached" in
+    *updates_pending*) patch_state=",${cached}" ;;
+  esac
+fi
+
 cat > /tmp/rudder-metrics.json << JSONEOF
-{"cpu_percent":${cpu_percent:-0},"cpu_cores":${cpu_cores:-1},"mem_total":${mem_total:-0},"mem_free":${mem_free:-0},"mem_available":${mem_available:-0},"mem_used":${mem_used:-0},"mem_percent":${mem_percent:-0},"disk_total":${disk_total:-0},"disk_used":${disk_used:-0},"disk_available":${disk_available:-0},"disk_percent":${disk_percent:-0},"net_rx_bytes":${net_rx:-0},"net_tx_bytes":${net_tx:-0}}
+{"cpu_percent":${cpu_percent:-0},"cpu_cores":${cpu_cores:-1},"mem_total":${mem_total:-0},"mem_free":${mem_free:-0},"mem_available":${mem_available:-0},"mem_used":${mem_used:-0},"mem_percent":${mem_percent:-0},"disk_total":${disk_total:-0},"disk_used":${disk_used:-0},"disk_available":${disk_available:-0},"disk_percent":${disk_percent:-0},"net_rx_bytes":${net_rx:-0},"net_tx_bytes":${net_tx:-0}${patch_state}}
 JSONEOF
 chmod 644 /tmp/rudder-metrics.json

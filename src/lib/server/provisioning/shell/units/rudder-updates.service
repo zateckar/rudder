@@ -1,0 +1,5 @@
+[Unit]
+Description=Rudder patch-state scan (pending updates, reboot required)
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rudder-updates.sh

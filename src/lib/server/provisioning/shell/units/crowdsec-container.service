@@ -9,7 +9,7 @@ Type=simple
 ExecStartPre=-/usr/bin/podman stop -t 10 crowdsec
 ExecStartPre=-/usr/bin/podman rm -f crowdsec
 ExecStart=/usr/bin/podman run --name crowdsec --network host \
-  -e "COLLECTIONS=crowdsecurity/traefik crowdsecurity/appsec-virtual-patching crowdsecurity/appsec-generic-rules crowdsecurity/base-http-scenarios crowdsecurity/whitelist-good-actors" \
+  -e "COLLECTIONS=crowdsecurity/traefik crowdsecurity/appsec-virtual-patching crowdsecurity/appsec-generic-rules crowdsecurity/appsec-crs crowdsecurity/base-http-scenarios crowdsecurity/whitelist-good-actors" \
   -e CUSTOM_HOSTNAME=crowdsec \
   -e "BOUNCER_KEY_traefik={{BOUNCER_KEY}}" \
   -v /var/log/traefik:/var/log/traefik:ro,z \

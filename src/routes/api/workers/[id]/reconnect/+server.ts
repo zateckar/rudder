@@ -53,13 +53,8 @@ export const POST: RequestHandler = async ({ params, request, cookies }) => {
       status = 'online';
     } else if (worker.podmanApiUrl && worker.podmanCaCert && worker.podmanClientCert && worker.podmanClientKey) {
       // Fall back to Podman REST API with mTLS if credentials are configured
-      const { PodmanClient } = await import('$lib/server/podman');
-      const client = new PodmanClient({
-        apiUrl: worker.podmanApiUrl,
-        caCert: worker.podmanCaCert,
-        clientCert: worker.podmanClientCert,
-        clientKey: worker.podmanClientKey,
-      });
+      const { getRestPodmanClient } = await import('$lib/server/podman-client');
+      const client = getRestPodmanClient(worker);
 
       await client.listContainers();
       status = 'online';

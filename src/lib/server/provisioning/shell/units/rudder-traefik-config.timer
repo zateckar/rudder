@@ -1,0 +1,14 @@
+[Unit]
+Description=Poll the Rudder control plane for routing configuration
+
+[Timer]
+# Early on boot so a worker that rebooted converges before anyone notices, then
+# every 10s. Traefik's own http provider polls at 5s; the extra few seconds buy
+# a configuration that survives a restart.
+OnBootSec=15s
+OnUnitActiveSec=10s
+AccuracySec=1s
+Unit=rudder-traefik-config.service
+
+[Install]
+WantedBy=timers.target

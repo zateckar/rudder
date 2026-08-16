@@ -57,7 +57,35 @@ export const workers = sqliteTable('workers', {
   oidcProviderUrl: text('oidc_provider_url'),
   oidcClientId: text('oidc_client_id'),
   oidcClientSecret: text('oidc_client_secret'),
+  /** Plugin `Secret` (32 chars), encrypted at rest. */
   oidcEncryptionKey: text('oidc_encryption_key'),
+  /**
+   * When the current OIDC config was last written to the worker's Traefik.
+   * Cleared whenever the config changes.  Deploys refuse to attach
+   * `global-oidc@file` while this is null, because a router referencing a
+   * middleware that does not exist on the worker is dropped by Traefik — the
+   * app would 404 rather than prompt for login.
+   */
+  oidcAppliedAt: integer('oidc_applied_at', { mode: 'timestamp' }),
+  /**
+   * Where this worker's Traefik gets its routing configuration.
+   *
+   * `labels` — stamped into container labels at creation time, read by
+   *   Traefik's docker provider. The original design; a routing change needs a
+   *   redeploy.
+   * `http` — generated from this database and fetched by the worker into
+   *   `/etc/traefik/dynamic/routes.yml`, where the file provider picks it up.
+   *
+   * A worker must be wholly in one mode: both providers defining the same
+   * router name would produce two routers with one `Host()` rule and arbitrary
+   * resolution between them. Per-worker so the cutover can be watched on one
+   * machine before the fleet follows.
+   */
+  routingMode: text('routing_mode', { enum: ['labels', 'http'] }).notNull().default('labels'),
+  /** Bearer token the worker presents to the config endpoint, encrypted at rest. */
+  configToken: text('config_token'),
+  /** Last time this worker successfully fetched its routing configuration. */
+  configFetchedAt: integer('config_fetched_at', { mode: 'timestamp' }),
 });
 
 export const applications = sqliteTable('applications', {
@@ -116,6 +144,19 @@ export const containers = sqliteTable('containers', {
   status: text('status').notNull(),
   ports: text('ports'),
   exposedPort: integer('exposed_port'),
+  /**
+   * Hostname this container is routed at, and the Traefik router/service name
+   * carrying it. Written at deploy time by every path (single, compose, k8s).
+   *
+   * Routing configuration for `http`-mode workers is generated from these two
+   * columns plus the application row: the hostname is a property of what was
+   * deployed, while rate limits, auth mode and middleware chains come from the
+   * application and are therefore editable without recreating anything.
+   * Replicas of one application share a domain and router name, which is what
+   * lets the generator emit a single service with several servers.
+   */
+  domain: text('domain'),
+  routerName: text('router_name'),
   labels: text('labels'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
@@ -160,6 +201,18 @@ export const secrets = sqliteTable('secrets', {
   value: text('value').notNull(),
   description: text('description'),
   scope: text('scope', { enum: ['global', 'team'] }).notNull().default('team'),
+  /**
+   * How the value reaches the container.
+   *
+   * `env` — an environment variable. Visible in `podman inspect`, in
+   *   `/proc/<pid>/environ` for anything running in the container, and to every
+   *   child process. The historical behaviour, and still the default because
+   *   most images read their configuration this way.
+   * `file` — written to `/run/secrets/<name>` on a tmpfs, mode 0400, following
+   *   the Docker/Podman secrets convention that many images already support.
+   *   Absent from `podman inspect` and from the process environment.
+   */
+  deliveryMode: text('delivery_mode', { enum: ['env', 'file'] }).notNull().default('env'),
   teamId: text('team_id').references(() => teams.id),
   createdBy: text('created_by').notNull().references(() => users.id),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
@@ -227,6 +280,17 @@ export const workerMetrics = sqliteTable('worker_metrics', {
   containersTotal: integer('containers_total'),
   imagesCount: integer('images_count'),
   volumesCount: integer('volumes_count'),
+  /**
+   * Host patch state, scanned daily on the worker and cached — `apt-get -s
+   * upgrade` is far too slow for the collection interval.
+   *
+   * Null means "not reported": a worker provisioned before this existed, or
+   * one whose scan has never succeeded. Deliberately distinct from 0, which
+   * claims the host is fully patched.
+   */
+  updatesPending: integer('updates_pending'),
+  updatesSecurity: integer('updates_security'),
+  rebootRequired: integer('reboot_required'),
 });
 
 /** Worker availability pings */
@@ -248,6 +312,17 @@ export const deployments = sqliteTable('deployments', {
   environment: text('environment'),
   volumes: text('volumes'),
   image: text('image'),
+  /**
+   * The image digest this deployment actually ran, resolved from the registry
+   * after the pull.
+   *
+   * `image` is the tag as written — `nginx:latest` — which is what the user
+   * recognises but says nothing about which bytes ran. Rollback recreates
+   * containers from the digest, so it restores what was running rather than
+   * whatever the tag points at now. Null for deployments recorded before this
+   * existed, and for images the registry reports no digest for.
+   */
+  imageDigest: text('image_digest'),
   status: text('status', { enum: ['pending', 'running', 'succeeded', 'failed', 'rolled_back'] }).notNull().default('pending'),
   deployedBy: text('deployed_by').references(() => users.id),
   errorMessage: text('error_message'),

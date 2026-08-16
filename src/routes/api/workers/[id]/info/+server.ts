@@ -3,9 +3,10 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { workers, users, workerPings } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { createPodmanClient } from '$lib/server/podman';
+import { getRestPodmanClient } from '$lib/server/podman-client';
 import { getHostStats } from '$lib/server/host-metrics';
 import { getHostStatsHttp } from '$lib/server/host-metrics-http';
+import { getPlatformVersions } from '$lib/server/platform-versions';
 
 export const POST: RequestHandler = async ({ params, cookies }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -25,16 +26,12 @@ export const POST: RequestHandler = async ({ params, cookies }) => {
     let systemDf: any = null;
     let pingStatus = 'offline';
     let latencyMs: number | null = null;
+    let platform: Awaited<ReturnType<typeof getPlatformVersions>> = [];
 
     const start = Date.now();
 
-    if (worker.podmanApiUrl && worker.podmanCaCert && worker.podmanClientCert && worker.podmanClientKey) {
-      const client = createPodmanClient({
-        apiUrl: worker.podmanApiUrl,
-        caCert: worker.podmanCaCert,
-        clientCert: worker.podmanClientCert,
-        clientKey: worker.podmanClientKey,
-      });
+    if (worker.podmanApiUrl) {
+      const client = getRestPodmanClient(worker);
 
       const ok = await client.ping();
       latencyMs = Date.now() - start;
@@ -43,20 +40,7 @@ export const POST: RequestHandler = async ({ params, cookies }) => {
         pingStatus = 'online';
         try { sysInfo = await client.info(); } catch {}
         try { systemDf = await client.systemDf(); } catch {}
-      }
-
-      client.destroy();
-    } else if (worker.podmanApiUrl) {
-      // Dev/local mode — no mTLS
-      const client = createPodmanClient({ apiUrl: worker.podmanApiUrl });
-
-      const ok = await client.ping();
-      latencyMs = Date.now() - start;
-
-      if (ok) {
-        pingStatus = 'online';
-        try { sysInfo = await client.info(); } catch {}
-        try { systemDf = await client.systemDf(); } catch {}
+        try { platform = await getPlatformVersions(client); } catch {}
       }
 
       client.destroy();
@@ -165,6 +149,14 @@ export const POST: RequestHandler = async ({ params, cookies }) => {
         total: sysInfo?.store?.containerStore?.number ?? null,
       },
       podmanVersion: sysInfo?.version?.Version || sysInfo?.version || null,
+      platform,
+      // Patch state comes from the worker's daily scan via the metrics
+      // endpoint; null throughout when it has never reported one.
+      patch: {
+        updatesPending: hostStats?.updatesPending ?? null,
+        updatesSecurity: hostStats?.updatesSecurity ?? null,
+        rebootRequired: hostStats?.rebootRequired ?? null,
+      },
     });
   } catch (error: any) {
     return json({ error: error.message }, { status: 500 });

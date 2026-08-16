@@ -2,19 +2,43 @@ http:
   middlewares:
     global-oidc:
       plugin:
-        traefikoidc:
-          providerURL: "{{OIDC_PROVIDER_URL}}"
-          clientID: "{{OIDC_CLIENT_ID}}"
-          clientSecret: "{{OIDC_CLIENT_SECRET}}"
-          sessionEncryptionKey: "{{OIDC_ENCRYPTION_KEY}}"
-          callbackURL: "https://auth.{{BASE_DOMAIN}}/oauth2/callback"
-          cookieDomain: ".{{BASE_DOMAIN}}"
-          forceHTTPS: "true"
-          enablePKCE: "true"
-          logLevel: "info"
+        traefik-oidc-auth:
+          LogLevel: INFO
+          # Must be exactly 32 characters — see normalizeOidcSecret() in $lib/server/oidc.
+          Secret: "{{OIDC_SECRET}}"
+          Provider:
+            Url: "{{OIDC_PROVIDER_URL}}"
+            ClientId: "{{OIDC_CLIENT_ID}}"
+            ClientSecret: "{{OIDC_CLIENT_SECRET}}"
+            UsePkce: true
+          Scopes:
+            - openid
+            - profile
+            - email
+          # Absolute callback URL: the plugin intercepts this exact host+path and
+          # always sends it as redirect_uri, so the IdP needs one registration for
+          # every application on this worker.  The original request URL (host and
+          # path) travels in the encrypted OIDC state, so the callback host can
+          # redirect the user back to the app they came from.
+          CallbackUri: "https://auth.{{BASE_DOMAIN}}/oidc/callback"
+          SessionCookie:
+            Domain: ".{{BASE_DOMAIN}}"
+            Path: "/"
+            Secure: true
+            HttpOnly: true
+            SameSite: lax
+          Authorization:
+            # The session cookie is shared across every subdomain, so a session
+            # created for one app is presented to all of them.  Without this,
+            # claims would only ever be checked at the single login that created
+            # the cookie.
+            CheckOnEveryRequest: true
   routers:
+    # The callback host needs a router of its own so Traefik terminates TLS for
+    # it and runs the middleware; the middleware answers the callback before
+    # anything reaches a backend, so the service is never used.
     global-oidc-callback:
-      rule: "Host(`auth.{{BASE_DOMAIN}}`) && Path(`/oauth2/callback`)"
+      rule: "Host(`auth.{{BASE_DOMAIN}}`)"
       entrypoints:
         - websecure
       tls:

@@ -136,6 +136,13 @@ const authentication: Handle = async ({ event, resolve }) => {
 
 export const handle = sequence(securityHeaders, authentication);
 
+// ── WebSocket routes ─────────────────────────────────────────────────────────
+// Registered from inside the app so the handlers share its database connection
+// and Podman clients; the HTTP server (Vite in dev, server.js in production)
+// only dispatches upgrades to them. SvelteKit itself does not serve upgrades —
+// see src/lib/server/ws/registry.ts.
+import '$lib/server/ws/handlers';
+
 // ── Background metrics collection ────────────────────────────────────────────
 // Guard against re-initialization (e.g. HMR hot reloads in dev)
 if (!(globalThis as any).__metricsStarted) {

@@ -6,7 +6,7 @@ Container orchestration platform built with SvelteKit, Drizzle ORM, and SQLite. 
 
 ### Core
 - **Application deployment** -- single container, Docker Compose, and Kubernetes manifests
-- **Worker provisioning** -- automated SSH-based setup of Podman, Traefik, and CrowdSec
+- **Worker provisioning** -- automated SSH-based setup of Podman, Traefik, CrowdSec, and an nftables host firewall
 - **Container management** -- start, stop, restart, recreate, resource limits, scaling (replicas)
 - **Container logs** -- searchable, filterable, downloadable log viewer with line-level highlighting
 - **Container terminal** -- xterm.js WebSocket terminal for container exec and host SSH
@@ -16,18 +16,24 @@ Container orchestration platform built with SvelteKit, Drizzle ORM, and SQLite. 
 
 ### Deployment & CI/CD
 - **Deployment history** -- versioned deployment records with full rollback support
+- **Digest-pinned rollback** -- each deployment records the image digest it actually ran, and rollback recreates containers from that digest rather than re-resolving the tag
 - **Deploy webhooks** -- per-application webhook tokens for GitHub Actions, GitLab CI, etc.
 - **Application scaling** -- run multiple replicas with Traefik load balancing
 - **Application stacks** -- group applications for bulk deploy/stop/restart operations
 - **Config export/import** -- export application configuration as JSON, import on any instance
 
 ### Security
-- **CrowdSec WAF** -- AppSec virtual patching + behavioral IP banning on all workers
+- **CrowdSec WAF** -- AppSec virtual patching inline, OWASP Core Rule Set out-of-band, plus behavioral IP banning on all workers
+- **No WAF bypass** -- application ports bind to 127.0.0.1 and an nftables ruleset limits inbound traffic to SSH and 443, so requests cannot reach an app without passing Traefik
 - **Per-app rate limiting** -- configurable request rate limits via Traefik middleware
-- **Per-app OIDC auth** -- protect applications with OAuth 2.0 / OIDC (with PKCE)
+- **Worker-wide OIDC** -- one identity-provider registration protects every app on a worker, via a shared `auth.<base-domain>/oidc/callback` endpoint (requires a DNS A record for that host)
+- **Per-app OIDC auth** -- protect individual applications with their own OAuth 2.0 / OIDC client (with PKCE)
 - **Security headers** -- HSTS, X-Frame-Options, CSP, Permissions-Policy on all proxied apps
 - **mTLS** -- mutual TLS for Podman API and Traefik dashboard access (required; no plaintext fallback)
 - **Secrets store** -- AES-256-GCM encrypted secrets, automatically injected into deployments
+- **File-mode secrets** -- deliver a secret as `/run/secrets/<NAME>` on a tmpfs at mode 0400 instead of an environment variable, keeping it out of `podman inspect` and the process environment
+- **Host patching** -- provisioning installs pending security updates and configures unattended-upgrades, including the `-updates` pocket that podman needs
+- **Pinned platform images** -- Traefik and CrowdSec run a version pinned in this repo and resolved to a digest, so no re-provision can upgrade them by accident
 - **Label sanitization** -- user-provided traefik.* labels are stripped to prevent route hijacking
 - **Mount policy** -- host bind mounts are denied unless explicitly allow-listed by an operator
 - **Login throttling** -- per-user and per-IP rate limiting with failed attempts audited
@@ -35,6 +41,8 @@ Container orchestration platform built with SvelteKit, Drizzle ORM, and SQLite. 
 ### Monitoring & Alerts
 - **Worker metrics** -- CPU, memory, disk, network with time-series charts
 - **Container metrics** -- CPU%, memory, network I/O, disk I/O per container
+- **Per-application HTTP telemetry** -- Traefik's Prometheus metrics, labelled by router and service, scrapeable at `https://metrics.<base-domain>/prometheus/metrics` behind the same mTLS as the Podman API
+- **Patch state** -- pending updates, pending *security* updates and `reboot-required` reported per worker and usable as alert thresholds
 - **Notification channels** -- webhook, Slack, email (configurable)
 - **Alert rules** -- configurable thresholds on any metric with automatic notifications
 - **Availability timeline** -- 24-hour worker uptime visualization
@@ -81,6 +89,13 @@ Open <http://localhost:5173> and log in.
 Rudder is designed to run **always behind an HTTPS reverse proxy** (nginx, Caddy, Traefik, …). The Docker image has `X-Forwarded-Proto` / `X-Forwarded-Host` support baked in — no extra configuration needed for TLS termination.
 
 The database schema, secrets, and admin user are all initialised automatically on first boot.
+
+Start the built app with `bun run server.js`, not `build/index.js`. Both serve
+the same application, but the adapter's own entry point cannot handle WebSocket
+upgrades, so the container terminal and `kubectl exec` would connect and then
+hang. `server.js` is the adapter handler plus one `upgrade` listener. Whatever
+proxy sits in front must forward upgrades too (`proxy_set_header Upgrade` /
+`Connection` for nginx; Traefik and Caddy do it by default).
 
 ### Docker Compose
 
@@ -218,9 +233,39 @@ SvelteKit Server (Bun runtime with Node adapter)
 - Podman API secured with mutual TLS (client certificate required; connections
   fail closed if credentials are missing)
 - Host bind mounts are denied by default and must be explicitly allow-listed
-- CrowdSec AppSec WAF on all application routes with IP ban enforcement
+- The nftables ruleset filters traffic from the container bridges as well as from
+  outside, so a container cannot reach the Podman API, the CrowdSec LAPI or the
+  metrics endpoint on the host gateway (nor via `host.containers.internal`). The
+  one exception is UDP/TCP port 53 on the podman bridges, which is where
+  `aardvark-dns` serves container name resolution
+- CrowdSec AppSec WAF on all application routes with IP ban enforcement.
+  Virtual-patching rules block known exploit signatures inline (403); the OWASP
+  Core Rule Set runs out-of-band, scoring SQLi/XSS/LFI/RCE attempts and banning
+  the source once the anomaly threshold is crossed. Out-of-band is deliberate —
+  CRS false positives cost a visible, removable ban decision rather than a
+  broken request. To block inline instead, add `crowdsecurity/appsec-crs-inband`
+  to the CrowdSec container's `COLLECTIONS` and reference `crowdsecurity/crs-inband`
+  in `/etc/crowdsec/acquis.d/appsec.yaml`
 - Security headers: HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy
 - User-provided container labels sanitized to prevent Traefik route hijacking
+- Secrets can be delivered as files on a tmpfs (`/run/secrets/<NAME>`, mode 0400)
+  instead of environment variables, which keeps them out of `podman inspect` and
+  out of the environment of every process in the container. Set per secret;
+  `env` remains the default because changing delivery under a running
+  application breaks it
+- Credentials are redacted from what Rudder stores and logs: an application's
+  OIDC client secret is stamped into container labels for Traefik but kept out
+  of `containers.labels` in the database, and the provisioning transcript is
+  masked before logging (it echoes the worker's mTLS client key and CrowdSec
+  bouncer key on stdout, which is how they reach the database)
+- Re-provisioning a worker installs pending security updates and writes
+  Rudder's own unattended-upgrades policy, adding the `${distro}-updates` pocket
+  — without it podman, which lives in `universe`, is never upgraded at all.
+  Rudder never reboots a worker: it reports `reboot_required` instead, so the
+  reboot is scheduled by someone who knows what is running there
+- Traefik and CrowdSec images are pinned to a version in this repository and
+  resolved to a digest at provisioning time, so a re-provision run for an
+  unrelated reason cannot move Traefik to a new major version
 - Access logs rotated daily (logrotate, 14-day retention)
 - Traefik dashboard protected with mTLS (same as Podman API)
 
@@ -241,8 +286,22 @@ kubectl apply -f deployment.yaml    # Create or update + deploy
 kubectl scale deploy <name> --replicas=3  # Scale replicas
 kubectl delete deployment <name>    # Undeploy + remove
 kubectl logs <pod-name>             # Container logs
+kubectl logs -f <pod-name>          # Follow (streamed)
+kubectl exec <pod-name> -- <cmd>    # Run a command in a container
+kubectl get events -n <team>        # Deploy history as events
 kubectl delete pod <pod-name>       # Remove container
 ```
+
+`kubectl exec` runs over WebSocket (`v4`/`v5.channel.k8s.io`), so it needs
+kubectl 1.29 or newer — older clients negotiate SPDY, which is not supported.
+
+**Interactive sessions (`-i` / `-it`) are not available.** Rudder reaches a
+worker's Podman API through that worker's Traefik for mTLS, and Traefik does not
+proxy the non-WebSocket connection upgrade that attaching stdin requires; the
+request is answered with a 500. Commands run and their output and exit code come
+back normally — only stdin is missing, and asking for it returns an error
+saying so rather than silently discarding your input. The same constraint
+applies to the container terminal in the UI.
 
 ### Setup
 

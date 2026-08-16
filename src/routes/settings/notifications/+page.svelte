@@ -129,7 +129,7 @@
   let ruleChannelId = $state('');
   let ruleSaving = $state(false);
 
-  const workerMetricOptions = ['cpu_percent', 'mem_percent', 'disk_percent', 'mem_usage_bytes', 'disk_usage_bytes', 'containers_running'];
+  const workerMetricOptions = ['cpu_percent', 'mem_percent', 'disk_percent', 'mem_usage_bytes', 'disk_usage_bytes', 'containers_running', 'updates_pending', 'updates_security', 'reboot_required'];
   const containerMetricOptions = ['cpu_percent', 'mem_percent', 'mem_usage_bytes', 'net_rx_bytes', 'net_tx_bytes'];
 
   let availableMetrics = $derived(

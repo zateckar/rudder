@@ -3,6 +3,8 @@ import { db, safeUserColumns } from '$lib/db';
 import { applications, users, workers, teams, teamMembers, volumes, stacks } from '$lib/db/schema';
 import { eq, inArray, or, isNull, and } from 'drizzle-orm';
 import { selectWorker, getAllWorkerResources, getAllEligibleWorkers } from '$lib/server/worker-selector';
+import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
+import { ALLOWED_DOMAINS_UNSUPPORTED } from '$lib/server/oidc';
 
 export const load = async ({ cookies }: { cookies: any }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -55,7 +57,7 @@ export const load = async ({ cookies }: { cookies: any }) => {
     : [];
 
   const _stripWorker = (w: typeof workers.$inferSelect) => {
-    const { podmanCaCert: _a, podmanClientCert: _b, podmanClientKey: _c, crowdsecBouncerKey: _d, oidcClientSecret: _e, oidcEncryptionKey: _f, ...safe } = w;
+    const { podmanCaCert: _a, podmanClientCert: _b, podmanClientKey: _c, crowdsecBouncerKey: _d, oidcClientSecret: _e, oidcEncryptionKey: _f, configToken: _g, ...safe } = w;
     return safe;
   };
   return {
@@ -126,8 +128,12 @@ export const actions = {
       worker = selection.worker;
     }
 
-    // Auto-generate domain: appname.workerBaseDomain
-    const domain = `${name}.${worker.baseDomain}`;
+    // Canonical hostname: <app>.<workerBaseDomain> — same for every deployment type.
+    const domain = buildAppDomain(name, worker.baseDomain);
+    const domainConflict = await assertDomainAvailable(domain);
+    if (domainConflict) {
+      return fail(400, { error: domainConflict });
+    }
 
     // Git-based source fields
     const gitRepo = formData.get('gitRepo')?.toString() || null;
@@ -242,8 +248,12 @@ export const actions = {
         if (!cfg.providerURL || !cfg.clientID || !cfg.clientSecret || !cfg.sessionEncryptionKey) {
           return fail(400, { error: 'OIDC authentication requires Provider URL, Client ID, Client Secret, and Session Encryption Key' });
         }
-        if (cfg.sessionEncryptionKey.length < 32) {
-          return fail(400, { error: 'Session Encryption Key must be at least 32 characters' });
+        // The Traefik OIDC plugin uses this value directly as an AES-256 key.
+        if (cfg.sessionEncryptionKey.length !== 32) {
+          return fail(400, { error: 'Session Encryption Key must be exactly 32 characters' });
+        }
+        if (cfg.allowedUserDomains?.length) {
+          return fail(400, { error: ALLOWED_DOMAINS_UNSUPPORTED });
         }
       } catch {
         return fail(400, { error: 'Invalid OIDC configuration' });

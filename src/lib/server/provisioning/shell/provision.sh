@@ -8,6 +8,9 @@
 set -o pipefail
 
 FAILURES=0
+SKIPPED=""
+
+# A step the worker cannot function without. Aborts provisioning.
 step() {
   local name="$1"
   shift
@@ -16,6 +19,21 @@ step() {
   else
     echo "STEP_FAIL:${name}"
     exit 1
+  fi
+}
+
+# A step that degrades the worker but does not break it — the firewall and the
+# metrics endpoint. These used to swallow their own failures and return 0, so a
+# worker could come up with no firewall at all and report success.
+soft_step() {
+  local name="$1"
+  shift
+  if "$@"; then
+    echo "STEP_DONE:${name}"
+  else
+    FAILURES=$((FAILURES + 1))
+    SKIPPED="${SKIPPED}${name} "
+    echo "STEP_SKIP:${name}"
   fi
 }
 
@@ -38,6 +56,78 @@ fi
 export OS
 
 # ── Step functions ──────────────────────────────────────────────────────
+
+step_updates() {
+  echo "--- 0. Host package updates ---"
+  if [ "$OS" != "debian" ]; then
+    echo "Automated patching is only wired up for Debian/Ubuntu; skipping on ${OS}"
+    return 0
+  fi
+
+  export DEBIAN_FRONTEND=noninteractive
+
+  # Rudder's own policy, sorted after the distro's 50unattended-upgrades so
+  # these values win. Chiefly: add the -updates pocket, which is what brings
+  # podman (universe) into scope at all.
+  echo "{{UNATTENDED_UPGRADES_B64}}" | base64 -d > /etc/apt/apt.conf.d/51rudder-unattended
+  chmod 644 /etc/apt/apt.conf.d/51rudder-unattended
+  echo "Wrote /etc/apt/apt.conf.d/51rudder-unattended"
+
+  apt-get update -q 2>&1 | tail -1 || echo "WARNING: apt-get update failed; working from cached lists"
+
+  if ! command -v unattended-upgrade > /dev/null 2>&1; then
+    apt-get install -y unattended-upgrades 2>&1 | tail -2 \
+      || echo "WARNING: could not install unattended-upgrades"
+  fi
+  systemctl enable --now unattended-upgrades.service > /dev/null 2>&1 \
+    || echo "WARNING: unattended-upgrades.service could not be enabled"
+  if systemctl is-enabled unattended-upgrades.service > /dev/null 2>&1; then
+    echo "unattended-upgrades: enabled"
+  else
+    echo "WARNING: unattended-upgrades is NOT enabled — this host will not patch itself"
+  fi
+
+  local before
+  before=$(apt-get -s upgrade 2>/dev/null | grep -c '^Inst ' || true)
+  echo "Pending package updates: ${before:-0}"
+
+  if [ "{{APPLY_UPDATES}}" != "1" ]; then
+    echo "Update installation is disabled for this run — reporting only"
+    return 0
+  fi
+
+  if [ "${before:-0}" -eq 0 ] 2>/dev/null; then
+    echo "Nothing to install"
+  else
+    # unattended-upgrade rather than a blanket `apt-get upgrade`: the set that
+    # moves is the security set from the origins above, not every held-back
+    # feature update on the host.
+    #
+    # --force-confold is passed here rather than written into apt.conf.d
+    # because that key is global — it would silently answer conffile prompts
+    # for an administrator's own interactive apt run too. Without it a package
+    # with a modified config file turns this into a dpkg question that nothing
+    # will ever answer, and provisioning hangs.
+    echo "Installing pending updates..."
+    if unattended-upgrade -v \
+         -o 'Dpkg::Options::=--force-confold' \
+         -o 'Dpkg::Options::=--force-confdef' 2>&1 | tail -20; then
+      echo "Updates applied"
+    else
+      echo "WARNING: unattended-upgrade exited non-zero; see the output above"
+    fi
+
+    local after
+    after=$(apt-get -s upgrade 2>/dev/null | grep -c '^Inst ' || true)
+    echo "Pending package updates after this run: ${after:-0}"
+  fi
+
+  if [ -f /var/run/reboot-required ]; then
+    echo "NOTE: this worker needs a reboot to finish applying updates."
+    echo "NOTE: Rudder does not reboot workers — applications are running here."
+    sed 's/^/  /' /var/run/reboot-required 2>/dev/null || true
+  fi
+}
 
 step_podman() {
   echo "--- 1. Installing Podman, openssl, and netcat ---"
@@ -117,6 +207,112 @@ step_cleanup_old() {
   echo "CrowdSec state preserved"
 }
 
+step_firewall() {
+  echo "--- 5b. Restricting inbound traffic to SSH and HTTPS ---"
+  # Applications publish their ports on 127.0.0.1 only, but a host firewall is
+  # what actually makes the documented "only 22 and 443 are exposed" true —
+  # without it a single mis-set bind address re-exposes every app straight to
+  # the internet, bypassing Traefik, CrowdSec and OIDC.
+  #
+  # Deliberately conservative: established traffic, loopback and ICMP are
+  # accepted before the policy flips to drop, and both port 22 and the port
+  # Rudder actually connects on are allowed, so this cannot lock us out.
+  #
+  # The input hook is traversed by traffic from the container bridges too, not
+  # just by traffic from outside. That is the point — a container could
+  # otherwise reach the Podman API on the bridge gateway and take over the
+  # worker — but it also catches one path applications genuinely need: every
+  # Rudder deployment runs on a user-defined podman network, whose DNS server
+  # (aardvark-dns) listens on the bridge gateway. Dropping port 53 there breaks
+  # name resolution for every container, so it is accepted back, scoped to the
+  # podman bridge interfaces and to port 53 alone. Everything else a container
+  # might aim at the host — including host.containers.internal — stays blocked.
+  local SSH_PORT="{{SSH_PORT}}"
+  [ -z "$SSH_PORT" ] && SSH_PORT=22
+
+  if ! command -v nft &> /dev/null; then
+    if [ "$OS" = "debian" ]; then
+      apt-get install -y nftables 2>&1 || true
+    elif [ "$OS" = "rhel" ]; then
+      dnf -y install nftables 2>&1 || true
+    fi
+  fi
+
+  if ! command -v nft &> /dev/null; then
+    echo "WARNING: nftables unavailable — host firewall NOT configured."
+    echo "WARNING: container ports bound to 127.0.0.1 are still protected, but"
+    echo "WARNING: nothing enforces the 22/443-only policy. Configure your cloud"
+    echo "WARNING: network security group instead."
+    return 1
+  fi
+
+  # nftables rejects duplicate elements in an anonymous set, so only add the
+  # configured port when it is not already 443 or the default 22.
+  local SSH_PORTS="22, 443"
+  if [ "$SSH_PORT" != "22" ] && [ "$SSH_PORT" != "443" ]; then
+    SSH_PORTS="22, ${SSH_PORT}, 443"
+  fi
+
+  # Our own table, so podman/netavark's rules are never touched. The
+  # create-then-delete prelude makes re-applying idempotent: without it a second
+  # `nft -f` would append a duplicate set of rules to the existing table.
+  #
+  # The base policy stays `accept` with an explicit `drop` at the end, so a
+  # half-loaded ruleset fails open rather than locking the host out.
+  mkdir -p /etc/nftables.d
+  cat > /etc/nftables.d/rudder.nft <<NFTEOF
+#!/usr/sbin/nft -f
+table inet rudder {}
+delete table inet rudder
+
+table inet rudder {
+  chain input {
+    type filter hook input priority 0; policy accept;
+    ct state established,related accept
+    ct state invalid drop
+    iif lo accept
+    meta l4proto { icmp, ipv6-icmp } accept
+    iifname "podman*" meta l4proto { tcp, udp } th dport 53 accept
+    iifname "cni-podman*" meta l4proto { tcp, udp } th dport 53 accept
+    tcp dport { ${SSH_PORTS} } accept
+    counter drop
+  }
+}
+NFTEOF
+
+  if ! nft -f /etc/nftables.d/rudder.nft; then
+    echo "WARNING: failed to install nftables rules — leaving host unfiltered"
+    nft delete table inet rudder 2>/dev/null || true
+    rm -f /etc/nftables.d/rudder.nft
+    return 1
+  fi
+
+  # Re-apply on boot. A dedicated unit avoids fighting the distro's own
+  # nftables.service ruleset.
+  cat > /etc/systemd/system/rudder-firewall.service << 'FWEOF'
+[Unit]
+Description=Rudder host firewall (SSH + HTTPS only)
+After=network-pre.target
+Before=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/nftables.d/rudder.nft
+ExecStop=-/usr/sbin/nft delete table inet rudder
+
+[Install]
+WantedBy=multi-user.target
+FWEOF
+  systemctl daemon-reload
+  # `--now` as well as enable: the rules are already applied above, but without
+  # starting the unit `systemctl is-active rudder-firewall` reports inactive on
+  # a worker whose firewall is up, which is exactly backwards for anyone
+  # checking. Re-running ExecStart is harmless — rudder.nft is idempotent.
+  systemctl enable --now rudder-firewall.service 2>/dev/null || true
+  echo "Host firewall active: inbound limited to ${SSH_PORTS} (SSH/HTTPS)"
+}
+
 step_mtls_certs() {
   echo "--- 6. Generating mTLS certificates for Podman API security ---"
   mkdir -p /etc/traefik/certs
@@ -181,23 +377,68 @@ step_podman_api() {
   fi
 }
 
+# Resolve the latest release tag of a GitHub repository, falling back to the
+# version already pinned in this worker's traefik.yml.
+#
+# This used to fall back to a hardcoded default, which meant an unreachable
+# GitHub silently *downgraded* the bouncer or the OIDC plugin on a worker that
+# was running something newer — a security control quietly moving backwards
+# with nothing in the log to say so. Keeping what is installed is a no-change;
+# it is announced, and only a worker with no pinned version at all fails.
 get_latest_github_tag() {
   local repo=$1
-  local default=$2
-  local tag=$(curl -sI "https://github.com/${repo}/releases/latest" | grep -i location | sed -E -n 's|.*tag/(.*)|\1|p' | tr -d '\r')
-  if [ -z "$tag" ]; then echo "$default"; else echo "$tag"; fi
+  local pin_pattern=$2
+  local tag
+  tag=$(curl -sI --max-time 20 "https://github.com/${repo}/releases/latest" \
+        | grep -i location | sed -E -n 's|.*tag/(.*)|\1|p' | tr -d '\r')
+  if [ -n "$tag" ]; then
+    echo "$tag"
+    return 0
+  fi
+
+  local installed=""
+  if [ -f /etc/traefik/traefik.yml ]; then
+    installed=$(grep -A2 "${pin_pattern}" /etc/traefik/traefik.yml \
+                | sed -E -n 's/^[[:space:]]*version:[[:space:]]*(.+)$/\1/p' | head -1)
+  fi
+  if [ -n "$installed" ] && [ "$installed" != "BOUNCER_VERSION_PLACEHOLDER" ] \
+     && [ "$installed" != "OIDC_VERSION_PLACEHOLDER" ]; then
+    echo "WARNING: could not reach GitHub for ${repo}; keeping the installed version ${installed}" >&2
+    echo "$installed"
+    return 0
+  fi
+
+  echo "ERROR: could not determine a version for ${repo} and none is installed." >&2
+  echo "ERROR: Traefik will not start without its plugins — refusing to continue." >&2
+  return 1
+}
+
+# Platform image versions, pinned in src/lib/server/provisioning/index.ts.
+#
+# Deliberately explicit, never `latest`. `podman pull` runs unconditionally on
+# every provisioning run, so with a floating tag an unrelated re-provision —
+# one triggered to change a rate limit, say — silently moves Traefik to
+# whatever was released since, mid-maintenance, with no decision made. Pinned,
+# upgrading is a diff and a commit.
+CROWDSEC_VERSION="{{CROWDSEC_IMAGE_VERSION}}"
+TRAEFIK_VERSION="{{TRAEFIK_IMAGE_VERSION}}"
+
+# Resolve a tag to the digest actually pulled, so the systemd unit runs the
+# bytes this provisioning run verified rather than whatever the tag points at
+# by the time the unit next starts.
+resolve_image_digest() {
+  local ref=$1
+  podman image inspect "$ref" --format '{{index .RepoDigests 0}}' 2>/dev/null | head -1
 }
 
 step_traefik_config() {
   echo "--- 8. Writing Traefik configuration ---"
-  echo "Detecting latest plugin versions..."
-  CROWDSEC_VERSION="latest"
-  TRAEFIK_VERSION="latest"
   echo "Using CrowdSec version: ${CROWDSEC_VERSION}"
   echo "Using Traefik version: ${TRAEFIK_VERSION}"
 
-  BOUNCER_VERSION=$(get_latest_github_tag "maxlerebourg/crowdsec-bouncer-traefik-plugin" "v1.6.0")
-  OIDC_VERSION=$(get_latest_github_tag "lukaszraczylo/traefikoidc" "v1.0.7")
+  echo "Detecting latest plugin versions..."
+  BOUNCER_VERSION=$(get_latest_github_tag "maxlerebourg/crowdsec-bouncer-traefik-plugin" "crowdsec-bouncer-traefik-plugin") || return 1
+  OIDC_VERSION=$(get_latest_github_tag "sevensolutions/traefik-oidc-auth" "sevensolutions/traefik-oidc-auth") || return 1
   echo "Using bouncer version: ${BOUNCER_VERSION}"
   echo "Using OIDC version: ${OIDC_VERSION}"
 
@@ -260,15 +501,44 @@ step_systemd_services() {
   echo "--- 11. Starting systemd services ---"
   echo "{{TRAEFIK_SERVICE_B64}}" | base64 -d > /etc/systemd/system/traefik-container.service
   echo "{{CROWDSEC_SERVICE_B64}}" | base64 -d > /etc/systemd/system/crowdsec-container.service
-  # Replace version placeholders in systemd units (must happen after writing files)
-  sed -i "s/CROWDSEC_VERSION_PLACEHOLDER/${CROWDSEC_VERSION}/g" /etc/systemd/system/crowdsec-container.service
-  sed -i "s/TRAEFIK_VERSION_PLACEHOLDER/${TRAEFIK_VERSION}/g" /etc/systemd/system/traefik-container.service
-  systemctl daemon-reload
-  systemctl enable traefik-container.service
-  systemctl enable crowdsec-container.service
+
+  # Pull before writing the version into the units: the digest we pin is the
+  # one this run actually fetched and is about to start.
   echo "Pulling container images..."
   podman pull docker.io/crowdsecurity/crowdsec:${CROWDSEC_VERSION} 2>&1 || echo "WARNING: Failed to pull CrowdSec image, using cached"
   podman pull docker.io/traefik:${TRAEFIK_VERSION} 2>&1 || echo "WARNING: Failed to pull Traefik image, using cached"
+
+  # `image@sha256:…` in the unit, so a restart three months from now runs the
+  # same bytes even if the tag has been moved under us. Falls back to the
+  # pinned tag — still a fixed version, just not byte-exact — when the local
+  # image carries no repo digest (built locally, or pulled by digest already).
+  local crowdsec_ref="docker.io/crowdsecurity/crowdsec:${CROWDSEC_VERSION}"
+  local traefik_ref="docker.io/traefik:${TRAEFIK_VERSION}"
+  local crowdsec_digest traefik_digest
+  crowdsec_digest=$(resolve_image_digest "$crowdsec_ref")
+  traefik_digest=$(resolve_image_digest "$traefik_ref")
+  if [ -n "$crowdsec_digest" ]; then
+    echo "CrowdSec image pinned to ${crowdsec_digest}"
+    crowdsec_ref="$crowdsec_digest"
+  else
+    echo "WARNING: no repo digest for ${crowdsec_ref}; pinning by tag only"
+  fi
+  if [ -n "$traefik_digest" ]; then
+    echo "Traefik image pinned to ${traefik_digest}"
+    traefik_ref="$traefik_digest"
+  else
+    echo "WARNING: no repo digest for ${traefik_ref}; pinning by tag only"
+  fi
+
+  # The units carry `docker.io/<repo>:PLACEHOLDER`, so the substitution has to
+  # swallow the tag separator along with the placeholder to leave a bare
+  # `docker.io/<repo>@sha256:…`. `|` as the sed delimiter: digests contain `/`.
+  sed -i "s|docker.io/crowdsecurity/crowdsec:CROWDSEC_VERSION_PLACEHOLDER|${crowdsec_ref}|g" /etc/systemd/system/crowdsec-container.service
+  sed -i "s|docker.io/traefik:TRAEFIK_VERSION_PLACEHOLDER|${traefik_ref}|g" /etc/systemd/system/traefik-container.service
+
+  systemctl daemon-reload
+  systemctl enable traefik-container.service
+  systemctl enable crowdsec-container.service
   echo "Starting CrowdSec..."
   systemctl start crowdsec-container.service
   sleep 5
@@ -308,10 +578,15 @@ step_systemd_services() {
 
 # ── Execute steps ──────────────────────────────────────────────────────
 
+# Patching is a soft step: a held apt lock or an unreachable mirror must not
+# stop a worker from being provisioned, but it must be visible in the log
+# rather than swallowed.
+soft_step "updates" step_updates
 step "podman" step_podman
 step "registries" step_registries
 step "podman-socket" step_podman_socket
 step "cleanup-old" step_cleanup_old
+soft_step "firewall" step_firewall
 step "mtls-certs" step_mtls_certs
 step "podman-api" step_podman_api
 step "traefik-config" step_traefik_config
@@ -364,6 +639,63 @@ systemctl daemon-reload
 systemctl enable --now rudder-netavark-cleanup.timer
 echo "Netavark cleanup timer installed (runs every 5 min)"
 
+# ── Routing configuration fetch (http routing mode only) ───────────────
+
+echo "{{TRAEFIK_CONFIG_SCRIPT_B64}}" | base64 -d > /usr/local/bin/rudder-traefik-config.sh
+chmod +x /usr/local/bin/rudder-traefik-config.sh
+echo "{{TRAEFIK_CONFIG_SERVICE_B64}}" | base64 -d > /etc/systemd/system/rudder-traefik-config.service
+echo "{{TRAEFIK_CONFIG_TIMER_B64}}" | base64 -d > /etc/systemd/system/rudder-traefik-config.timer
+systemctl daemon-reload
+
+mkdir -p /etc/rudder
+chmod 700 /etc/rudder
+
+if [ -n "{{CONFIG_ENDPOINT}}" ]; then
+  # The token is a bearer credential for an endpoint that describes every route
+  # on this worker, so the file it lives in is never world-readable.
+  umask 077
+  cat > /etc/rudder/traefik-config.env <<RCEOF
+CONFIG_ENDPOINT={{CONFIG_ENDPOINT}}
+CONFIG_TOKEN={{CONFIG_TOKEN}}
+RCEOF
+  chmod 600 /etc/rudder/traefik-config.env
+  umask 022
+
+  systemctl enable --now rudder-traefik-config.timer
+  # Fetch once synchronously so the worker has its routes before this script
+  # reports success, rather than up to a timer period later.
+  if /usr/local/bin/rudder-traefik-config.sh; then
+    echo "Routing configuration fetched from control plane"
+  else
+    echo "WARNING: could not fetch routing configuration from {{CONFIG_ENDPOINT}}"
+    echo "WARNING: the worker will retry every 10s; applications stay on their"
+    echo "WARNING: existing routes until the fetch succeeds."
+  fi
+else
+  # labels routing mode: routing comes from container labels via the docker
+  # provider. Leave no stale routes.yml behind from a previous http-mode run,
+  # or its routers would shadow the label-derived ones.
+  systemctl disable --now rudder-traefik-config.timer 2>/dev/null || true
+  rm -f /etc/rudder/traefik-config.env /etc/traefik/dynamic/routes.yml
+  echo "Routing mode: labels (container labels drive Traefik)"
+fi
+
+# ── Patch-state scan ───────────────────────────────────────────────────
+#
+# Separate from the metrics timer on purpose: `apt-get -s upgrade` takes
+# seconds and contends for the apt lock, which has no business running every
+# 30 seconds. This writes a cache the metrics collector reads.
+
+echo "{{UPDATES_SCRIPT_B64}}" | base64 -d > /usr/local/bin/rudder-updates.sh
+chmod +x /usr/local/bin/rudder-updates.sh
+echo "{{UPDATES_SERVICE_B64}}" | base64 -d > /etc/systemd/system/rudder-updates.service
+echo "{{UPDATES_TIMER_B64}}" | base64 -d > /etc/systemd/system/rudder-updates.timer
+systemctl daemon-reload
+systemctl enable --now rudder-updates.timer
+# Populate the cache now so the first metrics collection after provisioning
+# already carries patch state, instead of reporting null until the timer runs.
+/usr/local/bin/rudder-updates.sh || echo "WARNING: patch-state scan failed; workers report null until the next run"
+
 # ── Host metrics HTTP endpoint ─────────────────────────────────────────
 
 echo "{{METRICS_SCRIPT_B64}}" | base64 -d > /usr/local/bin/rudder-metrics.sh
@@ -394,8 +726,12 @@ echo "Host metrics HTTP service installed (shell-only, port 9100, collected ever
 WORKER_IP=$(hostname -I | awk '{print $1}')
 echo "=== Provisioning complete for {{WORKER_NAME}} ==="
 echo "Worker IP: ${WORKER_IP}"
-echo "Exposed: 22 (SSH), 443 (Traefik HTTPS)"
-echo "Internal: 8080 (Podman API, localhost only)"
+if nft list table inet rudder &>/dev/null; then
+  echo "Exposed: 22 (SSH), 443 (Traefik HTTPS) — enforced by nftables"
+else
+  echo "Exposed: 22 (SSH), 443 (Traefik HTTPS) — NOT enforced, no host firewall"
+fi
+echo "Internal: 8080 (Podman API), 8081/7422 (CrowdSec), 9100 (metrics), 8082 (Traefik Prometheus) — 127.0.0.1 only"
 echo "Security: Podman API secured with mTLS client certificate authentication"
 echo "WAF: CrowdSec AppSec enabled on all applications via Traefik plugin"
 if [ -n "{{BASE_DOMAIN}}" ]; then
@@ -431,7 +767,8 @@ fi
 
 echo ""
 if [ $FAILURES -gt 0 ]; then
-  echo "WARNING: $FAILURES step(s) had errors"
+  echo "WARNING: $FAILURES non-fatal step(s) did not complete: ${SKIPPED}"
+  echo "WARNING: the worker is usable but degraded — see the step output above."
 fi
 
 echo ""

@@ -31,6 +31,23 @@ export async function GET({ request }: { request: Request }) {
         kind: 'Pod',
         verbs: ['get'],
       },
+      {
+        // Served over WebSocket (v4/v5.channel.k8s.io), not SPDY. kubectl 1.29
+        // and later negotiate WebSocket; older clients cannot connect.
+        name: 'pods/exec',
+        singularName: '',
+        namespaced: true,
+        kind: 'PodExecOptions',
+        verbs: ['create', 'get'],
+      },
+      {
+        name: 'events',
+        singularName: 'event',
+        namespaced: true,
+        kind: 'Event',
+        verbs: ['get', 'list'],
+        shortNames: ['ev'],
+      },
     ],
   });
 }

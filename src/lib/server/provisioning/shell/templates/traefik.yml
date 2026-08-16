@@ -1,6 +1,24 @@
 entryPoints:
   websecure:
     address: ":443"
+  # Prometheus scrape target. Bound to loopback, not `:8082` — the host
+  # firewall would drop external traffic anyway, but an entryPoint that only
+  # ever listens on 127.0.0.1 cannot be re-exposed by a firewall mistake.
+  # Reached from outside through the mTLS-protected metrics.<base> router in
+  # /etc/traefik/dynamic/metrics.yml.
+  metrics:
+    address: "127.0.0.1:8082"
+
+metrics:
+  prometheus:
+    entryPoint: metrics
+    # addRoutersLabels is the one that matters: it produces
+    # traefik_router_requests_total / _request_duration_seconds labelled by
+    # router, and router names derive from application names, so these map
+    # straight onto applications. It defaults to false.
+    addRoutersLabels: true
+    addServicesLabels: true
+    addEntryPointsLabels: true
 
 providers:
   docker:
@@ -23,8 +41,8 @@ experimental:
     bouncer:
       moduleName: github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
       version: BOUNCER_VERSION_PLACEHOLDER
-    traefikoidc:
-      moduleName: github.com/lukaszraczylo/traefikoidc
+    traefik-oidc-auth:
+      moduleName: github.com/sevensolutions/traefik-oidc-auth
       version: OIDC_VERSION_PLACEHOLDER
 
 log:
