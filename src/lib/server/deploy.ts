@@ -728,10 +728,15 @@ export async function executeApplicationDeploy(
       },
       planContext,
     );
+    // Apply the mount policy now, and throw the result away. It is applied
+    // again per container during creation, but by then the legacy path has
+    // already removed the previous generation — so a denied host path would
+    // take the application down before saying why.
+    for (const planned of plan.containers) realizeMounts(planned.mounts);
   } catch (e: any) {
     // A manifest that cannot be deployed as written. Nothing has been created,
     // nothing torn down, and no deployment row records the attempt.
-    if (e instanceof ManifestError) {
+    if (e instanceof ManifestError || e instanceof MountPolicyError) {
       return { success: false, message: e.message, statusCode: 400 };
     }
     throw e;
@@ -925,7 +930,10 @@ export async function executeApplicationDeploy(
           .where(eq(containers.id, rowId));
       } catch (e: any) {
         console.error(`Failed to create container ${planned.name}:`, e);
-        throw new Error(`Container '${planned.key}' failed to deploy: ${e.message}`);
+        // Keep the type: a mount the policy rejects is the user's to fix, and
+        // wrapping it in a plain Error turned a 400 into a 500.
+        const message = `Container '${planned.key}' failed to deploy: ${e.message}`;
+        throw e instanceof MountPolicyError ? new MountPolicyError(message) : new Error(message);
       }
     }
 

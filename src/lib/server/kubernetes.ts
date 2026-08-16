@@ -6,8 +6,9 @@ import {
   type DeploymentPlan,
   type PlanContext,
   type PlannedContainer,
+  type PlannedFile,
 } from './deploy/plan';
-import type { MountIntent } from './mounts';
+import { DEFAULT_TMPFS_OPTS, type MountIntent } from './mounts';
 import { ALIAS_LABEL, assertDistinctAliases, networkAliases } from './networks';
 import type { PortAllocator } from './ports';
 
@@ -26,12 +27,38 @@ export interface K8sPodSpec {
   restartPolicy?: string;
 }
 
+/** A reference to one key of a ConfigMap or Secret. */
+export interface K8sKeyRef {
+  name?: string;
+  /** Secrets spell it `name` too, but a volume source spells it `secretName`. */
+  key?: string;
+  optional?: boolean;
+}
+
+export interface K8sEnvVar {
+  name: string;
+  value?: string;
+  valueFrom?: {
+    configMapKeyRef?: K8sKeyRef;
+    secretKeyRef?: K8sKeyRef;
+    fieldRef?: { fieldPath?: string };
+    resourceFieldRef?: { resource?: string };
+  };
+}
+
+export interface K8sEnvFromSource {
+  prefix?: string;
+  configMapRef?: { name?: string; optional?: boolean };
+  secretRef?: { name?: string; optional?: boolean };
+}
+
 export interface K8sContainer {
   name: string;
   image?: string;
-  ports?: Array<{ containerPort: number; protocol?: string }>;
-  env?: Array<{ name: string; value?: string }>;
-  volumeMounts?: Array<{ name: string; mountPath: string; readOnly?: boolean }>;
+  ports?: Array<{ containerPort: number; protocol?: string; hostPort?: number }>;
+  env?: K8sEnvVar[];
+  envFrom?: K8sEnvFromSource[];
+  volumeMounts?: Array<{ name: string; mountPath: string; readOnly?: boolean; subPath?: string }>;
   resources?: {
     requests?: { memory?: string; cpu?: string };
     limits?: { memory?: string; cpu?: string };
@@ -41,12 +68,176 @@ export interface K8sContainer {
   workingDir?: string;
 }
 
+/** Selects and renames individual keys of a ConfigMap or Secret volume. */
+export interface K8sKeyToPath {
+  key: string;
+  path: string;
+  mode?: number;
+}
+
 export interface K8sVolume {
   name: string;
-  emptyDir?: Record<string, any>;
+  emptyDir?: { medium?: string; sizeLimit?: string } | Record<string, never> | null;
   hostPath?: { path: string };
-  configMap?: { name: string };
-  secret?: { secretName: string };
+  configMap?: { name: string; items?: K8sKeyToPath[]; defaultMode?: number; optional?: boolean };
+  secret?: { secretName: string; items?: K8sKeyToPath[]; defaultMode?: number; optional?: boolean };
+  // Declared so they can be refused by name rather than dropped.
+  persistentVolumeClaim?: { claimName?: string };
+  nfs?: unknown;
+  projected?: unknown;
+  downwardAPI?: unknown;
+  csi?: unknown;
+  ephemeral?: unknown;
+}
+
+/**
+ * ConfigMaps and Secrets declared in the same manifest.
+ *
+ * There is no cluster to look anything else up in. A reference to an object
+ * that is not here is refused rather than mounted as nothing — an application
+ * that comes up misconfigured is worse than one that does not come up.
+ */
+interface ManifestObjects {
+  configMaps: Map<string, Record<string, string>>;
+  secrets: Map<string, Record<string, string>>;
+}
+
+/** Read the ConfigMap and Secret documents out of a manifest. */
+function collectManifestObjects(docs: any[]): ManifestObjects {
+  const objects: ManifestObjects = { configMaps: new Map(), secrets: new Map() };
+
+  for (const doc of docs) {
+    const kind = doc?.kind?.toLowerCase();
+    const name = doc?.metadata?.name;
+    if (!name) continue;
+
+    if (kind === 'configmap') {
+      const data: Record<string, string> = { ...(doc.data ?? {}) };
+      // binaryData is base64 by definition; data is not.
+      for (const [key, value] of Object.entries(doc.binaryData ?? {})) {
+        data[key] = decodeBase64(String(value), `ConfigMap "${name}" key "${key}"`);
+      }
+      objects.configMaps.set(name, data);
+    } else if (kind === 'secret') {
+      const data: Record<string, string> = { ...(doc.stringData ?? {}) };
+      for (const [key, value] of Object.entries(doc.data ?? {})) {
+        data[key] = decodeBase64(String(value), `Secret "${name}" key "${key}"`);
+      }
+      objects.secrets.set(name, data);
+    }
+  }
+
+  return objects;
+}
+
+/**
+ * Volume kinds that need a cluster behind them. Named in the refusal rather
+ * than dropped, so an application does not start without its storage and leave
+ * the user to work out which of their volumes went missing.
+ */
+const UNSUPPORTED_VOLUME_KINDS = [
+  'persistentVolumeClaim',
+  'nfs',
+  'projected',
+  'downwardAPI',
+  'csi',
+  'ephemeral',
+] as const;
+
+/**
+ * The files a ConfigMap or Secret volume should produce.
+ *
+ * Without `items` that is every key at its own name; with `items` it is the
+ * selected keys, renamed. A selected key that does not exist is refused —
+ * Kubernetes skips it, but Kubernetes has a control plane to notice with.
+ */
+function selectKeys(
+  data: Record<string, string>,
+  items: K8sKeyToPath[] | undefined,
+  where: string,
+): Array<{ path: string; content: string; mode?: number }> {
+  if (!items?.length) {
+    return Object.entries(data).map(([path, content]) => ({ path, content }));
+  }
+  return items.map((item) => {
+    const content = data[item.key];
+    if (content === undefined) {
+      throw new ManifestError(`${where} selects the key "${item.key}", which is not present.`);
+    }
+    const path = item.path || item.key;
+    if (path.includes('/')) {
+      throw new ManifestError(
+        `${where} writes key "${item.key}" to "${path}". Rudder places each key as a file directly ` +
+          `in the mount path and cannot create subdirectories under it.`,
+      );
+    }
+    return { path, content, mode: item.mode };
+  });
+}
+
+/**
+ * Translate a Kubernetes quantity into a tmpfs `size=` value.
+ *
+ * They disagree on spelling: Kubernetes writes `16Mi` for a mebibyte count and
+ * `16M` for a megabyte one, while tmpfs reads a bare `k`/`m`/`g` as binary and
+ * rejects anything else outright — with "Invalid argument", naming neither the
+ * option nor the mount.
+ */
+export function tmpfsSize(quantity: string | undefined, where: string): string | undefined {
+  if (quantity === undefined || quantity === null) return undefined;
+  const raw = String(quantity).trim();
+  if (!raw) return undefined;
+
+  const binary = raw.match(/^(\d+)(Ki|Mi|Gi)$/);
+  if (binary) return `${binary[1]}${{ Ki: 'k', Mi: 'm', Gi: 'g' }[binary[2] as 'Ki' | 'Mi' | 'Gi']}`;
+
+  const decimal = raw.match(/^(\d+)([kKMGT])$/);
+  if (decimal) {
+    const factor = { k: 1e3, K: 1e3, M: 1e6, G: 1e9, T: 1e12 }[decimal[2] as 'k'];
+    return String(Math.floor(parseInt(decimal[1], 10) * factor));
+  }
+
+  if (/^\d+$/.test(raw)) return raw;
+
+  throw new ManifestError(
+    `${where} has a sizeLimit of "${raw}", which is not a quantity Rudder can turn into a ` +
+      `tmpfs size. Use a form like 64Mi, 1Gi, or a plain byte count.`,
+  );
+}
+
+function decodeBase64(value: string, what: string): string {
+  try {
+    return Buffer.from(value, 'base64').toString('utf8');
+  } catch {
+    throw new ManifestError(`${what} is not valid base64.`);
+  }
+}
+
+/**
+ * The entries of a ConfigMap or Secret a volume or `envFrom` should use.
+ *
+ * Returns null when the object is absent and the reference is marked optional,
+ * which is Kubernetes' own way of saying "carry on without it".
+ */
+function lookupObject(
+  objects: ManifestObjects,
+  kind: 'configMap' | 'secret',
+  name: string | undefined,
+  optional: boolean | undefined,
+  usedBy: string,
+): Record<string, string> | null {
+  const label = kind === 'configMap' ? 'ConfigMap' : 'Secret';
+  if (!name) {
+    throw new ManifestError(`${usedBy} references a ${label} with no name.`);
+  }
+  const found = (kind === 'configMap' ? objects.configMaps : objects.secrets).get(name);
+  if (found) return found;
+  if (optional) return null;
+  throw new ManifestError(
+    `${usedBy} references the ${label} "${name}", which is not declared in this manifest. ` +
+      `Rudder has no cluster to look it up in — add it as another document in the manifest, ` +
+      `use a Rudder secret, or mark the reference optional.`,
+  );
 }
 
 export interface K8sServiceSpec {
@@ -83,6 +274,21 @@ export function parseK8sManifest(manifest: string, ctx: PlanContext): Deployment
   /** Volumes declared by the Pod spec, by name, as written. */
   const volumes: Record<string, K8sVolume> = {};
 
+  // ConfigMaps and Secrets are read first: a manifest may declare them after
+  // the Pod that mounts them, and a document order dependency would be a
+  // surprise nobody could debug from the error message.
+  const objects = collectManifestObjects(docs);
+
+  /** Which containers mount each volume, so a shared `emptyDir` can be refused. */
+  const mountedBy = new Map<string, string[]>();
+
+  interface PendingContainer {
+    container: K8sContainer;
+    metadata: K8sMetadata;
+    restartPolicy?: string;
+  }
+  const pending: PendingContainer[] = [];
+
   for (const doc of docs) {
     if (!doc) continue;
 
@@ -99,21 +305,34 @@ export function parseK8sManifest(manifest: string, ctx: PlanContext): Deployment
       }
 
       for (const container of podSpec.containers ?? []) {
-        containers.push(
-          parseK8sContainer(container, metadata, volumes, ctx, allocatePort, podSpec.restartPolicy),
-        );
+        pending.push({ container, metadata, restartPolicy: podSpec.restartPolicy });
+        for (const vm of container.volumeMounts ?? []) {
+          mountedBy.set(vm.name, [...(mountedBy.get(vm.name) ?? []), container.name]);
+        }
       }
     } else if (kind === 'service') {
       // Services are handled separately for routing
-    } else if (kind === 'configmap') {
-      // ConfigMaps can be used for environment variables
-    } else if (kind === 'secret') {
-      // Secrets for sensitive data
+    } else if (kind === 'configmap' || kind === 'secret') {
+      // Read above, into `objects`.
     }
   }
 
-  if (containers.length === 0) {
+  if (pending.length === 0) {
     throw new ManifestError('No Pod or Deployment found in manifest');
+  }
+
+  for (const { container, metadata, restartPolicy } of pending) {
+    containers.push(
+      parseK8sContainer(container, metadata, {
+        volumes,
+        objects,
+        mountedBy,
+        ctx,
+        allocatePort,
+        restartPolicy,
+        notes,
+      }),
+    );
   }
 
   // Kubernetes only requires container names to be unique within a Pod, so a
@@ -183,20 +402,70 @@ export function k8sPodTemplate(
   return null;
 }
 
+interface ParseContainerInput {
+  volumes: Record<string, K8sVolume>;
+  objects: ManifestObjects;
+  mountedBy: Map<string, string[]>;
+  ctx: PlanContext;
+  allocatePort: PortAllocator;
+  restartPolicy?: string;
+  notes: string[];
+}
+
 function parseK8sContainer(
   container: K8sContainer,
   metadata: K8sMetadata,
-  volumes: Record<string, K8sVolume>,
-  ctx: PlanContext,
-  allocatePort: PortAllocator,
-  restartPolicy?: string
+  input: ParseContainerInput,
 ): PlannedContainer {
+  const { volumes, objects, mountedBy, ctx, allocatePort, restartPolicy, notes } = input;
+  const where = `Container "${container.name}"`;
+
   const env: Record<string, string> = {};
 
-  if (container.env) {
-    for (const envEntry of container.env) {
-      env[envEntry.name] = envEntry.value || '';
+  // envFrom first, so an explicit `env` entry of the same name wins — which is
+  // what Kubernetes does. Both were ignored entirely before.
+  for (const source of container.envFrom ?? []) {
+    const prefix = source.prefix ?? '';
+    if (source.configMapRef) {
+      const data = lookupObject(objects, 'configMap', source.configMapRef.name, source.configMapRef.optional, `${where} envFrom`);
+      for (const [key, value] of Object.entries(data ?? {})) env[`${prefix}${key}`] = value;
     }
+    if (source.secretRef) {
+      const data = lookupObject(objects, 'secret', source.secretRef.name, source.secretRef.optional, `${where} envFrom`);
+      for (const [key, value] of Object.entries(data ?? {})) env[`${prefix}${key}`] = value;
+    }
+  }
+
+  for (const entry of container.env ?? []) {
+    const from = entry.valueFrom;
+    if (!from) {
+      env[entry.name] = entry.value ?? '';
+      continue;
+    }
+    if (from.configMapKeyRef || from.secretKeyRef) {
+      const kind = from.configMapKeyRef ? 'configMap' : 'secret';
+      const ref = (from.configMapKeyRef ?? from.secretKeyRef)!;
+      const data = lookupObject(objects, kind, ref.name, ref.optional, `${where} env "${entry.name}"`);
+      if (data === null) continue;
+      const value = ref.key ? data[ref.key] : undefined;
+      if (value === undefined) {
+        if (ref.optional) continue;
+        throw new ManifestError(
+          `${where} reads env "${entry.name}" from key "${ref.key}" of ` +
+            `${kind === 'configMap' ? 'ConfigMap' : 'Secret'} "${ref.name}", which has no such key.`,
+        );
+      }
+      env[entry.name] = value;
+      continue;
+    }
+    // fieldRef and resourceFieldRef describe a Pod that does not exist here.
+    // They were silently dropped, so the container started with the variable
+    // unset and whatever that meant to the application.
+    const unsupported = from.fieldRef ? `fieldRef (${from.fieldRef.fieldPath})` : 'resourceFieldRef';
+    throw new ManifestError(
+      `${where} reads env "${entry.name}" from ${unsupported}, which Rudder cannot resolve — ` +
+        `there is no Kubernetes API to ask. Set the value directly.`,
+    );
   }
 
   /**
@@ -217,17 +486,90 @@ function parseK8sContainer(
   }
 
   const mounts: MountIntent[] = [];
+  const files: PlannedFile[] = [];
 
-  if (container.volumeMounts) {
-    for (const vm of container.volumeMounts) {
-      const declared = volumes[vm.name];
-      const mode = vm.readOnly ? 'ro' : 'rw';
-      if (declared?.hostPath?.path) {
-        mounts.push({ kind: 'bind', source: declared.hostPath.path, target: vm.mountPath, mode });
-      }
-      // Every other volume kind is still dropped here. Making them work — and
-      // refusing the ones that cannot — is the next piece of this work.
+  for (const vm of container.volumeMounts ?? []) {
+    const declared = volumes[vm.name];
+    const mode = vm.readOnly ? 'ro' : 'rw';
+    const at = `${where} mounts "${vm.name}" at ${vm.mountPath}`;
+
+    if (!declared) {
+      throw new ManifestError(`${at}, but no volume of that name is declared in the Pod spec.`);
     }
+
+    if (vm.subPath) {
+      throw new ManifestError(
+        `${at} with subPath "${vm.subPath}", which Rudder does not support. ` +
+          `Mount the whole volume, or split it into separate volumes.`,
+      );
+    }
+
+    if (declared.hostPath?.path) {
+      // Subject to the host mount allow-list, which the executor applies.
+      mounts.push({ kind: 'bind', source: declared.hostPath.path, target: vm.mountPath, mode });
+      continue;
+    }
+
+    if (declared.emptyDir !== undefined && declared.emptyDir !== null) {
+      // An emptyDir is shared between the containers of a Pod. Rudder's
+      // containers do not share a namespace, so two of them mounting one
+      // emptyDir would silently get two separate scratch directories.
+      const sharers = mountedBy.get(vm.name) ?? [];
+      if (sharers.length > 1) {
+        throw new ManifestError(
+          `The emptyDir volume "${vm.name}" is mounted by ${sharers.map((s) => `"${s}"`).join(' and ')}. ` +
+            `Sharing one needs a shared namespace, and Rudder runs each container separately on a ` +
+            `bridge network. Give each container its own emptyDir, or have one serve the data to ` +
+            `the other over the network.`,
+        );
+      }
+      const size = tmpfsSize((declared.emptyDir as { sizeLimit?: string }).sizeLimit, at);
+      const medium = (declared.emptyDir as { medium?: string }).medium;
+      if (medium && medium.toLowerCase() !== 'memory') {
+        notes.push(
+          `emptyDir "${vm.name}" asked for medium "${medium}"; Rudder backs every emptyDir with ` +
+            `memory, so its contents count against the container's memory limit.`,
+        );
+      }
+      mounts.push({
+        kind: 'tmpfs',
+        target: vm.mountPath,
+        options: size ? `${DEFAULT_TMPFS_OPTS},size=${size}` : DEFAULT_TMPFS_OPTS,
+      });
+      continue;
+    }
+
+    if (declared.configMap || declared.secret) {
+      const isSecret = !!declared.secret;
+      const source = declared.secret ?? declared.configMap!;
+      const name = declared.secret ? declared.secret.secretName : declared.configMap!.name;
+      const data = lookupObject(objects, isSecret ? 'secret' : 'configMap', name, source.optional, at);
+      // Optional and absent: Kubernetes mounts an empty directory, and so do we.
+      const entries = selectKeys(data ?? {}, source.items, at);
+
+      // A tmpfs so the mount point exists and is writable for the upload, and
+      // so the content never touches the worker's disk. The files go in before
+      // the container starts, which is what makes them present at entrypoint.
+      mounts.push({ kind: 'tmpfs', target: vm.mountPath, options: DEFAULT_TMPFS_OPTS });
+      for (const entry of entries) {
+        files.push({
+          dir: vm.mountPath,
+          name: entry.path,
+          content: entry.content,
+          mode: entry.mode ?? source.defaultMode ?? (isSecret ? 0o400 : 0o644),
+        });
+      }
+      continue;
+    }
+
+    const kind = UNSUPPORTED_VOLUME_KINDS.find((k) => k in declared);
+    throw new ManifestError(
+      kind
+        ? `${at}, which is a ${kind} volume. Rudder has no storage layer behind that — ` +
+          `use a hostPath under an allowed prefix, an emptyDir, or a ConfigMap or Secret ` +
+          `declared in this manifest.`
+        : `${at}, but that volume declares no source Rudder recognises.`,
+    );
   }
 
   let memory: number | undefined;
@@ -256,6 +598,7 @@ function parseK8sContainer(
     env: Object.entries(env).map(([k, v]) => `${k}=${v}`),
     ports,
     mounts,
+    files: files.length > 0 ? files : undefined,
     aliases,
     restartPolicy: podmanRestartPolicy(restartPolicy, ctx.restartPolicy),
     labels: {

@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import { k8sPodTemplate, parseK8sManifest as parseManifest, validateK8sManifest } from './kubernetes';
+import {
+  k8sPodTemplate,
+  parseK8sManifest as parseManifest,
+  tmpfsSize,
+  validateK8sManifest,
+} from './kubernetes';
 import type { PlanContext } from './deploy/plan';
 import { PORT_RANGE_END, PORT_RANGE_START, unreservedPort } from './ports';
 
@@ -309,6 +314,297 @@ spec:
     expect(c.memory).toBe(512 * 1024 * 1024);
     expect(c.cpuQuota).toBeGreaterThan(0);
     expect(c.cpuPeriod).toBe(100000);
+  });
+});
+
+describe('parseK8sManifest — storage', () => {
+  /** A Pod with one container mounting `data` at /data, plus whatever precedes it. */
+  const podWith = (volume: string, extra = '') => `${extra}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: store
+spec:
+  volumes:
+${volume}
+  containers:
+    - name: app
+      image: busybox
+      volumeMounts:
+        - name: data
+          mountPath: /data
+`;
+
+  test('backs an emptyDir with memory', () => {
+    // Ephemeral is the intent. It used to be mapped to an empty host path and
+    // filtered out before it reached Podman, so the container got nothing.
+    const [c] = parseK8sManifest(podWith('    - name: data\n      emptyDir: {}'), 'store');
+    expect(c.mounts).toEqual([{ kind: 'tmpfs', target: '/data', options: 'rw,nosuid,nodev' }]);
+  });
+
+  test('translates an emptyDir size limit into a tmpfs size', () => {
+    // Kubernetes writes 64Mi; tmpfs reads a bare `m` as mebibytes and rejects
+    // `Mi` with "Invalid argument", naming neither the option nor the mount.
+    const [c] = parseK8sManifest(
+      podWith('    - name: data\n      emptyDir:\n        sizeLimit: 64Mi'),
+      'store',
+    );
+    expect(c.mounts[0]).toMatchObject({ options: 'rw,nosuid,nodev,size=64m' });
+  });
+
+  test('refuses a size limit it cannot translate', () => {
+    expect(() =>
+      parseK8sManifest(podWith('    - name: data\n      emptyDir:\n        sizeLimit: lots'), 'store'),
+    ).toThrow(/not a quantity Rudder can turn into a tmpfs size/);
+  });
+
+  test('refuses an emptyDir two containers share', () => {
+    // Sharing one needs a shared namespace, and there are no pods here. Two
+    // separate scratch directories is not what the manifest asked for.
+    const shared = `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: store
+spec:
+  volumes:
+    - name: data
+      emptyDir: {}
+  containers:
+    - name: writer
+      image: busybox
+      volumeMounts: [{ name: data, mountPath: /data }]
+    - name: reader
+      image: busybox
+      volumeMounts: [{ name: data, mountPath: /data }]
+`;
+    expect(() => parseK8sManifest(shared, 'store')).toThrow(/"writer" and "reader"/);
+  });
+
+  test('delivers a ConfigMap declared in the same manifest as files', () => {
+    const [c] = parseK8sManifest(
+      podWith('    - name: data\n      configMap:\n        name: settings', `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: settings
+data:
+  app.conf: "listen 8080"
+  motd: hello
+---`),
+      'store',
+    );
+    expect(c.mounts).toEqual([{ kind: 'tmpfs', target: '/data', options: 'rw,nosuid,nodev' }]);
+    expect(c.files).toEqual([
+      { dir: '/data', name: 'app.conf', content: 'listen 8080', mode: 0o644 },
+      { dir: '/data', name: 'motd', content: 'hello', mode: 0o644 },
+    ]);
+  });
+
+  test('decodes a Secret and delivers it read-only to root', () => {
+    const [c] = parseK8sManifest(
+      podWith('    - name: data\n      secret:\n        secretName: creds', `apiVersion: v1
+kind: Secret
+metadata:
+  name: creds
+data:
+  token: ${Buffer.from('s3cr3t').toString('base64')}
+---`),
+      'store',
+    );
+    expect(c.files).toEqual([{ dir: '/data', name: 'token', content: 's3cr3t', mode: 0o400 }]);
+  });
+
+  test('reads a ConfigMap declared after the Pod that mounts it', () => {
+    // Document order would otherwise be a dependency nobody could debug from
+    // the error message.
+    const manifest = `${podWith('    - name: data\n      configMap:\n        name: settings')}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: settings
+data:
+  a: "1"
+`;
+    expect(parseK8sManifest(manifest, 'store')[0].files).toHaveLength(1);
+  });
+
+  test('selects and renames keys with items', () => {
+    const [c] = parseK8sManifest(
+      podWith(
+        '    - name: data\n      configMap:\n        name: settings\n        items:\n          - key: motd\n            path: banner.txt',
+        `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: settings
+data:
+  app.conf: "listen 8080"
+  motd: hello
+---`,
+      ),
+      'store',
+    );
+    expect(c.files).toEqual([{ dir: '/data', name: 'banner.txt', content: 'hello', mode: 0o644 }]);
+  });
+
+  test('refuses a reference to a ConfigMap that is not in the manifest', () => {
+    expect(() =>
+      parseK8sManifest(podWith('    - name: data\n      configMap:\n        name: absent'), 'store'),
+    ).toThrow(/ConfigMap "absent", which is not declared/);
+  });
+
+  test('mounts nothing when the missing reference is optional', () => {
+    // Kubernetes' own escape hatch, honoured rather than second-guessed.
+    const [c] = parseK8sManifest(
+      podWith('    - name: data\n      configMap:\n        name: absent\n        optional: true'),
+      'store',
+    );
+    expect(c.files).toBeUndefined();
+    expect(c.mounts).toHaveLength(1);
+  });
+
+  test('refuses a volume kind that needs a cluster behind it', () => {
+    expect(() =>
+      parseK8sManifest(
+        podWith('    - name: data\n      persistentVolumeClaim:\n        claimName: pvc'),
+        'store',
+      ),
+    ).toThrow(/persistentVolumeClaim volume/);
+  });
+
+  test('refuses a mount of a volume the Pod never declared', () => {
+    const orphan = `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: store
+spec:
+  containers:
+    - name: app
+      image: busybox
+      volumeMounts: [{ name: data, mountPath: /data }]
+`;
+    expect(() => parseK8sManifest(orphan, 'store')).toThrow(/no volume of that name is declared/);
+  });
+
+  test('refuses subPath rather than mounting the whole volume instead', () => {
+    const sub = podWith('    - name: data\n      emptyDir: {}').replace(
+      '          mountPath: /data',
+      '          mountPath: /data\n          subPath: inner',
+    );
+    expect(() => parseK8sManifest(sub, 'store')).toThrow(/subPath/);
+  });
+});
+
+describe('tmpfsSize', () => {
+  test('maps binary quantities onto tmpfs suffixes', () => {
+    expect(tmpfsSize('512Ki', 'x')).toBe('512k');
+    expect(tmpfsSize('64Mi', 'x')).toBe('64m');
+    expect(tmpfsSize('2Gi', 'x')).toBe('2g');
+  });
+
+  test('expands decimal quantities to bytes, which tmpfs reads unambiguously', () => {
+    expect(tmpfsSize('100M', 'x')).toBe('100000000');
+    expect(tmpfsSize('1G', 'x')).toBe('1000000000');
+  });
+
+  test('passes a bare byte count through', () => {
+    expect(tmpfsSize('1048576', 'x')).toBe('1048576');
+  });
+
+  test('is undefined when no limit is set', () => {
+    expect(tmpfsSize(undefined, 'x')).toBeUndefined();
+    expect(tmpfsSize('  ', 'x')).toBeUndefined();
+  });
+});
+
+describe('parseK8sManifest — environment from other objects', () => {
+  const OBJECTS = `
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: settings
+data:
+  LOG_LEVEL: debug
+  REGION: eu
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: creds
+stringData:
+  TOKEN: s3cr3t
+---`;
+
+  const podWithEnv = (env: string) => `${OBJECTS}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: envtest
+spec:
+  containers:
+    - name: app
+      image: busybox
+${env}
+`;
+
+  test('pulls every key in with envFrom', () => {
+    const [c] = parseK8sManifest(
+      podWithEnv('      envFrom:\n        - configMapRef:\n            name: settings'),
+      'envtest',
+    );
+    expect(c.env).toEqual(['LOG_LEVEL=debug', 'REGION=eu']);
+  });
+
+  test('applies an envFrom prefix', () => {
+    const [c] = parseK8sManifest(
+      podWithEnv('      envFrom:\n        - prefix: APP_\n          configMapRef:\n            name: settings'),
+      'envtest',
+    );
+    expect(c.env).toEqual(['APP_LOG_LEVEL=debug', 'APP_REGION=eu']);
+  });
+
+  test('resolves a single key by reference', () => {
+    const [c] = parseK8sManifest(
+      podWithEnv(
+        '      env:\n        - name: TOKEN\n          valueFrom:\n            secretKeyRef:\n              name: creds\n              key: TOKEN',
+      ),
+      'envtest',
+    );
+    expect(c.env).toEqual(['TOKEN=s3cr3t']);
+  });
+
+  test('an explicit env entry wins over envFrom', () => {
+    const [c] = parseK8sManifest(
+      podWithEnv(
+        '      envFrom:\n        - configMapRef:\n            name: settings\n      env:\n        - name: LOG_LEVEL\n          value: warn',
+      ),
+      'envtest',
+    );
+    expect(c.env).toContain('LOG_LEVEL=warn');
+    expect(c.env).not.toContain('LOG_LEVEL=debug');
+  });
+
+  test('refuses a key that is not in the object', () => {
+    expect(() =>
+      parseK8sManifest(
+        podWithEnv(
+          '      env:\n        - name: X\n          valueFrom:\n            configMapKeyRef:\n              name: settings\n              key: MISSING',
+        ),
+        'envtest',
+      ),
+    ).toThrow(/has no such key/);
+  });
+
+  test('refuses fieldRef, which describes a Pod that does not exist here', () => {
+    expect(() =>
+      parseK8sManifest(
+        podWithEnv(
+          '      env:\n        - name: POD_NAME\n          valueFrom:\n            fieldRef:\n              fieldPath: metadata.name',
+        ),
+        'envtest',
+      ),
+    ).toThrow(/fieldRef \(metadata\.name\)/);
   });
 });
 
