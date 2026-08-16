@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { parseCompose, topologicalOrder, validateCompose, type ParseComposeOptions } from './compose';
+import { parseCompose, topologicalOrder, validateCompose } from './compose';
+import type { PlanContext } from './deploy/plan';
 
 /** Deterministic allocator so port assignment is assertable. */
 function sequentialPorts(start = 31000) {
@@ -7,12 +8,16 @@ function sequentialPorts(start = 31000) {
   return () => next++;
 }
 
-function parse(manifest: string, options: Partial<ParseComposeOptions> = {}) {
+/** Slices to `abcdef12`, which is what appears in generated names. */
+const APP_ID = 'abcdef1234567890';
+
+function parse(manifest: string, options: Partial<PlanContext> = {}) {
   return parseCompose(manifest, {
+    appId: APP_ID,
     appName: 'shop',
     allocatePort: sequentialPorts(),
     ...options,
-  });
+  }).containers;
 }
 
 describe('network aliases', () => {
@@ -250,13 +255,18 @@ services:
   api: { image: nginx, ports: ["80"] }
 `, { baseDomain: 'apps.example.com' });
 
-    expect(containers[0].labels['traefik.http.routers.shop-secure.rule'])
-      .toBe('Host(`shop.apps.example.com`)');
-    expect(containers[1].labels['traefik.http.routers.shop-api-secure.rule'])
-      .toBe('Host(`shop-api.apps.example.com`)');
+    expect(containers[0].route).toMatchObject({
+      domain: 'shop.apps.example.com',
+      routerName: 'shop',
+      definesRouter: true,
+    });
+    expect(containers[1].route).toMatchObject({
+      domain: 'shop-api.apps.example.com',
+      routerName: 'shop-api',
+    });
   });
 
-  test('no two services share a Host rule', () => {
+  test('no two services share a hostname', () => {
     // Duplicate rules produce two Traefik routers and arbitrary resolution.
     const containers = parse(`
 services:
@@ -265,12 +275,8 @@ services:
   c: { image: nginx, ports: ["80"] }
 `, { baseDomain: 'apps.example.com' });
 
-    const rules = containers.flatMap((c) =>
-      Object.entries(c.labels)
-        .filter(([k]) => k.endsWith('-secure.rule'))
-        .map(([, v]) => v)
-    );
-    expect(new Set(rules).size).toBe(rules.length);
+    const domains = containers.map((c) => c.route!.domain);
+    expect(new Set(domains).size).toBe(domains.length);
   });
 
   test('an explicit app domain overrides the primary hostname only', () => {
@@ -280,10 +286,16 @@ services:
   api: { image: nginx, ports: ["80"] }
 `, { baseDomain: 'apps.example.com', appDomain: 'custom.example.com' });
 
-    expect(containers[0].labels['traefik.http.routers.shop-secure.rule'])
-      .toBe('Host(`custom.example.com`)');
-    expect(containers[1].labels['traefik.http.routers.shop-api-secure.rule'])
-      .toBe('Host(`shop-api.apps.example.com`)');
+    expect(containers[0].route?.domain).toBe('custom.example.com');
+    expect(containers[1].route?.domain).toBe('shop-api.apps.example.com');
+  });
+
+  test('the route names the allocated host port, not the declared one', () => {
+    const [c] = parse(`
+services:
+  web: { image: nginx, ports: ["8080:80"] }
+`, { baseDomain: 'apps.example.com' });
+    expect(c.route?.hostPort).toBe(31000);
   });
 
   test('services without ports get no route', () => {
@@ -291,7 +303,15 @@ services:
 services:
   worker: { image: nginx }
 `, { baseDomain: 'apps.example.com' });
-    expect(c.labels['traefik.enable']).toBeUndefined();
+    expect(c.route).toBeUndefined();
+  });
+
+  test('nothing is routed without a base domain', () => {
+    const [c] = parse(`
+services:
+  web: { image: nginx, ports: ["80"] }
+`);
+    expect(c.route).toBeUndefined();
   });
 });
 
@@ -334,7 +354,7 @@ services:
   db:
     image: postgres
 `);
-    expect(containers.map((c) => c.name)).toEqual(['shop-db', 'shop-web']);
+    expect(containers.map((c) => c.key)).toEqual(['db', 'web']);
   });
 
   test('supports the condition-map form', () => {
@@ -348,7 +368,7 @@ services:
   db:
     image: postgres
 `);
-    expect(containers.map((c) => c.name)).toEqual(['shop-db', 'shop-web']);
+    expect(containers.map((c) => c.key)).toEqual(['db', 'web']);
   });
 
   test('handles a chain', () => {
@@ -358,7 +378,7 @@ services:
   a: { image: nginx }
   b: { image: nginx, depends_on: [a] }
 `);
-    expect(containers.map((c) => c.name)).toEqual(['shop-a', 'shop-b', 'shop-c']);
+    expect(containers.map((c) => c.key)).toEqual(['a', 'b', 'c']);
   });
 
   test('ignores dependencies on services not in the file', () => {
@@ -366,7 +386,7 @@ services:
 services:
   web: { image: nginx, depends_on: [missing] }
 `);
-    expect(containers.map((c) => c.name)).toEqual(['shop-web']);
+    expect(containers.map((c) => c.name)).toEqual(['shop-abcdef12-web']);
   });
 
   test('does not let start order steal the application hostname', () => {
@@ -388,15 +408,11 @@ services:
       { baseDomain: 'example.com' },
     );
 
-    expect(containers.map((c) => c.name)).toEqual(['shop-db', 'shop-web']);
+    expect(containers.map((c) => c.key)).toEqual(['db', 'web']);
 
-    const hostOf = (name: string) => {
-      const c = containers.find((x) => x.name === name)!;
-      const rule = Object.entries(c.labels).find(([k]) => k.endsWith('-secure.rule'))![1];
-      return rule.match(/Host\(`([^`]+)`\)/)![1];
-    };
-    expect(hostOf('shop-web')).toBe('shop.example.com');
-    expect(hostOf('shop-db')).toBe('shop-db.example.com');
+    const hostOf = (key: string) => containers.find((c) => c.key === key)!.route!.domain;
+    expect(hostOf('web')).toBe('shop.example.com');
+    expect(hostOf('db')).toBe('shop-db.example.com');
   });
 
   test('throws on a cycle rather than ordering arbitrarily', () => {

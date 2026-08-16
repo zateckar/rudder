@@ -1,11 +1,28 @@
 import { describe, expect, test } from 'bun:test';
-import { k8sPodTemplate, parseK8sManifest, validateK8sManifest } from './kubernetes';
-import { PORT_RANGE_END, PORT_RANGE_START } from './ports';
+import { k8sPodTemplate, parseK8sManifest as parseManifest, validateK8sManifest } from './kubernetes';
+import type { PlanContext } from './deploy/plan';
+import { PORT_RANGE_END, PORT_RANGE_START, unreservedPort } from './ports';
 
 /** Deterministic stand-in for the deploy path's collision-checked allocator. */
 function sequentialAllocator(start = 31000) {
   let next = start;
   return () => next++;
+}
+
+/** Slices to `abcdef12`, which is what appears in generated names. */
+const APP_ID = 'abcdef1234567890';
+
+function parseK8sManifest(
+  manifest: string,
+  appName: string,
+  options: Partial<PlanContext> = {},
+) {
+  return parseManifest(manifest, {
+    appId: APP_ID,
+    appName,
+    allocatePort: sequentialAllocator(),
+    ...options,
+  }).containers;
 }
 
 const DEPLOYMENT = `
@@ -31,10 +48,9 @@ spec:
 
 describe('parseK8sManifest — Deployment', () => {
   test('extracts the container', () => {
-    const [c] = parseK8sManifest(DEPLOYMENT, 'shop', undefined, {
-      allocatePort: sequentialAllocator(),
-    });
-    expect(c.name).toBe('web');
+    const [c] = parseK8sManifest(DEPLOYMENT, 'shop');
+    expect(c.key).toBe('web');
+    expect(c.name).toBe('shop-abcdef12-web');
     expect(c.image).toBe('nginx:1.25');
     // Keyed by the port inside the container; the host port is allocated.
     expect(c.ports).toEqual({ '8080/tcp': [{ hostPort: '31000' }] });
@@ -42,11 +58,11 @@ describe('parseK8sManifest — Deployment', () => {
 
   test('reads environment, defaulting a valueless entry to empty', () => {
     const [c] = parseK8sManifest(DEPLOYMENT, 'shop');
-    expect(c.env).toEqual({ LOG_LEVEL: 'debug', EMPTY: '' });
+    expect(c.env).toEqual(['LOG_LEVEL=debug', 'EMPTY=']);
   });
 
   test('applies app and team labels', () => {
-    const [c] = parseK8sManifest(DEPLOYMENT, 'shop', 'platform');
+    const [c] = parseK8sManifest(DEPLOYMENT, 'shop', { teamSlug: 'platform' });
     expect(c.labels.app).toBe('shop');
     expect(c.labels.team).toBe('platform');
     expect(c.labels.tier).toBe('frontend');
@@ -95,17 +111,13 @@ spec:
     // The whole point: a Pod spec's containerPort is the port inside the
     // container. Publishing it verbatim meant two applications that both
     // listened on 80 could not share a worker.
-    const [c] = parseK8sManifest(TWO_CONTAINERS, 'pair', undefined, {
-      allocatePort: sequentialAllocator(),
-    });
+    const [c] = parseK8sManifest(TWO_CONTAINERS, 'pair');
     expect(Object.keys(c.ports)).toEqual(['80/tcp']);
     expect(c.ports['80/tcp'][0].hostPort).toBe('31000');
   });
 
   test('draws a distinct host port for every published port', () => {
-    const containers = parseK8sManifest(TWO_CONTAINERS, 'pair', undefined, {
-      allocatePort: sequentialAllocator(),
-    });
+    const containers = parseK8sManifest(TWO_CONTAINERS, 'pair');
     const hostPorts = containers.flatMap((c) =>
       Object.values(c.ports).map((bindings) => bindings[0].hostPort),
     );
@@ -114,16 +126,15 @@ spec:
   });
 
   test('two containers listening on the same port do not collide', () => {
-    const [web, admin] = parseK8sManifest(TWO_CONTAINERS, 'pair', undefined, {
-      allocatePort: sequentialAllocator(),
-    });
+    const [web, admin] = parseK8sManifest(TWO_CONTAINERS, 'pair');
     expect(web.ports['80/tcp'][0].hostPort).not.toBe(admin.ports['80/tcp'][0].hostPort);
   });
 
-  test('falls back to the safe range when no allocator is supplied', () => {
-    // Only reachable from callers inspecting a manifest rather than deploying
-    // it, but it must still stay below the kernel's ephemeral port floor.
-    const [c] = parseK8sManifest(TWO_CONTAINERS, 'pair');
+  test('draws from the safe range, below the kernel ephemeral floor', () => {
+    // The deploy path's allocator narrows further by excluding ports already
+    // held on the worker, but the range itself is what keeps a container from
+    // being handed a port the kernel is about to use for an outbound socket.
+    const [c] = parseK8sManifest(TWO_CONTAINERS, 'pair', { allocatePort: unreservedPort });
     const port = Number(c.ports['80/tcp'][0].hostPort);
     expect(port).toBeGreaterThanOrEqual(PORT_RANGE_START);
     expect(port).toBeLessThan(PORT_RANGE_END);
@@ -131,7 +142,7 @@ spec:
 
   test('a container with no ports declares no bindings', () => {
     const noPorts = TWO_CONTAINERS.replace(/      ports:\n(        - containerPort: \d+\n)+/g, '');
-    const containers = parseK8sManifest(noPorts, 'pair', undefined, {
+    const containers = parseK8sManifest(noPorts, 'pair', {
       allocatePort: () => {
         throw new Error('should not allocate for a container that publishes nothing');
       },
@@ -261,12 +272,29 @@ spec:
           cpu: "2"
 `;
 
-  test('extracts command, args and working directory', () => {
+  test('maps command onto the entrypoint and args onto the command', () => {
+    // Kubernetes and OCI make the same split under swapped names. Putting k8s
+    // `command` into Podman's Cmd left the image's own ENTRYPOINT in front of
+    // it, and `args` was dropped entirely.
     const [c] = parseK8sManifest(POD, 'tool');
-    expect(c.command).toEqual(['sh', '-c']);
-    expect(c.args).toEqual(['sleep 1']);
+    expect(c.entrypoint).toEqual(['sh', '-c']);
+    expect(c.command).toEqual(['sleep 1']);
     expect(c.workingDir).toBe('/work');
-    expect(c.restartPolicy).toBe('OnFailure');
+  });
+
+  test('translates the restart policy into the spelling Podman accepts', () => {
+    // Podman rejects `OnFailure` outright, so a manifest that declared any
+    // restart policy failed to create its containers.
+    expect(parseK8sManifest(POD, 'tool')[0].restartPolicy).toBe('on-failure');
+    expect(parseK8sManifest(POD.replace('OnFailure', 'Always'), 'tool')[0].restartPolicy).toBe('always');
+    expect(parseK8sManifest(POD.replace('OnFailure', 'Never'), 'tool')[0].restartPolicy).toBe('no');
+  });
+
+  test('falls back to the application policy when the Pod declares none', () => {
+    const noPolicy = POD.replace('  restartPolicy: OnFailure\n', '');
+    expect(parseK8sManifest(noPolicy, 'tool')[0].restartPolicy).toBe('always');
+    expect(parseK8sManifest(noPolicy, 'tool', { restartPolicy: 'unless-stopped' })[0].restartPolicy)
+      .toBe('unless-stopped');
   });
 
   test('resolves a volumeMount against the pod volume', () => {
@@ -279,7 +307,8 @@ spec:
   test('parses resource limits', () => {
     const [c] = parseK8sManifest(POD, 'tool');
     expect(c.memory).toBe(512 * 1024 * 1024);
-    expect(c.cpuShares).toBeGreaterThan(0);
+    expect(c.cpuQuota).toBeGreaterThan(0);
+    expect(c.cpuPeriod).toBe(100000);
   });
 });
 
@@ -291,7 +320,7 @@ describe('parseK8sManifest — input handling', () => {
       spec: { template: { spec: { containers: [{ name: 'web', image: 'nginx' }] } } },
     });
     const [c] = parseK8sManifest(json, 'shop');
-    expect(c.name).toBe('web');
+    expect(c.key).toBe('web');
   });
 
   test('handles multi-document YAML, ignoring non-workload kinds', () => {

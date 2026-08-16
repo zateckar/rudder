@@ -1,8 +1,15 @@
-import { generateTraefikLabelsForApp } from './provisioning';
-import { buildAppDomain, buildServiceDomain, routerName } from './domains';
+import {
+  ManifestError,
+  createRouteAssigner,
+  identityLabels,
+  plannedContainerName,
+  type DeploymentPlan,
+  type PlanContext,
+  type PlannedContainer,
+  type PlannedHealthcheck,
+} from './deploy/plan';
 import { ALIAS_LABEL, assertDistinctAliases, networkAliases } from './networks';
 import type { MountIntent } from './mounts';
-import { unreservedPort, type PortAllocator } from './ports';
 import { composeVolumeName, isHostPathSource, volumeBaseName } from './volumes';
 
 export interface ComposeService {
@@ -49,85 +56,13 @@ export interface ComposeConfig {
   volumes?: Record<string, { driver?: string; external?: boolean }>;
 }
 
-export interface ParsedContainer {
-  name: string;
-  image: string;
-  env: string[];
-  ports: Record<string, Array<{ hostPort: string }>>;
-  /** What the service asked to mount. Policy is applied by the executor. */
-  mounts: MountIntent[];
-  restartPolicy: string;
-  labels: Record<string, string>;
-  command?: string[];
-  entrypoint?: string[];
-  workingDir?: string;
-  memory?: number;
-  cpuShares?: number;
-  healthcheck?: {
-    test: string[];
-    interval?: number;   // nanoseconds
-    timeout?: number;     // nanoseconds
-    retries?: number;
-    startPeriod?: number; // nanoseconds
-  };
-  networks?: string[];
-  /** DNS names siblings can reach this container by. See `networkAliases`. */
-  aliases: string[];
-  /** Hostname this service is routed at, when it exposes a port. */
-  domain?: string;
-  /** Traefik router/service name for that hostname. */
-  routerName?: string;
-  /** Host port behind the route. */
-  exposedPort?: number;
-}
-
-export interface ParseComposeOptions {
-  appName: string;
-  teamSlug?: string;
-  baseDomain?: string;
-  appId?: string;
-  team?: { name: string; id: string };
-  stack?: { name: string; id: string };
-  /** Whether the worker has a usable global OIDC middleware deployed. */
-  globalOidcEnabled?: boolean;
-  /** Explicit hostname for the app's primary service (app.domain override). */
-  appDomain?: string | null;
-  /**
-   * Whether to stamp `traefik.*` labels. False for workers in `http` routing
-   * mode, where routing is served from the control plane instead — both at once
-   * would give Traefik two routers with the same `Host()` rule.
-   * The hostname is still computed and returned either way.
-   */
-  emitTraefikLabels?: boolean;
-  /**
-   * Allocates a free host port on the target worker. Supplied by the caller so
-   * allocation can consult ports already taken by other containers; without it
-   * ports are drawn at random, which is only safe in tests.
-   */
-  allocatePort?: PortAllocator;
-}
-
-export function parseCompose(
-  manifest: string,
-  options: ParseComposeOptions
-): ParsedContainer[] {
-  const {
-    appName,
-    teamSlug,
-    baseDomain,
-    appId,
-    team,
-    stack,
-    globalOidcEnabled = false,
-    appDomain,
-    emitTraefikLabels = true,
-    allocatePort,
-  } = options;
+export function parseCompose(manifest: string, ctx: PlanContext): DeploymentPlan {
+  const { appName, baseDomain, allocatePort } = ctx;
 
   const config = Bun.YAML.parse(manifest) as ComposeConfig;
 
   if (!config || !config.services) {
-    throw new Error('Invalid compose file: no services defined');
+    throw new ManifestError('Invalid compose file: no services defined');
   }
 
   // Services must start in dependency order. `depends_on` was parsed into the
@@ -140,27 +75,20 @@ export function parseCompose(
   // hand `<app>.<base>` to the database instead of the web front-end.
   const ordering = topologicalOrder(config.services);
   if ('cycle' in ordering) {
-    throw new Error(`Circular depends_on: ${ordering.cycle.join(' → ')}`);
+    throw new ManifestError(`Circular depends_on: ${ordering.cycle.join(' → ')}`);
   }
 
   // Compose keys are unique by construction, but they are not DNS labels:
   // `my_db` and `my-db` are two services that would answer to one alias.
   assertDistinctAliases(appName, Object.keys(config.services));
 
-  const appLabel = { app: appName };
-
-  const containers: ParsedContainer[] = [];
-
-  // The first service that exposes a port owns the application hostname; the
-  // rest get <app>-<service>. Previously every service was routed at
-  // `<app>.<baseDomain>`, so Traefik ended up with several routers sharing one
-  // Host rule and picked between them arbitrarily.
-  let primaryRouteTaken = false;
+  const containers: PlannedContainer[] = [];
+  const assignRoute = createRouteAssigner(ctx);
 
   for (const serviceName of Object.keys(config.services)) {
     const service = config.services[serviceName];
-    const containerName = `${appName}-${appId ? appId.slice(0, 8) + '-' : ''}${serviceName}`;
-    
+    const containerName = plannedContainerName(ctx, serviceName);
+
     const env: Record<string, string> = {};
     
     if (service.environment) {
@@ -209,7 +137,7 @@ export function parseCompose(
         // could collide with another service in the same file, or with an
         // existing container, and the resulting bind failure surfaced as an
         // unrelated-looking container start error.
-        const hostPort = allocatePort ? allocatePort() : unreservedPort();
+        const hostPort = allocatePort();
         ports[`${containerPort}/${proto}`] = [{ hostPort: String(hostPort) }];
       }
     }
@@ -251,7 +179,7 @@ export function parseCompose(
         // the worker's.
         const name = source && !source.startsWith('.') && !source.startsWith('~')
           ? source
-          : composeVolumeName(appId, serviceName, volumeBaseName(source, target));
+          : composeVolumeName(ctx.appId, serviceName, volumeBaseName(source, target));
         mounts.push({ kind: 'volume', name, target, mode: options });
       }
     }
@@ -272,29 +200,12 @@ export function parseCompose(
     const aliases = networkAliases(appName, serviceName);
 
     const labels: Record<string, string> = {
-      ...appLabel,
+      ...identityLabels(ctx),
       service: serviceName,
       // The bare alias, recorded so a later deploy can see which names are
       // already claimed on a shared stack network without reparsing manifests.
       [ALIAS_LABEL]: aliases[0],
-      // Marks the container as Rudder's. The reconciler will only ever delete
-      // containers carrying this, so a co-tenant's workload is never garbage
-      // collected off a shared worker.
-      'rudder.managed': 'true',
     };
-
-    if (teamSlug) {
-      labels.team = teamSlug;
-      if (team) {
-        labels['rudder.team.name'] = team.name;
-        labels['rudder.team.id'] = team.id;
-      }
-    }
-
-    if (stack) {
-      labels['rudder.stack.name'] = stack.name;
-      labels['rudder.stack.id'] = stack.id;
-    }
 
     if (service.labels) {
       // Strip any traefik.* labels from user-provided compose to prevent route hijacking
@@ -307,41 +218,13 @@ export function parseCompose(
       Object.assign(labels, sanitized);
     }
     
-    // Check if service has ports exposed - if so, it gets a route
-    const hasExposedPorts = ports && Object.keys(ports).length > 0;
-    let serviceDomain: string | undefined;
-    let serviceRouter: string | undefined;
-    let serviceExposedPort: number | undefined;
-
-    if (hasExposedPorts && baseDomain) {
-      // Get the first port for Traefik routing
-      const firstPortKey = Object.keys(ports)[0];
-      const firstPortBinding = ports[firstPortKey]?.[0]?.hostPort;
-
-      if (firstPortBinding) {
-        const isPrimary = !primaryRouteTaken;
-        primaryRouteTaken = true;
-        serviceDomain = isPrimary
-          ? (appDomain || buildAppDomain(appName, baseDomain) || appName)
-          : (buildServiceDomain(appName, serviceName, baseDomain) || `${appName}-${serviceName}`);
-        serviceRouter = isPrimary ? routerName(appName) : routerName(appName, serviceName);
-        serviceExposedPort = parseInt(firstPortBinding);
-
-        if (emitTraefikLabels) {
-          const traefikLabels = generateTraefikLabelsForApp(
-            serviceRouter,
-            serviceDomain,
-            serviceExposedPort,
-            true, // Enable WebSocket for terminals
-            undefined, // middlewareOpts
-            globalOidcEnabled
-          );
-
-          // Merge Traefik labels with existing labels
-          Object.assign(labels, traefikLabels);
-        }
-      }
-    }
+    // A service that publishes nothing has no route: it is reachable by its
+    // siblings over the bridge, and by nobody else.
+    const firstPortKey = Object.keys(ports)[0];
+    const firstHostPort = firstPortKey ? ports[firstPortKey]?.[0]?.hostPort : undefined;
+    const route = firstHostPort && baseDomain
+      ? assignRoute(serviceName, parseInt(firstHostPort))
+      : undefined;
 
     let memory: number | undefined;
     if (service.mem_limit) {
@@ -358,7 +241,7 @@ export function parseCompose(
     }
 
     // Parse healthcheck
-    let healthcheck: ParsedContainer['healthcheck'];
+    let healthcheck: PlannedHealthcheck | undefined;
     if (service.healthcheck) {
       const hc = service.healthcheck;
       let test: string[] = [];
@@ -380,32 +263,37 @@ export function parseCompose(
     }
 
     containers.push({
+      key: serviceName,
       name: containerName,
       image: service.image || `${serviceName}:latest`,
       env: Object.entries(env).map(([k, v]) => `${k}=${v}`),
       ports,
       mounts,
+      aliases,
       restartPolicy,
       labels,
       command: service.command ? (Array.isArray(service.command) ? service.command : [service.command]) : undefined,
       entrypoint: service.entrypoint ? (Array.isArray(service.entrypoint) ? service.entrypoint : [service.entrypoint]) : undefined,
       workingDir: service.working_dir,
       memory,
-      cpuShares,
+      cpuQuota: cpuShares ? cpuShares * 100 : undefined,
+      cpuPeriod: cpuShares ? 100000 : undefined,
       healthcheck,
-      networks: service.networks,
-      aliases,
-      domain: serviceDomain,
-      routerName: serviceRouter,
-      exposedPort: serviceExposedPort,
+      route,
     });
   }
 
   // Start order only — nothing here waits for a dependency to become healthy.
+  // Applied to the finished list rather than to the parse loop: which service
+  // owns the application hostname is decided by *declaration* order, and a
+  // topological walk puts the dependencies first, which would hand
+  // `<app>.<base>` to the database instead of the web front-end.
   const startPosition = new Map(ordering.order.map((name, i) => [name, i]));
-  const positionOf = (c: ParsedContainer) =>
-    startPosition.get(c.labels['service'] ?? '') ?? Number.MAX_SAFE_INTEGER;
-  return containers.sort((a, b) => positionOf(a) - positionOf(b));
+  const positionOf = (c: PlannedContainer) =>
+    startPosition.get(c.key) ?? Number.MAX_SAFE_INTEGER;
+  containers.sort((a, b) => positionOf(a) - positionOf(b));
+
+  return { containers, notes: [] };
 }
 
 /** Normalise `depends_on`, which compose accepts as a list or a condition map. */

@@ -5,26 +5,25 @@ import { db } from '$lib/db';
 import { applications, workers, containers, teams, stacks, volumes, secrets, deployments } from '$lib/db/schema';
 import { and, eq, inArray, ne, or, desc } from 'drizzle-orm';
 import { getRestPodmanClient } from '$lib/server/podman-client';
-import { parseCompose, validateCompose } from '$lib/server/compose';
-import { parseK8sManifest, validateK8sManifest } from '$lib/server/kubernetes';
-import { generateTraefikLabelsForApp } from '$lib/server/provisioning';
+import { buildDeploymentPlan } from '$lib/server/deploy/build';
+import {
+  ManifestError,
+  type DeploymentPlan,
+  type PlanContext,
+  type PlannedFile,
+  type PlannedRoute,
+} from '$lib/server/deploy/plan';
+import { generateTraefikLabelsForApp, type AppMiddlewareOptions } from '$lib/server/provisioning';
 // Shared with the config generator so `labels` and `http` mode workers apply
 // exactly the same rate limit, auth mode and health check.
 import { buildMiddlewareOpts } from '$lib/server/traefik-config';
-import { buildAppDomain, buildServiceDomain, routerName } from '$lib/server/domains';
 import { ALLOWED_DOMAINS_UNSUPPORTED } from '$lib/server/oidc';
 import { decrypt } from '$lib/server/encryption';
-import {
-  ALIAS_LABEL,
-  ensureAppNetwork,
-  networkAliases,
-  teardownAppNetwork,
-} from '$lib/server/networks';
+import { ALIAS_LABEL, ensureAppNetwork, teardownAppNetwork } from '$lib/server/networks';
 import { env } from '$lib/server/env';
 import { MountPolicyError, realizeMounts, type MountIntent } from '$lib/server/mounts';
 import { singleMountIntents } from '$lib/server/volumes';
 import {
-  SINGLE_IMAGE_KEY,
   parseDigestRecord,
   pinnedImageFor,
   serializeDigestRecord,
@@ -49,20 +48,6 @@ import {
   retentionMs,
   supportsBlueGreen,
 } from '$lib/server/generations';
-
-/** Parse memory string like "512m", "2g" -> bytes */
-function parseMemory(mem: string): number | undefined {
-  if (!mem) return undefined;
-  const match = mem.trim().match(/^(\d+(?:\.\d+)?)\s*([kmgKMG]?)[bB]?$/);
-  if (!match) return undefined;
-  let val = parseFloat(match[1]);
-  const unit = match[2].toLowerCase();
-  if (unit === 'k') val *= 1024;
-  else if (unit === 'm') val *= 1024 * 1024;
-  else if (unit === 'g') val *= 1024 * 1024 * 1024;
-  return Math.floor(val);
-}
-
 
 /**
  * Where file-mode secrets are mounted, following the Docker/Podman convention
@@ -116,80 +101,116 @@ async function resolveSecrets(teamId: string | null): Promise<ResolvedSecrets> {
 }
 
 /**
- * Write file-mode secrets into a created-but-not-started container.
+ * Write a container's files in before it is started.
  *
  * Uploading before start is deliberate: Podman mounts the container's
- * filesystem to service the archive upload — tmpfs included — so the files are
- * in place the instant the entrypoint runs, with no window where the process
- * is up and its configuration is not.
+ * filesystem to service the archive upload — tmpfs included — so the content is
+ * in place the instant the entrypoint runs, with no window where the process is
+ * up and its configuration is not.
+ *
+ * One archive per target directory, because that is what `putArchive` takes.
  */
-async function deliverSecretFiles(
+async function deliverFiles(
   podmanClient: ReturnType<typeof getRestPodmanClient>,
   containerId: string,
-  files: Array<{ name: string; value: string }>,
+  files: readonly PlannedFile[],
 ): Promise<void> {
   if (files.length === 0) return;
 
-  // The API constrains secret names to /^[A-Z_][A-Z0-9_]*$/, but this is the
-  // point where a name becomes a path inside a container, so it is checked
-  // again here rather than trusted. A `../` in a name would write outside
-  // /run/secrets; an over-long one would overflow the USTAR name field.
-  const safe = files.filter((f) => {
-    const ok = /^[A-Za-z_][A-Za-z0-9_.-]*$/.test(f.name) && Buffer.byteLength(f.name) <= MAX_TAR_NAME;
-    if (!ok) console.error(`[deploy] Refusing to deliver secret with unusable name: ${f.name}`);
-    return ok;
-  });
-  if (safe.length === 0) return;
-
-  const archive = buildTar(
-    safe.map((f) => ({ name: f.name, content: f.value, mode: 0o400 })),
-  );
-  await podmanClient.putArchive(containerId, SECRETS_DIR, archive);
-}
-
-/** Parse duration string (e.g. "30s", "1m30s", "5m") to nanoseconds */
-function parseDuration(dur: string): number {
-  let totalMs = 0;
-  const parts = dur.match(/(\d+)(h|m|s|ms|us|ns)/g);
-  if (!parts) return 0;
-  for (const part of parts) {
-    const match = part.match(/^(\d+)(h|m|s|ms|us|ns)$/);
-    if (!match) continue;
-    const val = parseInt(match[1]);
-    switch (match[2]) {
-      case 'h': totalMs += val * 3600000; break;
-      case 'm': totalMs += val * 60000; break;
-      case 's': totalMs += val * 1000; break;
-      case 'ms': totalMs += val; break;
-      case 'us': totalMs += val / 1000; break;
-      case 'ns': return val;
+  const byDirectory = new Map<string, PlannedFile[]>();
+  for (const file of files) {
+    // The secrets API constrains names to /^[A-Z_][A-Z0-9_]*$/ and a ConfigMap
+    // key has its own rules, but this is the point where a name becomes a path
+    // inside a container, so it is checked again here rather than trusted. A
+    // `../` in a name would write outside the target directory; an over-long
+    // one would overflow the USTAR name field.
+    const usable =
+      /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(file.name) &&
+      Buffer.byteLength(file.name) <= MAX_TAR_NAME;
+    if (!usable) {
+      console.error(`[deploy] Refusing to deliver a file with an unusable name: ${file.name}`);
+      continue;
     }
+    const bucket = byDirectory.get(file.dir) ?? [];
+    bucket.push(file);
+    byDirectory.set(file.dir, bucket);
   }
-  return totalMs * 1_000_000;
+
+  for (const [dir, contents] of byDirectory) {
+    const archive = buildTar(
+      contents.map((f) => ({ name: f.name, content: f.content, mode: f.mode ?? 0o644 })),
+    );
+    await podmanClient.putArchive(containerId, dir, archive);
+  }
 }
 
-/** Parse app healthcheck JSON into Podman createContainer healthcheck config */
-function parseHealthcheck(raw: string | null | undefined): {
-  test: string[];
-  interval?: number;
-  timeout?: number;
-  retries?: number;
-  startPeriod?: number;
-} | undefined {
-  if (!raw) return undefined;
-  try {
-    const hc = JSON.parse(raw);
-    if (!hc.test || !hc.test.trim()) return undefined;
+// ── Routing ──────────────────────────────────────────────────────────────────
+
+/**
+ * Traefik labels for a container's route.
+ *
+ * Only stamped on `labels`-mode workers. In `http` mode the routing config is
+ * served from the control plane, generated from the domain/router/port columns
+ * written alongside the container, and doing both would give Traefik two
+ * routers with the same `Host()` rule.
+ */
+function routingLabels(
+  route: PlannedRoute,
+  middlewareOpts: AppMiddlewareOptions | undefined,
+  globalOidcEnabled: boolean,
+): Record<string, string> {
+  if (!route.definesRouter) {
+    // A replica. It advertises its own address under the shared service name so
+    // Traefik load-balances across the set, and defines nothing else.
     return {
-      test: ['CMD-SHELL', hc.test],
-      interval: hc.interval ? parseDuration(hc.interval) : undefined,
-      timeout: hc.timeout ? parseDuration(hc.timeout) : undefined,
-      retries: hc.retries ? parseInt(hc.retries) : undefined,
-      startPeriod: hc.startPeriod ? parseDuration(hc.startPeriod) : undefined,
+      'traefik.enable': 'true',
+      [`traefik.http.services.${route.routerName}.loadbalancer.server.url`]:
+        `http://127.0.0.1:${route.hostPort}`,
     };
-  } catch {
-    return undefined;
   }
+  return generateTraefikLabelsForApp(
+    route.routerName,
+    route.domain,
+    route.hostPort,
+    true, // WebSocket, for terminals
+    middlewareOpts,
+    globalOidcEnabled,
+  );
+}
+
+// ── Volumes ──────────────────────────────────────────────────────────────────
+
+/**
+ * Look up the registered volumes an application references by id.
+ *
+ * Separated from building the mount intents so that part stays pure: the
+ * registry is the only thing about a single-container application's storage
+ * that is not in its own columns.
+ */
+async function resolveVolumeRegistry(
+  raw: string | null | undefined,
+): Promise<Map<string, { name: string; containerPath: string }>> {
+  const registry = new Map<string, { name: string; containerPath: string }>();
+  if (!raw) return registry;
+
+  let referenced: string[] = [];
+  try {
+    const declared = JSON.parse(raw);
+    if (Array.isArray(declared)) {
+      referenced = declared
+        .map((v: { volumeId?: string }) => v?.volumeId)
+        .filter((id): id is string => !!id);
+    }
+  } catch {
+    // Malformed JSON: nothing to look up, and nothing to mount.
+  }
+  if (referenced.length === 0) return registry;
+
+  const rows = await db.select().from(volumes).where(inArray(volumes.id, referenced)).all();
+  for (const row of rows) {
+    registry.set(row.id, { name: row.name, containerPath: row.containerPath });
+  }
+  return registry;
 }
 
 // ── Host port allocation ─────────────────────────────────────────────────────
@@ -657,6 +678,71 @@ export async function executeApplicationDeploy(
   /** Everything created by this deploy, so a failure can undo exactly it. */
   const createdContainers: CreatedContainer[] = [];
 
+  let team: typeof teams.$inferSelect | undefined;
+  if (app.teamId) {
+    team = await db.select().from(teams).where(eq(teams.id, app.teamId)).get();
+  }
+
+  let stack: typeof stacks.$inferSelect | undefined;
+  if (app.stackId) {
+    stack = await db.select().from(stacks).where(eq(stacks.id, app.stackId)).get();
+  }
+
+  // ── Plan ────────────────────────────────────────────────────────────────
+  // Built before the deployment row exists and before anything is torn down,
+  // so a manifest Rudder will not deploy costs the application nothing.
+  //
+  // Ports already held on this worker are excluded from allocation. The
+  // application's own are released only on the legacy path, where its
+  // containers are removed later in this same deploy; a blue/green deploy
+  // leaves the previous generation running on them.
+  const takenPorts = await reservedPortsForWorker(worker.id, blueGreen ? undefined : app.id);
+
+  const planContext: PlanContext = {
+    appId: app.id,
+    appName: app.name,
+    appDomain: app.domain,
+    baseDomain: process.env.TRAEFIK_BASE_DOMAIN || worker.baseDomain || worker.hostname,
+    teamSlug: team?.slug,
+    team: team ? { id: team.id, name: team.name } : undefined,
+    stack: stack ? { id: stack.id, name: stack.name } : undefined,
+    replicas: app.replicas,
+    restartPolicy: app.restartPolicy,
+    environment: app.environment,
+    healthcheck: app.healthcheck,
+    gitRepo: app.gitRepo,
+    allocatePort: () => {
+      const port = pickFreePort(takenPorts);
+      takenPorts.add(port);
+      return port;
+    },
+  };
+
+  let plan: DeploymentPlan;
+  try {
+    plan = buildDeploymentPlan(
+      {
+        type: app.type,
+        manifest: app.manifest,
+        singleMounts: singleMountIntents(app.id, app.volumes, await resolveVolumeRegistry(app.volumes)),
+      },
+      planContext,
+    );
+  } catch (e: any) {
+    // A manifest that cannot be deployed as written. Nothing has been created,
+    // nothing torn down, and no deployment row records the attempt.
+    if (e instanceof ManifestError) {
+      return { success: false, message: e.message, statusCode: 400 };
+    }
+    throw e;
+  }
+
+  for (const note of plan.notes) {
+    console.warn(`[deploy] ${app.name}: ${note}`);
+  }
+
+  await warnOnAliasCollisions(app, [...new Set(plan.containers.map((c) => c.aliases[0]))]);
+
   // ── Record deployment ──────────────────────────────────
   const lastDeployment = await db.select({ version: deployments.version })
     .from(deployments)
@@ -666,13 +752,11 @@ export async function executeApplicationDeploy(
     .get();
   const nextVersion = (lastDeployment?.version ?? 0) + 1;
 
-  let deployImage: string | null = null;
-  try {
-    const parsed = JSON.parse(app.manifest);
-    deployImage = parsed.image || null;
-  } catch {
-    deployImage = app.manifest;
-  }
+  // The plan's own answer, not a guess from the manifest column. Reading it
+  // back out of the manifest meant a compose file that failed `JSON.parse` was
+  // stored here whole — environment block, API keys and all — and shown in the
+  // deployment history.
+  const deployImage = plan.containers[0]?.image ?? null;
 
   // Digests recorded by the deployment being restored, if this is a rollback.
   // Empty for an ordinary deploy, which pins nothing and resolves tags fresh.
@@ -740,367 +824,88 @@ export async function executeApplicationDeploy(
       }
     }
 
-    let teamSlug: string | undefined;
-    let team: typeof teams.$inferSelect | undefined;
-    if (app.teamId) {
-      team = await db.select().from(teams).where(eq(teams.id, app.teamId)).get();
-      if (team) teamSlug = team.slug;
-    }
+    // ── Execute ───────────────────────────────────────────────────────────
+    // One loop, whatever the application was written as. Everything that used
+    // to be repeated per format — secrets, digests, labels, rows, start —
+    // happens here and only here.
+    const networkName = await ensureAppNetwork(podmanClient, app.id, app.stackId);
+    const appSecrets = await resolveSecrets(app.teamId);
+    const middlewareOpts = buildMiddlewareOpts(app);
 
-    let stack: typeof stacks.$inferSelect | undefined;
-    if (app.stackId) {
-      stack = await db.select().from(stacks).where(eq(stacks.id, app.stackId)).get();
-    }
-
-    if (app.type === 'compose') {
-      const validation = validateCompose(app.manifest);
-      if (!validation.valid) {
-        return { success: false, message: validation.errors.join(', '), statusCode: 400 };
-      }
-
-      const baseDomain = process.env.TRAEFIK_BASE_DOMAIN || worker.baseDomain || worker.hostname;
-
-      // Same collision-checked allocator the single-container path uses. Compose
-      // previously drew host ports at random with no check, so two services in
-      // one file could be handed the same port.
-      const composeTakenPorts = await reservedPortsForWorker(
-        worker.id,
-        blueGreen ? undefined : app.id,
-      );
-      const parsedContainers = parseCompose(app.manifest, {
-        appName: app.name,
-        teamSlug,
-        baseDomain,
-        appId: app.id,
-        team: team ? { name: team.name, id: team.id } : undefined,
-        stack: stack ? { name: stack.name, id: stack.id } : undefined,
-        globalOidcEnabled,
-        appDomain: app.domain,
-        emitTraefikLabels: !httpRouting,
-        allocatePort: () => {
-          const port = pickFreePort(composeTakenPorts);
-          composeTakenPorts.add(port);
-          return port;
-        },
-      });
-
-      await warnOnAliasCollisions(app, parsedContainers.map((c) => c.aliases[0]));
-
-      // Create isolated network for this app/stack
-      const networkName = await ensureAppNetwork(podmanClient, app.id, app.stackId);
-
-      const composeSecrets = await resolveSecrets(app.teamId);
-      const composeSecretEnvVars = composeSecrets.env;
-
-      for (const container of parsedContainers) {
-        try {
-          // Keyed by compose service name so a rollback pins each service to
-          // the bytes it ran, not merely to the first image in the file.
-          const digestKey = container.labels['service'] ?? container.name;
-          const composeImage = pinnedImageFor(digestKey, requestedDigests, container.image);
-
-          const containerKeys = new Set(container.env.map((e: string) => e.split('=')[0]));
-          const mergedContainerEnv = [
-            ...composeSecretEnvVars.filter(s => !containerKeys.has(s.split('=')[0])),
-            ...container.env,
-          ];
-
-          const composeName = nameFor(container.name);
-          const containerResult = await podmanClient.createContainer({
-            name: composeName,
-            image: composeImage,
-            env: mergedContainerEnv,
-            ports: container.ports,
-            labels: container.labels,
-            restartPolicy: container.restartPolicy,
-            command: container.command,
-            entrypoint: container.entrypoint,
-            workingDir: container.workingDir,
-            memory: container.memory,
-            cpuQuota: container.cpuShares ? container.cpuShares * 100 : undefined,
-            cpuPeriod: container.cpuShares ? 100000 : undefined,
-            healthcheck: container.healthcheck,
-            networkMode: networkName,
-            networkAliases: container.aliases,
-            ...containerMounts(container.mounts, composeSecrets.files.length > 0),
-          });
-
-          await deliverSecretFiles(podmanClient, containerResult.Id, composeSecrets.files);
-
-          // Resolved after createContainer, which pulls: this is the digest of
-          // what is about to run, not of a stale local copy.
-          const composeDigest = await podmanClient.resolveImageDigest(composeImage);
-          if (composeDigest) deployedDigests.set(digestKey, composeDigest);
-
-          const composeRowId = crypto.randomUUID();
-          await db.insert(containers).values({
-            id: composeRowId,
-            applicationId: app.id,
-            workerId: worker.id,
-            containerId: containerResult.Id,
-            name: composeName,
-            image: composeImage,
-            status: 'created',
-            // Every binding, not just the routed one: `reservedPortsForWorker`
-            // reads this column, and a container's second published port has to
-            // stay reserved too or a later deploy will be handed it.
-            ports: Object.keys(container.ports).length > 0 ? JSON.stringify(container.ports) : null,
-            exposedPort: container.exposedPort ?? null,
-            domain: container.domain ?? null,
-            routerName: container.routerName ?? null,
-            labels: JSON.stringify(redactSecretLabels(container.labels)),
-            generation,
-            state: initialState,
-            deploymentId,
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          });
-          createdContainers.push({
-            rowId: composeRowId,
-            containerId: containerResult.Id,
-            name: composeName,
-          });
-
-          await podmanClient.startContainer(containerResult.Id);
-          await db.update(containers)
-            .set({ status: 'running', updatedAt: new Date() })
-            .where(eq(containers.containerId, containerResult.Id));
-        } catch (e: any) {
-          console.error(`Failed to create container ${container.name}:`, e);
-          throw new Error(`Container '${container.name}' failed to deploy: ${e.message}`);
-        }
-      }
-    } else if (app.type === 'single') {
-      let cfg: {
-        image: string;
-        command?: string;
-        workingDir?: string;
-        memoryLimit?: string;
-        cpuLimit?: string;
-        ports?: Array<{ containerPort: string; hostPort: string; protocol: string }>;
-      };
-
+    for (const planned of plan.containers) {
       try {
-        cfg = JSON.parse(app.manifest);
-        if (!cfg.image) throw new Error('no image');
-      } catch {
-        cfg = { image: app.manifest };
-      }
+        const digestKey = planned.digestKey ?? planned.key;
+        const image = pinnedImageFor(digestKey, requestedDigests, planned.image);
 
-      // Git-based builds required an SSH key held server-side; that was removed
-      // when keys moved to the browser vault, so the feature no longer exists.
-      // Fail with a clear message instead of a generic build error.
-      if (app.gitRepo) {
-        return {
-          success: false,
-          message:
-            'Git-based builds are no longer supported — SSH keys are not stored server-side. ' +
-            'Build the image in CI and deploy it by tag instead.',
-          statusCode: 400,
-        };
-      }
+        // A value the manifest sets wins over a secret of the same name: the
+        // manifest is the more specific statement of intent.
+        const declared = new Set(planned.env.map((e) => e.split('=')[0]));
+        const env = [
+          ...appSecrets.env.filter((s) => !declared.has(s.split('=')[0])),
+          ...planned.env,
+        ];
 
-      const appSecrets = await resolveSecrets(app.teamId);
-      const secretEnvVars = appSecrets.env;
-
-      let envArray: string[] = [];
-      if (app.environment) {
-        try {
-          const envVars: Array<{ key: string; value: string }> = JSON.parse(app.environment);
-          envArray = envVars
-            .filter((e) => e.key.trim())
-            .map((e) => `${e.key}=${e.value}`);
-        } catch {
-          // ignore
-        }
-      }
-
-      const userKeys = new Set(envArray.map(e => e.split('=')[0]));
-      const mergedEnv = [
-        ...secretEnvVars.filter(s => !userKeys.has(s.split('=')[0])),
-        ...envArray,
-      ];
-      envArray = mergedEnv;
-
-      // Volumes the application references by id, resolved here so the intent
-      // builder itself stays free of the database.
-      const volumeRegistry = new Map<string, { name: string; containerPath: string }>();
-      if (app.volumes) {
-        let referencedIds: string[] = [];
-        try {
-          const declared = JSON.parse(app.volumes);
-          if (Array.isArray(declared)) {
-            referencedIds = declared
-              .map((v: { volumeId?: string }) => v?.volumeId)
-              .filter((id): id is string => !!id);
-          }
-        } catch {
-          // Malformed JSON: nothing to look up, and nothing to mount.
-        }
-        if (referencedIds.length > 0) {
-          const registered = await db
-            .select()
-            .from(volumes)
-            .where(inArray(volumes.id, referencedIds))
-            .all();
-          for (const rv of registered) {
-            volumeRegistry.set(rv.id, { name: rv.name, containerPath: rv.containerPath });
-          }
-        }
-      }
-      const singleMounts = singleMountIntents(app.id, app.volumes, volumeRegistry);
-
-      const baseDomain = process.env.TRAEFIK_BASE_DOMAIN || worker.baseDomain || worker.hostname;
-      const appDomain = app.domain || buildAppDomain(app.name, baseDomain) || app.name;
-      const middlewareOpts = buildMiddlewareOpts(app);
-      const memBytes = cfg.memoryLimit ? parseMemory(cfg.memoryLimit) : undefined;
-      const cpuCfg = cfg.cpuLimit ? parseCpu(cfg.cpuLimit) : undefined;
-      const healthcheck = parseHealthcheck(app.healthcheck);
-
-      const command = cfg.command?.trim()
-        ? cfg.command.trim().split(/\s+/)
-        : undefined;
-
-      const replicaCount = Math.max(1, Math.min(10, app.replicas ?? 1));
-      const safeName = routerName(app.name);
-
-      // Every replica shares the alias on purpose: Podman's DNS returns all the
-      // addresses behind a name, so a sibling that resolves it round-robins
-      // across the replicas rather than pinning to whichever came up first.
-      const singleAliases = networkAliases(app.name, app.name);
-      await warnOnAliasCollisions(app, [singleAliases[0]]);
-
-      // One image, so the digest record is a bare reference. On a rollback this
-      // is the digest the old deployment ran; otherwise it is the tag and the
-      // digest gets resolved after the pull below.
-      const singleImage = pinnedImageFor(SINGLE_IMAGE_KEY, requestedDigests, cfg.image);
-
-      // Create isolated network for this app
-      const networkName = await ensureAppNetwork(podmanClient, app.id, app.stackId);
-
-      // Collect all replica ports for Traefik service URLs
-      const replicaPorts: number[] = [];
-
-      // Ports already taken on this worker, so a fresh allocation cannot land
-      // on one.  Previously each port was an unchecked random draw, which
-      // collided silently once a worker held a few dozen containers.
-      const takenPorts = await reservedPortsForWorker(
-        worker.id,
-        blueGreen ? undefined : app.id,
-      );
-      const allocatePort = () => {
-        const port = pickFreePort(takenPorts);
-        takenPorts.add(port);
-        return port;
-      };
-
-      for (let replicaIdx = 1; replicaIdx <= replicaCount; replicaIdx++) {
-        const containerName = nameFor(
-          replicaCount > 1
-            ? `${app.name}-${app.id.slice(0, 8)}-${replicaIdx}`
-            : `${app.name}-${app.id.slice(0, 8)}`,
-        );
-
-        // Each replica gets its own random host port(s)
-        const portBindings: Record<string, Array<{ hostPort: string }>> = {};
-        let mainExposedPort: number | null = null;
-
-        if (cfg.ports && cfg.ports.length > 0) {
-          for (const p of cfg.ports) {
-            if (!p.containerPort) continue;
-            const proto = p.protocol || 'tcp';
-            const key = `${p.containerPort}/${proto}`;
-            // For replicas, always assign fresh ports to avoid collisions
-            const hostPort = (replicaCount > 1 || !p.hostPort?.trim())
-              ? String(allocatePort())
-              : p.hostPort.trim();
-            portBindings[key] = [{ hostPort }];
-            if (!mainExposedPort) mainExposedPort = parseInt(hostPort);
-          }
-        } else {
-          const exposedPort = allocatePort();
-          portBindings['80/tcp'] = [{ hostPort: String(exposedPort) }];
-          mainExposedPort = exposedPort;
+        const labels = { ...planned.labels };
+        if (planned.route && !httpRouting) {
+          Object.assign(labels, routingLabels(planned.route, middlewareOpts, globalOidcEnabled));
         }
 
-        if (mainExposedPort) replicaPorts.push(mainExposedPort);
-
-        // For single replica, use standard labels; for multi-replica, all get the same
-        // service name so Traefik merges them as multiple servers for load balancing.
-        // Only the first replica gets the router labels. All replicas define their own
-        // loadbalancer.server.url pointing to their own port.
-        const labels: Record<string, string> = { app: app.name, [ALIAS_LABEL]: singleAliases[0] };
-        if (teamSlug) {
-          labels.team = teamSlug;
-          if (team) {
-            labels['rudder.team.name'] = team.name;
-            labels['rudder.team.id'] = team.id;
-          }
-        }
-        if (stack) {
-          labels['rudder.stack.name'] = stack.name;
-          labels['rudder.stack.id'] = stack.id;
-        }
-
-        if (httpRouting) {
-          // Routing is served from the control plane, generated from the
-          // domain/router/port columns written below. Only identity labels here.
-          labels['rudder.managed'] = 'true';
-        } else if (replicaCount === 1) {
-          // Standard single-container: full Traefik labels
-          const traefikLabels = generateTraefikLabelsForApp(app.name, appDomain, mainExposedPort ?? 80, true, middlewareOpts, globalOidcEnabled);
-          Object.assign(labels, traefikLabels);
-        } else {
-          // Multi-replica: each container advertises its own server URL under the same service name.
-          // The first replica also gets the router/middleware labels.
-          labels['traefik.enable'] = 'true';
-          labels[`traefik.http.services.${safeName}.loadbalancer.server.url`] = `http://127.0.0.1:${mainExposedPort}`;
-
-          if (replicaIdx === 1) {
-            // First replica carries router + middleware definitions
-            const traefikLabels = generateTraefikLabelsForApp(app.name, appDomain, mainExposedPort ?? 80, true, middlewareOpts, globalOidcEnabled);
-            Object.assign(labels, traefikLabels);
-          }
-        }
+        const containerName = nameFor(planned.name);
+        const files: PlannedFile[] = [
+          ...(planned.files ?? []),
+          ...appSecrets.files.map((f) => ({
+            dir: SECRETS_DIR,
+            name: f.name,
+            content: f.value,
+            mode: 0o400,
+          })),
+        ];
 
         const containerResult = await podmanClient.createContainer({
           name: containerName,
-          image: singleImage,
-          env: envArray,
-          ports: Object.keys(portBindings).length > 0 ? portBindings : undefined,
+          image,
+          env,
+          ports: Object.keys(planned.ports).length > 0 ? planned.ports : undefined,
           labels,
-          restartPolicy: app.restartPolicy || 'always',
-          command,
-          workingDir: cfg.workingDir || undefined,
-          memory: memBytes,
-          cpuQuota: cpuCfg?.cpuQuota,
-          cpuPeriod: cpuCfg?.cpuPeriod,
-          healthcheck,
+          restartPolicy: planned.restartPolicy,
+          command: planned.command,
+          entrypoint: planned.entrypoint,
+          workingDir: planned.workingDir,
+          memory: planned.memory,
+          cpuQuota: planned.cpuQuota,
+          cpuPeriod: planned.cpuPeriod,
+          healthcheck: planned.healthcheck,
           networkMode: networkName,
-          networkAliases: singleAliases,
-          ...containerMounts(singleMounts, appSecrets.files.length > 0),
+          networkAliases: planned.aliases,
+          ...containerMounts(planned.mounts, appSecrets.files.length > 0),
         });
 
-        await deliverSecretFiles(podmanClient, containerResult.Id, appSecrets.files);
+        await deliverFiles(podmanClient, containerResult.Id, files);
 
-        if (!deployedDigests.has(SINGLE_IMAGE_KEY)) {
-          const digest = await podmanClient.resolveImageDigest(singleImage);
-          if (digest) deployedDigests.set(SINGLE_IMAGE_KEY, digest);
+        // Resolved after createContainer, which pulls: this is the digest of
+        // what is about to run, not of a stale local copy. Replicas share an
+        // image, so it is resolved once.
+        if (!deployedDigests.has(digestKey)) {
+          const digest = await podmanClient.resolveImageDigest(image);
+          if (digest) deployedDigests.set(digestKey, digest);
         }
 
-        const singleRowId = crypto.randomUUID();
+        const rowId = crypto.randomUUID();
         await db.insert(containers).values({
-          id: singleRowId,
+          id: rowId,
           applicationId: app.id,
           workerId: worker.id,
           containerId: containerResult.Id,
           name: containerName,
-          image: singleImage,
+          image,
           status: 'created',
-          ports: Object.keys(portBindings).length > 0 ? JSON.stringify(portBindings) : null,
-          exposedPort: mainExposedPort,
-          domain: appDomain,
-          routerName: safeName,
+          // Every binding, not just the routed one: `reservedPortsForWorker`
+          // reads this column, and a container's second published port has to
+          // stay reserved too or a later deploy will be handed it.
+          ports: Object.keys(planned.ports).length > 0 ? JSON.stringify(planned.ports) : null,
+          exposedPort: planned.route?.hostPort ?? null,
+          domain: planned.route?.domain ?? null,
+          routerName: planned.route?.routerName ?? null,
           labels: JSON.stringify(redactSecretLabels(labels)),
           generation,
           state: initialState,
@@ -1109,159 +914,18 @@ export async function executeApplicationDeploy(
           updatedAt: new Date(),
         });
         createdContainers.push({
-          rowId: singleRowId,
+          rowId,
           containerId: containerResult.Id,
           name: containerName,
         });
 
         await podmanClient.startContainer(containerResult.Id);
-
         await db.update(containers)
           .set({ status: 'running', updatedAt: new Date() })
-          .where(eq(containers.containerId, containerResult.Id));
-      }
-    } else if (app.type === 'k8s') {
-      const validation = validateK8sManifest(app.manifest);
-      if (!validation.valid) {
-        return { success: false, message: validation.errors.join(', '), statusCode: 400 };
-      }
-
-      const baseDomain = process.env.TRAEFIK_BASE_DOMAIN || worker.baseDomain || worker.hostname;
-
-      // Same collision-checked allocator the other two paths use. A manifest's
-      // `containerPort` used to become the host port verbatim, so two
-      // applications both listening on 80 could not share a worker.
-      const k8sTakenPorts = await reservedPortsForWorker(
-        worker.id,
-        blueGreen ? undefined : app.id,
-      );
-      const parsedContainers = parseK8sManifest(app.manifest, app.name, teamSlug, {
-        allocatePort: () => {
-          const port = pickFreePort(k8sTakenPorts);
-          k8sTakenPorts.add(port);
-          return port;
-        },
-      });
-
-      await warnOnAliasCollisions(app, parsedContainers.map((c) => c.aliases[0]));
-
-      // Create isolated network for this app
-      const k8sNetworkName = await ensureAppNetwork(podmanClient, app.id, app.stackId);
-
-      const k8sSecrets = await resolveSecrets(app.teamId);
-      const k8sSecretEnvVars = k8sSecrets.env;
-
-      // The first container that exposes a port owns the application hostname;
-      // any further exposed container is disambiguated as <app>-<container>.
-      // Previously every container reused `app.domain`, producing several
-      // Traefik routers with an identical Host rule and arbitrary routing.
-      let primaryRouteTaken = false;
-
-      for (const container of parsedContainers) {
-        try {
-          const k8sImage = pinnedImageFor(container.name, requestedDigests, container.image);
-
-          let labels: Record<string, string> = { ...container.labels, app: app.name };
-          if (teamSlug) {
-            labels.team = teamSlug;
-            if (team) {
-              labels['rudder.team.name'] = team.name;
-              labels['rudder.team.id'] = team.id;
-            }
-          }
-          if (stack) {
-            labels['rudder.stack.name'] = stack.name;
-            labels['rudder.stack.id'] = stack.id;
-          }
-
-          const portKeys = Object.keys(container.ports);
-          let k8sDomain: string | null = null;
-          let k8sRouter: string | null = null;
-          let k8sPort: number | null = null;
-          if (portKeys.length > 0) {
-            // The binding's value, not its key: the key is the port inside the
-            // container and the value is the host port Traefik has to reach.
-            k8sPort = parseInt(container.ports[portKeys[0]][0].hostPort);
-            const isPrimary = !primaryRouteTaken;
-            primaryRouteTaken = true;
-            k8sDomain = isPrimary
-              ? (app.domain || buildAppDomain(app.name, baseDomain) || app.name)
-              : (buildServiceDomain(app.name, container.name, baseDomain) || container.name);
-            k8sRouter = isPrimary ? routerName(app.name) : routerName(app.name, container.name);
-            if (httpRouting) {
-              labels['rudder.managed'] = 'true';
-            } else {
-              const k8sMiddlewareOpts = buildMiddlewareOpts(app);
-              const traefikLabels = generateTraefikLabelsForApp(k8sRouter, k8sDomain, k8sPort, true, k8sMiddlewareOpts, globalOidcEnabled);
-              labels = { ...labels, ...traefikLabels };
-            }
-          }
-
-          const k8sEnv = Object.entries(container.env).map(([k, v]) => `${k}=${v}`);
-          const k8sKeys = new Set(Object.keys(container.env));
-          const mergedK8sEnv = [
-            ...k8sSecretEnvVars.filter(s => !k8sKeys.has(s.split('=')[0])),
-            ...k8sEnv,
-          ];
-
-          const k8sContainerName = nameFor(`${app.name}-${app.id.slice(0, 8)}-${container.name}`);
-          const containerResult = await podmanClient.createContainer({
-            name: k8sContainerName,
-            image: k8sImage,
-            env: mergedK8sEnv,
-            ports: Object.keys(container.ports).length > 0 ? container.ports : undefined,
-            labels,
-            restartPolicy: container.restartPolicy || app.restartPolicy || 'always',
-            command: container.command,
-            workingDir: container.workingDir,
-            memory: container.memory,
-            cpuQuota: container.cpuShares ? container.cpuShares * 100 : undefined,
-            cpuPeriod: container.cpuShares ? 100000 : undefined,
-            networkMode: k8sNetworkName,
-            networkAliases: container.aliases,
-            ...containerMounts(container.mounts, k8sSecrets.files.length > 0),
-          });
-
-          await deliverSecretFiles(podmanClient, containerResult.Id, k8sSecrets.files);
-
-          const k8sDigest = await podmanClient.resolveImageDigest(k8sImage);
-          if (k8sDigest) deployedDigests.set(container.name, k8sDigest);
-
-          const k8sRowId = crypto.randomUUID();
-          await db.insert(containers).values({
-            id: k8sRowId,
-            applicationId: app.id,
-            workerId: worker.id,
-            containerId: containerResult.Id,
-            name: `${app.name}-${container.name}`,
-            image: k8sImage,
-            status: 'created',
-            ports: portKeys.length > 0 ? JSON.stringify(container.ports) : null,
-            exposedPort: k8sPort,
-            domain: k8sDomain,
-            routerName: k8sRouter,
-            labels: JSON.stringify(redactSecretLabels(labels)),
-            generation,
-            state: initialState,
-            deploymentId,
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          });
-          createdContainers.push({
-            rowId: k8sRowId,
-            containerId: containerResult.Id,
-            name: k8sContainerName,
-          });
-
-          await podmanClient.startContainer(containerResult.Id);
-
-          await db.update(containers)
-            .set({ status: 'running', updatedAt: new Date() })
-            .where(eq(containers.containerId, containerResult.Id));
-        } catch (e: any) {
-          console.error(`Failed to create container ${container.name}:`, e);
-          throw new Error(`Container '${container.name}' failed to deploy: ${e.message}`);
-        }
+          .where(eq(containers.id, rowId));
+      } catch (e: any) {
+        console.error(`Failed to create container ${planned.name}:`, e);
+        throw new Error(`Container '${planned.key}' failed to deploy: ${e.message}`);
       }
     }
 
