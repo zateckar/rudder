@@ -15,7 +15,7 @@ import { validateTerminalToken } from '$lib/server/terminal-tokens';
 import { getRestPodmanClient } from '$lib/server/podman-client';
 import { executeSSHCommand, type SSHConnectionConfig } from '$lib/server/ssh';
 import { authenticateK8s } from '$lib/server/k8s/auth';
-import { containerKeyOf, podGroupsFor, podNameOf } from '$lib/server/k8s/mapper';
+import { podNameOf } from '$lib/server/k8s/mapper';
 import {
   CHANNEL,
   frame,
@@ -261,16 +261,7 @@ registerWsRoute('k8s-exec', {
       return fail(`pods "${podName}" not found`);
     }
 
-    // kubectl sends ?container= when a Pod has more than one, which a
-    // Kubernetes application's Pod now does.
-    const found = await findTeamContainer(team.id, podName, url.searchParams.get('container'));
-    if (found && 'choices' in found) {
-      return fail(
-        `container ${url.searchParams.get('container')} is not valid for pod ${podName}; ` +
-          `choose one of: [${found.choices.join(' ')}]`,
-      );
-    }
-    const container = found;
+    const container = await findTeamContainer(team.id, podName);
     if (!container?.workerId) return fail(`pods "${podName}" not found`);
 
     const worker = await db.select().from(workers).where(eq(workers.id, container.workerId)).get();
@@ -355,36 +346,17 @@ registerWsRoute('k8s-exec', {
   },
 });
 
-/**
- * Find the container an exec should run in, by pod name within one team.
- *
- * A Kubernetes application's Pod holds every container it applied, so the
- * caller's `?container=` selects between them; without one, the first is used,
- * which is what kubectl assumes for a single-container Pod. Returns the
- * available names instead when the selection does not match, so the error can
- * say what to choose rather than "not found".
- */
-async function findTeamContainer(teamId: string, podName: string, containerName?: string | null) {
+/** Find a container by pod name within one team's applications. */
+async function findTeamContainer(teamId: string, podName: string) {
   const teamApps = await db.select().from(applications).where(eq(applications.teamId, teamId)).all();
-  const wanted = podNameOf(podName);
-
   for (const app of teamApps) {
     const appContainers = await db
       .select()
       .from(containers)
       .where(eq(containers.applicationId, app.id))
       .all();
-
-    const group =
-      podGroupsFor(app, appContainers).find((g) => g.name === wanted) ??
-      (appContainers.some((c) => podNameOf(c.name) === wanted)
-        ? { name: wanted, rows: appContainers.filter((c) => podNameOf(c.name) === wanted) }
-        : null);
-    if (!group) continue;
-
-    if (!containerName) return group.rows[0];
-    const selected = group.rows.find((r) => containerKeyOf(r) === containerName);
-    return selected ?? { choices: group.rows.map(containerKeyOf) };
+    const found = appContainers.find((c) => podNameOf(c.name) === podNameOf(podName));
+    if (found) return found;
   }
   return null;
 }

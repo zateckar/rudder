@@ -24,11 +24,9 @@ import {
 } from '$lib/server/k8s/auth';
 import {
   teamToNamespace,
-  containerKeyOf,
+  containerToPod,
   k8sList,
   matchPath,
-  podGroupToPod,
-  podGroupsFor,
   podNameOf,
 } from '$lib/server/k8s/mapper';
 import { db } from '$lib/db';
@@ -81,8 +79,8 @@ export async function GET({
         .from(containers)
         .where(eq(containers.applicationId, app.id))
         .all();
-      for (const group of podGroupsFor(app, appContainers)) {
-        pods.push(podGroupToPod(group, app.name, team.slug));
+      for (const c of appContainers) {
+        pods.push(containerToPod(c, app.name, team.slug));
       }
     }
     return k8sJson(k8sList('PodList', 'v1', pods));
@@ -103,18 +101,10 @@ export async function GET({
     const team = await resolveTeamBySlug(ctx, m.ns);
     if (!team) return k8sError(404, `namespaces "${m.ns}" not found`);
 
-    const url = new URL(request.url);
-    const wanted = url.searchParams.get('container');
-    const result = await findPodInNamespace(team.id, team.slug, m.pod, wanted);
+    const result = await findPodInNamespace(team.id, team.slug, m.pod);
     if (!result) return k8sError(404, `pods "${m.pod}" not found`);
-    if (!result.container) {
-      return k8sError(
-        400,
-        `container ${wanted} is not valid for pod ${m.pod}; ` +
-          `choose one of: [${result.containerNames.join(' ')}]`,
-      );
-    }
 
+    const url = new URL(request.url);
     const tailLines = parseInt(url.searchParams.get('tailLines') || '1000');
     const timestamps = url.searchParams.get('timestamps') === 'true';
     const follow = url.searchParams.get('follow') === 'true';
@@ -170,29 +160,25 @@ export async function DELETE({
     const result = await findPodInNamespace(team.id, team.slug, m.pod);
     if (!result) return k8sError(404, `pods "${m.pod}" not found`);
 
-    // Every container in the Pod, not just the first. Deleting a Pod deletes
-    // what is in it; removing one container of three and reporting Success
-    // would leave the rest running under a Pod kubectl was told was gone.
-    for (const row of result.containers ?? [result.container!]) {
-      // Remove via Podman (best-effort)
-      if (row.workerId) {
-        const worker = await db
-          .select()
-          .from(workers)
-          .where(eq(workers.id, row.workerId))
-          .get();
-        if (worker) {
-          try {
-            const client = getRestPodmanClient(worker);
-            await client.removeContainer(row.containerId, true);
-            client.destroy();
-          } catch {
-            /* best-effort */
-          }
+    // Remove via Podman (best-effort)
+    if (result.container.workerId) {
+      const worker = await db
+        .select()
+        .from(workers)
+        .where(eq(workers.id, result.container.workerId))
+        .get();
+      if (worker) {
+        try {
+          const client = getRestPodmanClient(worker);
+          await client.removeContainer(result.container.containerId, true);
+          client.destroy();
+        } catch {
+          /* best-effort */
         }
       }
-      await db.delete(containers).where(eq(containers.id, row.id));
     }
+
+    await db.delete(containers).where(eq(containers.id, result.container.id));
 
     return k8sJson({
       kind: 'Status',
@@ -212,23 +198,10 @@ export async function DELETE({
 
 // ── Helpers ────────────────────────────────────────────────────
 
-/**
- * Resolve a pod name to the containers behind it.
- *
- * Matches the group name first — for a Kubernetes application that is the
- * application, holding every container it applied — and falls back to a single
- * container's own name, so an address that worked before Pods were grouped
- * still works.
- *
- * `container` is the one a per-container operation acts on: the caller's
- * `?container=` selection, or the first, which is what kubectl assumes when a
- * Pod has only one.
- */
 async function findPodInNamespace(
   teamId: string,
   teamSlug: string,
   podName: string,
-  containerName?: string | null,
 ) {
   const teamApps = await db
     .select()
@@ -242,36 +215,16 @@ async function findPodInNamespace(
       .from(containers)
       .where(eq(containers.applicationId, app.id))
       .all();
-
     // Compared through podNameOf: discovered containers carry Podman's leading
     // slash in the database, but the pod name kubectl was shown does not.
-    const wanted = podNameOf(podName);
-    const group =
-      podGroupsFor(app, appContainers).find((g) => g.name === wanted) ??
-      (appContainers.some((c) => podNameOf(c.name) === wanted)
-        ? { name: wanted, rows: appContainers.filter((c) => podNameOf(c.name) === wanted) }
-        : null);
-    if (!group) continue;
-
-    const selected = containerName
-      ? group.rows.find((r) => containerKeyOf(r) === containerName)
-      : group.rows[0];
-    if (containerName && !selected) {
+    const container = appContainers.find((c) => podNameOf(c.name) === podNameOf(podName));
+    if (container) {
       return {
-        pod: podGroupToPod(group, app.name, teamSlug),
-        container: null,
-        containerNames: group.rows.map(containerKeyOf),
+        pod: containerToPod(container, app.name, teamSlug),
+        container,
         app,
       };
     }
-
-    return {
-      pod: podGroupToPod(group, app.name, teamSlug),
-      container: selected!,
-      containers: group.rows,
-      containerNames: group.rows.map(containerKeyOf),
-      app,
-    };
   }
   return null;
 }

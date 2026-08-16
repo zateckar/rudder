@@ -296,72 +296,6 @@ export interface PodContainerRow {
   updatedAt: Date;
 }
 
-/**
- * The name a container answers to inside its Pod — the compose service name,
- * the Kubernetes container name, or the application's own name.
- *
- * Read from the `rudder.alias` label the deploy path stamps, which is exactly
- * that key. Falls back to the whole container name for rows written before the
- * label existed, and for containers discovered on a worker rather than deployed.
- */
-export function containerKeyOf(row: { name: string; labels?: string | null }): string {
-  if (row.labels) {
-    try {
-      const alias = JSON.parse(row.labels)?.['rudder.alias'];
-      if (typeof alias === 'string' && alias) return alias;
-    } catch {
-      // Unparseable labels: fall through to the name.
-    }
-  }
-  return podNameOf(row.name);
-}
-
-/** One Pod's worth of containers, and the name kubectl addresses it by. */
-export interface PodGroup {
-  name: string;
-  rows: PodContainerRow[];
-}
-
-/**
- * Group an application's containers the way Kubernetes would see them.
- *
- * A Kubernetes application was applied as one Pod, so it is reported as one
- * Pod — with its containers listed, which is what `kubectl apply` was given.
- * Reporting a three-container manifest as three Pods described something the
- * user never wrote.
- *
- * A generation retained for a fast rollback is a separate Pod, because it is a
- * separate set of running processes and collapsing it into the live one would
- * show containers that are stopped as part of the Pod serving traffic.
- *
- * Compose and single-container applications keep one Pod per container.
- * Compose services are separate workloads that happen to share a file, and a
- * replica genuinely is a separate Pod — merging either would be the same kind
- * of lie in the other direction.
- */
-export function podGroupsFor(
-  app: { name: string; type?: string | null },
-  rows: PodContainerRow[],
-): PodGroup[] {
-  if (app.type !== 'k8s') {
-    return rows.map((row) => ({ name: podNameOf(row.name), rows: [row] }));
-  }
-
-  const byGeneration = new Map<number, PodContainerRow[]>();
-  for (const row of rows) {
-    const generation = row.generation ?? 1;
-    byGeneration.set(generation, [...(byGeneration.get(generation) ?? []), row]);
-  }
-
-  const base = podNameOf(app.name);
-  const single = byGeneration.size === 1;
-  return [...byGeneration.entries()]
-    .sort(([a], [b]) => a - b)
-    .map(([generation, groupRows]) => ({
-      name: single ? base : `${base}-g${generation}`,
-      rows: groupRows,
-    }));
-}
 
 /** The Kubernetes phase a container's status corresponds to. */
 function phaseOf(status: string): 'Running' | 'Succeeded' | 'Pending' | 'Unknown' {
@@ -375,62 +309,71 @@ function phaseOf(status: string): 'Running' | 'Succeeded' | 'Pending' | 'Unknown
 }
 
 /**
- * The Pod's phase, from its containers'.
+ * One container, reported as one Pod.
  *
- * Kubernetes' own rule, near enough: Pending while anything is still starting,
- * Running once anything is up, Succeeded when everything has finished.
+ * `Pod` is the only Kubernetes noun for a running thing, so a kubectl-compatible
+ * API has to emit them — but the mapping stays one-to-one, because that is what
+ * Rudder actually runs. Grouping an application's containers into a single Pod
+ * with several containers listed would claim the thing this architecture
+ * deliberately does not provide: a shared network namespace, and therefore
+ * `localhost` between them. Every container here has its own address on a
+ * bridge and reaches its siblings by name.
+ *
+ * The deployment records a note saying so whenever a manifest has more than one
+ * container, which is where that belongs — in the history of the deploy, not
+ * implied by the shape of a status object.
  */
-function podPhase(phases: string[]): string {
-  if (phases.length === 0) return 'Unknown';
-  if (phases.includes('Pending')) return 'Pending';
-  if (phases.includes('Running')) return 'Running';
-  if (phases.every((p) => p === 'Succeeded')) return 'Succeeded';
-  return 'Unknown';
-}
+export function containerToPod(container: PodContainerRow, appName: string, teamSlug: string) {
+  const phase = phaseOf(container.status);
+  const containerPort = containerPortOf(container.ports, container.exposedPort);
+  const name = podNameOf(container.name);
 
-export function podGroupToPod(group: PodGroup, appName: string, teamSlug: string) {
-  // The oldest container in the group stands for the Pod: a Pod is created
-  // once, and its containers are created in a loop within that one deploy.
-  const oldest = group.rows.reduce((a, b) => (a.createdAt <= b.createdAt ? a : b));
-  const newest = group.rows.reduce((a, b) => (a.updatedAt >= b.updatedAt ? a : b));
-  const phases = group.rows.map((r) => phaseOf(r.status));
-  const phase = podPhase(phases);
-  const ready = phase === 'Running' && phases.every((p) => p === 'Running');
+  const containerState =
+    phase === 'Running'
+      ? { running: { startedAt: container.updatedAt.toISOString() } }
+      : phase === 'Succeeded'
+        ? {
+            terminated: {
+              exitCode: 0,
+              finishedAt: container.updatedAt.toISOString(),
+              reason: 'Completed',
+            },
+          }
+        : { waiting: { reason: 'ContainerCreating' } };
 
   return {
     apiVersion: 'v1',
     kind: 'Pod',
     metadata: {
-      name: group.name,
+      name,
       namespace: teamSlug,
-      uid: oldest.id,
-      creationTimestamp: oldest.createdAt.toISOString(),
-      resourceVersion: String(newest.updatedAt.getTime()),
+      uid: container.id,
+      creationTimestamp: container.createdAt.toISOString(),
+      resourceVersion: String(container.updatedAt.getTime()),
       labels: {
         app: appName,
-        'pod-template-hash': oldest.id.slice(0, 10),
+        'pod-template-hash': container.id.slice(0, 10),
       },
       ownerReferences: [
         {
           apiVersion: 'apps/v1',
           kind: 'ReplicaSet',
-          name: `${appName}-${oldest.id.slice(0, 10)}`,
-          uid: oldest.id,
+          name: `${appName}-${container.id.slice(0, 10)}`,
+          uid: container.id,
           controller: true,
           blockOwnerDeletion: true,
         },
       ],
     },
     spec: {
-      containers: group.rows.map((row) => {
-        const containerPort = containerPortOf(row.ports, row.exposedPort);
-        return {
-          name: containerKeyOf(row),
-          image: row.image,
+      containers: [
+        {
+          name,
+          image: container.image,
           ...(containerPort ? { ports: [{ containerPort, protocol: 'TCP' }] } : {}),
-        };
-      }),
-      ...(oldest.workerId ? { nodeName: oldest.workerId } : {}),
+        },
+      ],
+      ...(container.workerId ? { nodeName: container.workerId } : {}),
       restartPolicy: 'Always',
     },
     status: {
@@ -439,58 +382,41 @@ export function podGroupToPod(group: PodGroup, appName: string, teamSlug: string
         {
           type: 'Initialized',
           status: 'True',
-          lastTransitionTime: oldest.createdAt.toISOString(),
+          lastTransitionTime: container.createdAt.toISOString(),
         },
         {
           type: 'Ready',
-          status: ready ? 'True' : 'False',
-          lastTransitionTime: newest.updatedAt.toISOString(),
+          status: phase === 'Running' ? 'True' : 'False',
+          lastTransitionTime: container.updatedAt.toISOString(),
         },
         {
           type: 'ContainersReady',
-          status: ready ? 'True' : 'False',
-          lastTransitionTime: newest.updatedAt.toISOString(),
+          status: phase === 'Running' ? 'True' : 'False',
+          lastTransitionTime: container.updatedAt.toISOString(),
         },
         {
           type: 'PodScheduled',
           status: 'True',
-          lastTransitionTime: oldest.createdAt.toISOString(),
+          lastTransitionTime: container.createdAt.toISOString(),
         },
       ],
-      containerStatuses: group.rows.map((row) => {
-        const rowPhase = phaseOf(row.status);
-        return {
-          name: containerKeyOf(row),
-          image: row.image,
-          imageID: `podman://${row.image}`,
-          containerID: `podman://${row.containerId}`,
-          ready: rowPhase === 'Running',
+      containerStatuses: [
+        {
+          name,
+          image: container.image,
+          imageID: `podman://${container.image}`,
+          containerID: `podman://${container.containerId}`,
+          ready: phase === 'Running',
           restartCount: 0,
-          started: rowPhase === 'Running',
-          state:
-            rowPhase === 'Running'
-              ? { running: { startedAt: row.updatedAt.toISOString() } }
-              : rowPhase === 'Succeeded'
-                ? {
-                    terminated: {
-                      exitCode: 0,
-                      finishedAt: row.updatedAt.toISOString(),
-                      reason: 'Completed',
-                    },
-                  }
-                : { waiting: { reason: 'ContainerCreating' } },
-        };
-      }),
+          started: phase === 'Running',
+          state: containerState,
+        },
+      ],
       hostIP: '0.0.0.0',
       podIP: '0.0.0.0',
-      startTime: oldest.createdAt.toISOString(),
+      startTime: container.createdAt.toISOString(),
     },
   };
-}
-
-/** One container as its own Pod — what compose services and replicas are. */
-export function containerToPod(container: PodContainerRow, appName: string, teamSlug: string) {
-  return podGroupToPod({ name: podNameOf(container.name), rows: [container] }, appName, teamSlug);
 }
 
 // ── K8s Deployment body → Rudder Application fields ────────────

@@ -342,9 +342,7 @@ kubectl scale deploy <name> --replicas=3  # Scale replicas
 kubectl delete deployment <name>    # Undeploy + remove
 kubectl logs <pod-name>             # Container logs
 kubectl logs -f <pod-name>          # Follow (streamed)
-kubectl logs <pod> -c <container>   # A named container of a multi-container pod
 kubectl exec <pod-name> -- <cmd>    # Run a command in a container
-kubectl exec <pod> -c <name> -- ... # ...in a named container
 kubectl get events -n <team>        # Deploy history as events
 kubectl delete pod <pod-name>       # Remove container
 ```
@@ -433,7 +431,7 @@ kubectl get pods
 |------------|--------|-------|
 | Namespace | Team | Identified by team slug |
 | Deployment | Application | Supports create, update, scale, delete |
-| Pod | Application (`kubectl apply`) or container | A Kubernetes application is one Pod holding the containers it applied — use `-c <name>` for logs and exec. Compose services and replicas are one Pod each, because they are separate workloads. A generation retained for a fast rollback is its own Pod. |
+| Pod | Container | One container, one Pod. `Pod` is the only Kubernetes noun for a running thing, but the mapping stays 1:1 — a Pod listing several containers would promise a shared namespace, and Rudder gives every container its own address on a bridge. A two-container manifest therefore appears as two Pods, and the deployment records a note saying so. |
 | Scale | Replicas | `kubectl scale` adjusts replica count |
 
 ### Deployment YAML Example
