@@ -3,7 +3,7 @@
  */
 import { db } from '$lib/db';
 import { applications, workers, containers, teams, stacks, volumes, secrets, deployments } from '$lib/db/schema';
-import { and, eq, inArray, or, desc } from 'drizzle-orm';
+import { and, eq, inArray, ne, or, desc } from 'drizzle-orm';
 import { getRestPodmanClient } from '$lib/server/podman-client';
 import { parseCompose, validateCompose } from '$lib/server/compose';
 import { parseK8sManifest, validateK8sManifest } from '$lib/server/kubernetes';
@@ -14,7 +14,12 @@ import { buildMiddlewareOpts } from '$lib/server/traefik-config';
 import { buildAppDomain, buildServiceDomain, routerName } from '$lib/server/domains';
 import { ALLOWED_DOMAINS_UNSUPPORTED } from '$lib/server/oidc';
 import { decrypt } from '$lib/server/encryption';
-import { ensureAppNetwork, teardownAppNetwork } from '$lib/server/networks';
+import {
+  ALIAS_LABEL,
+  ensureAppNetwork,
+  networkAliases,
+  teardownAppNetwork,
+} from '$lib/server/networks';
 import { env } from '$lib/server/env';
 import { buildHostBind, MountPolicyError } from '$lib/server/mounts';
 import {
@@ -230,6 +235,62 @@ async function reservedPortsForWorker(
     }
   }
   return taken;
+}
+
+// ── Network aliases ──────────────────────────────────────────────────────────
+
+/**
+ * Warn when another application on the same stack network already answers to a
+ * name this deploy is about to claim.
+ *
+ * Not an error. A stack is a shared network by design, the collision may have
+ * existed for months, and refusing the deploy would take a running application
+ * down over a name nobody is necessarily using. What it must not do is happen
+ * silently: `db` resolving to the wrong container is a debugging session that
+ * starts nowhere near the network layer.
+ *
+ * The qualified `<app>-<key>` alias is unaffected, so there is always a name
+ * that resolves unambiguously — the warning says so.
+ */
+async function warnOnAliasCollisions(
+  app: typeof applications.$inferSelect,
+  claimed: readonly string[],
+): Promise<void> {
+  if (!app.stackId || claimed.length === 0) return;
+
+  const wanted = new Set(claimed);
+  let neighbours: Array<{ appName: string; labels: string | null }>;
+  try {
+    neighbours = await db
+      .select({ appName: applications.name, labels: containers.labels })
+      .from(containers)
+      .innerJoin(applications, eq(containers.applicationId, applications.id))
+      .where(and(eq(applications.stackId, app.stackId), ne(applications.id, app.id)))
+      .all();
+  } catch (e: any) {
+    console.warn('[deploy] Could not check for alias collisions:', e.message);
+    return;
+  }
+
+  const reported = new Set<string>();
+  for (const row of neighbours) {
+    if (!row.labels) continue;
+    let alias: unknown;
+    try {
+      alias = JSON.parse(row.labels)?.[ALIAS_LABEL];
+    } catch {
+      continue;
+    }
+    if (typeof alias !== 'string' || !wanted.has(alias)) continue;
+    const key = `${alias} ${row.appName}`;
+    if (reported.has(key)) continue;
+    reported.add(key);
+    console.warn(
+      `[deploy] Application "${app.name}" and application "${row.appName}" both answer to ` +
+      `"${alias}" on their shared stack network. Which one that name resolves to is not ` +
+      `defined — use the qualified alias instead.`,
+    );
+  }
 }
 
 // ── Blue/green machinery ─────────────────────────────────────────────────────
@@ -697,6 +758,8 @@ export async function executeApplicationDeploy(
         },
       });
 
+      await warnOnAliasCollisions(app, parsedContainers.map((c) => c.aliases[0]));
+
       // Create isolated network for this app/stack
       const networkName = await ensureAppNetwork(podmanClient, app.id, app.stackId);
 
@@ -737,7 +800,7 @@ export async function executeApplicationDeploy(
             cpuPeriod: container.cpuShares ? 100000 : undefined,
             healthcheck: container.healthcheck,
             networkMode: networkName,
-            networkAliases: container.labels['service'] ? [container.labels['service']] : undefined,
+            networkAliases: container.aliases,
             tmpfs: composeSecrets.files.length > 0
               ? { [SECRETS_DIR]: SECRETS_TMPFS_OPTS }
               : undefined,
@@ -892,6 +955,12 @@ export async function executeApplicationDeploy(
       const replicaCount = Math.max(1, Math.min(10, app.replicas ?? 1));
       const safeName = routerName(app.name);
 
+      // Every replica shares the alias on purpose: Podman's DNS returns all the
+      // addresses behind a name, so a sibling that resolves it round-robins
+      // across the replicas rather than pinning to whichever came up first.
+      const singleAliases = networkAliases(app.name, app.name);
+      await warnOnAliasCollisions(app, [singleAliases[0]]);
+
       // One image, so the digest record is a bare reference. On a rollback this
       // is the digest the old deployment ran; otherwise it is the tag and the
       // digest gets resolved after the pull below.
@@ -951,7 +1020,7 @@ export async function executeApplicationDeploy(
         // service name so Traefik merges them as multiple servers for load balancing.
         // Only the first replica gets the router labels. All replicas define their own
         // loadbalancer.server.url pointing to their own port.
-        const labels: Record<string, string> = { app: app.name };
+        const labels: Record<string, string> = { app: app.name, [ALIAS_LABEL]: singleAliases[0] };
         if (teamSlug) {
           labels.team = teamSlug;
           if (team) {
@@ -1000,6 +1069,7 @@ export async function executeApplicationDeploy(
           cpuPeriod: cpuCfg?.cpuPeriod,
           healthcheck,
           networkMode: networkName,
+          networkAliases: singleAliases,
           tmpfs: appSecrets.files.length > 0
             ? { [SECRETS_DIR]: SECRETS_TMPFS_OPTS }
             : undefined,
@@ -1066,6 +1136,8 @@ export async function executeApplicationDeploy(
           return port;
         },
       });
+
+      await warnOnAliasCollisions(app, parsedContainers.map((c) => c.aliases[0]));
 
       // Create isolated network for this app
       const k8sNetworkName = await ensureAppNetwork(podmanClient, app.id, app.stackId);
@@ -1146,6 +1218,7 @@ export async function executeApplicationDeploy(
             cpuPeriod: container.cpuShares ? 100000 : undefined,
             binds: k8sBinds.length > 0 ? k8sBinds : undefined,
             networkMode: k8sNetworkName,
+            networkAliases: container.aliases,
             tmpfs: k8sSecrets.files.length > 0
               ? { [SECRETS_DIR]: SECRETS_TMPFS_OPTS }
               : undefined,

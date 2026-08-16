@@ -1,3 +1,4 @@
+import { ALIAS_LABEL, assertDistinctAliases, networkAliases } from './networks';
 import { unreservedPort, type PortAllocator } from './ports';
 
 export interface K8sMetadata {
@@ -68,6 +69,15 @@ export interface ParsedK8sContainer {
    */
   ports: Record<string, Array<{ hostPort: string }>>;
   volumes: Record<string, { bind: string; options: string }>;
+  /**
+   * DNS names siblings can reach this container by.
+   *
+   * A Kubernetes Pod's containers share a network namespace and address each
+   * other over `localhost`. Rudder gives each container its own address on a
+   * bridge network instead, so they must use each other's names. That is a
+   * deliberate deviation from Pod semantics — see the README.
+   */
+  aliases: string[];
   restartPolicy: string;
   labels: Record<string, string>;
   command?: string[];
@@ -136,7 +146,7 @@ export function parseK8sManifest(
 
       if (podSpec.containers) {
         for (const container of podSpec.containers) {
-          const parsed = parseK8sContainer(container, metadata, volumes, allocatePort, podSpec.restartPolicy);
+          const parsed = parseK8sContainer(container, metadata, volumes, appName, allocatePort, podSpec.restartPolicy);
           parsed.labels = { ...labels, ...parsed.labels };
           containers.push(parsed);
         }
@@ -155,16 +165,19 @@ export function parseK8sManifest(
 
         if (podSpec.containers) {
           for (const container of podSpec.containers) {
-            const parsed = parseK8sContainer(container, metadata, volumes, allocatePort, podSpec.restartPolicy);
+            const parsed = parseK8sContainer(container, metadata, volumes, appName, allocatePort, podSpec.restartPolicy);
             // Strip any traefik.* labels from user metadata to prevent route hijacking
             const safeMetaLabels = Object.fromEntries(
               Object.entries(metadata.labels || {}).filter(
                 ([k]) => !k.toLowerCase().startsWith('traefik.')
               )
             );
-            parsed.labels = { 
-              ...labels, 
+            parsed.labels = {
+              ...labels,
               ...safeMetaLabels,
+              // Rebuilt rather than merged, so the alias has to be carried over
+              // explicitly — a sibling cannot resolve a name that is not here.
+              [ALIAS_LABEL]: parsed.aliases[0],
               'app.kubernetes.io/name': container.name,
               'app.kubernetes.io/version': container.image?.split(':')[1] || 'latest',
             };
@@ -184,6 +197,11 @@ export function parseK8sManifest(
   if (containers.length === 0) {
     throw new Error('No Pod or Deployment found in manifest');
   }
+
+  // Kubernetes only requires container names to be unique within a Pod, so a
+  // manifest with two Deployments can legitimately declare `web` twice. On one
+  // bridge network that is one alias for two containers.
+  assertDistinctAliases(appName, containers.map((c) => c.name));
 
   return containers;
 }
@@ -237,6 +255,7 @@ function parseK8sContainer(
   container: K8sContainer,
   metadata: K8sMetadata,
   volumes: Record<string, string>,
+  appName: string,
   allocatePort: PortAllocator,
   restartPolicy?: string
 ): ParsedK8sContainer {
@@ -280,12 +299,15 @@ function parseK8sContainer(
     cpuShares = parseCpu(container.resources.limits.cpu);
   }
 
+  const aliases = networkAliases(appName, container.name);
+
   // Strip any traefik.* labels from user metadata to prevent route hijacking
   const containerLabels: Record<string, string> = Object.fromEntries(
     Object.entries(metadata.labels || {}).filter(
       ([k]) => !k.toLowerCase().startsWith('traefik.')
     )
   );
+  containerLabels[ALIAS_LABEL] = aliases[0];
 
   return {
     name: container.name,
@@ -293,6 +315,7 @@ function parseK8sContainer(
     env,
     ports,
     volumes: containerVolumes,
+    aliases,
     restartPolicy: restartPolicy || 'always',
     labels: containerLabels,
     command: container.command,

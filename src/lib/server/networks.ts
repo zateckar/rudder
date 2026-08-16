@@ -14,7 +14,69 @@
  * separate join step.
  */
 import type { PodmanClient } from './podman';
+import { routerName, toDnsLabel } from './domains';
 import { executeSSHCommand, type SSHConnectionConfig } from './ssh';
+
+// ── Network aliases ──────────────────────────────────────────────────────────
+
+/**
+ * The label a container advertises itself under, so a sibling can find it.
+ *
+ * Every container gets one, on every deployment format. Without it the only
+ * name a sibling can use is the generated container name — which carries the
+ * application id and, since blue/green, a `-g<N>` generation suffix that
+ * changes on every deploy.
+ */
+export const ALIAS_LABEL = 'rudder.alias';
+
+/**
+ * DNS names a container answers to on its network.
+ *
+ * Two of them, and both matter:
+ *
+ * - the **bare** name — `db`, `web`, the compose service or Kubernetes
+ *   container name. This is what a manifest written for Docker Compose or for
+ *   Kubernetes already uses, so it has to work.
+ * - the **qualified** name — `<app>-<key>`. A stack shares one network, so two
+ *   applications in it may each define a `db`. The bare name then resolves to
+ *   whichever container Podman's DNS answers with; the qualified one is
+ *   unambiguous.
+ *
+ * For a container whose key is the application itself (a single-container app)
+ * the two collapse into one name, which is returned alone.
+ */
+export function networkAliases(appName: string, key: string): string[] {
+  const qualified = routerName(appName, key);
+  const bare = toDnsLabel(key);
+  if (!bare || bare === qualified) return [qualified];
+  return [bare, qualified];
+}
+
+/**
+ * Refuse an application whose containers would claim the same alias.
+ *
+ * Aliases are DNS labels, so `my_db` and `my-db` are the same name even though
+ * the manifest distinguishes them. Podman accepts the duplicate and resolves it
+ * to one of the two arbitrarily, which is exactly the sort of failure that only
+ * shows up under load, so it is rejected at parse time instead.
+ */
+export function assertDistinctAliases(appName: string, keys: readonly string[]): void {
+  const claimedBy = new Map<string, string>();
+  for (const key of keys) {
+    const alias = toDnsLabel(key) || toDnsLabel(appName);
+    const previous = claimedBy.get(alias);
+    if (previous !== undefined) {
+      throw new Error(
+        previous === key
+          ? `Two containers are both named "${key}". Names must be unique within an ` +
+            `application: they become network aliases, and one name cannot resolve to two containers.`
+          : `Containers "${previous}" and "${key}" both resolve to the network alias "${alias}". ` +
+            `Rename one — aliases are DNS labels, so names differing only in case or punctuation collide.`,
+      );
+    }
+    claimedBy.set(alias, key);
+  }
+}
 
 /**
  * Bash script that purges stale Netavark iptables DNAT rules for containers

@@ -15,6 +15,39 @@ function parse(manifest: string, options: Partial<ParseComposeOptions> = {}) {
   });
 }
 
+describe('network aliases', () => {
+  test('gives every service its bare name and a qualified one', () => {
+    const [web, db] = parse(`
+services:
+  web:
+    image: nginx
+  db:
+    image: postgres
+`);
+    expect(web.aliases).toEqual(['web', 'shop-web']);
+    expect(db.aliases).toEqual(['db', 'shop-db']);
+  });
+
+  test('records the bare alias as a label', () => {
+    const [web] = parse(`
+services:
+  web:
+    image: nginx
+`);
+    expect(web.labels['rudder.alias']).toBe('web');
+  });
+
+  test('refuses services whose names collapse to one DNS label', () => {
+    expect(() => parse(`
+services:
+  my_db:
+    image: postgres
+  my-db:
+    image: postgres
+`)).toThrow(/both resolve to the network alias "my-db"/);
+  });
+});
+
 describe('port notations', () => {
   const cases: Array<[string, string, string]> = [
     ['container only', '"8080"', '8080/tcp'],

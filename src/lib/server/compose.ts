@@ -1,5 +1,6 @@
 import { generateTraefikLabelsForApp } from './provisioning';
 import { buildAppDomain, buildServiceDomain, routerName } from './domains';
+import { ALIAS_LABEL, assertDistinctAliases, networkAliases } from './networks';
 import { unreservedPort, type PortAllocator } from './ports';
 
 export interface ComposeService {
@@ -67,6 +68,8 @@ export interface ParsedContainer {
     startPeriod?: number; // nanoseconds
   };
   networks?: string[];
+  /** DNS names siblings can reach this container by. See `networkAliases`. */
+  aliases: string[];
   /** Hostname this service is routed at, when it exposes a port. */
   domain?: string;
   /** Traefik router/service name for that hostname. */
@@ -136,6 +139,10 @@ export function parseCompose(
   if ('cycle' in ordering) {
     throw new Error(`Circular depends_on: ${ordering.cycle.join(' → ')}`);
   }
+
+  // Compose keys are unique by construction, but they are not DNS labels:
+  // `my_db` and `my-db` are two services that would answer to one alias.
+  assertDistinctAliases(appName, Object.keys(config.services));
 
   const appLabel = { app: appName };
 
@@ -260,9 +267,14 @@ export function parseCompose(
       }
     }
 
+    const aliases = networkAliases(appName, serviceName);
+
     const labels: Record<string, string> = {
       ...appLabel,
       service: serviceName,
+      // The bare alias, recorded so a later deploy can see which names are
+      // already claimed on a shared stack network without reparsing manifests.
+      [ALIAS_LABEL]: aliases[0],
       // Marks the container as Rudder's. The reconciler will only ever delete
       // containers carrying this, so a co-tenant's workload is never garbage
       // collected off a shared worker.
@@ -380,6 +392,7 @@ export function parseCompose(
       cpuShares,
       healthcheck,
       networks: service.networks,
+      aliases,
       domain: serviceDomain,
       routerName: serviceRouter,
       exposedPort: serviceExposedPort,

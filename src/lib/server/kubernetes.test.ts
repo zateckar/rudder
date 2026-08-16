@@ -140,6 +140,46 @@ spec:
   });
 });
 
+describe('parseK8sManifest — network aliases', () => {
+  const PAIR = `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pair
+spec:
+  containers:
+    - name: web
+      image: nginx
+    - name: db
+      image: postgres
+`;
+
+  test('gives every container a name its siblings can use', () => {
+    // A Pod's containers would share localhost in Kubernetes. Here they get
+    // separate addresses on a bridge, so the names are the only way across.
+    const [web, db] = parseK8sManifest(PAIR, 'pair');
+    expect(web.aliases).toEqual(['web', 'pair-web']);
+    expect(db.aliases).toEqual(['db', 'pair-db']);
+  });
+
+  test('records the bare alias as a label', () => {
+    const [web] = parseK8sManifest(PAIR, 'pair');
+    expect(web.labels['rudder.alias']).toBe('web');
+  });
+
+  test('keeps the alias label on a Deployment, whose labels are rebuilt', () => {
+    const [c] = parseK8sManifest(DEPLOYMENT, 'shop');
+    expect(c.labels['rudder.alias']).toBe(c.aliases[0]);
+  });
+
+  test('refuses two containers claiming one alias', () => {
+    // Two Deployments in one manifest may each name a container `web`;
+    // Kubernetes allows it because they are separate Pods, and this is not.
+    const clash = `${PAIR}\n---\n${PAIR.replace('name: db', 'name: web')}`;
+    expect(() => parseK8sManifest(clash, 'pair')).toThrow(/both named "web"/);
+  });
+});
+
 describe('k8sPodTemplate', () => {
   test('reads image and declared ports from a Deployment', () => {
     // What kubectl gets back for a Deployment it applied. These are the ports
