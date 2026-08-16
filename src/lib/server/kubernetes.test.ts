@@ -271,7 +271,9 @@ spec:
 
   test('resolves a volumeMount against the pod volume', () => {
     const [c] = parseK8sManifest(POD, 'tool');
-    expect(c.volumes['/srv/data']).toEqual({ bind: '/data', options: 'ro' });
+    expect(c.mounts).toEqual([
+      { kind: 'bind', source: '/srv/data', target: '/data', mode: 'ro' },
+    ]);
   });
 
   test('parses resource limits', () => {

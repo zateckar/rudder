@@ -21,6 +21,99 @@ export class MountPolicyError extends Error {
 }
 
 /**
+ * What a manifest asked for, before any policy is applied to it.
+ *
+ * Parsers emit these and nothing else. They used to emit finished bind strings
+ * and half-resolved host paths, which meant each of the three deployment
+ * formats decided independently what counted as a host path and what counted as
+ * a volume — and got it differently. A compose file's named volume reached
+ * `buildHostBind`, which rejected it for not being absolute; a Kubernetes
+ * `emptyDir` was mapped to an empty host path and quietly filtered out.
+ *
+ * Turning an intent into something Podman accepts is `realizeMounts`, and that
+ * is the only place the policy is applied.
+ */
+export type MountIntent =
+  /** A directory on the worker's filesystem. Subject to the allow-list. */
+  | { kind: 'bind'; source: string; target: string; mode: string }
+  /** A named Podman volume, created on first use. Always permitted. */
+  | { kind: 'volume'; name: string; target: string; mode: string }
+  /** Memory-backed and gone when the container stops. */
+  | { kind: 'tmpfs'; target: string; options?: string };
+
+/**
+ * Podman's own constraint on volume names. Rudder generates every name it
+ * uses, so this is a guard against a naming rule drifting into something
+ * Podman would read as a path rather than a volume.
+ */
+const VOLUME_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
+
+/** Default tmpfs options: writable, but never a route to privilege. */
+export const DEFAULT_TMPFS_OPTS = 'rw,nosuid,nodev';
+
+/** Validate a container-side mount path. */
+function assertContainerPath(containerPath: string): string {
+  const safe = normalizeHostPath(containerPath);
+  if (safe === null || safe === '/') {
+    throw new MountPolicyError(
+      `Invalid container mount path "${containerPath}": must be an absolute path, below "/", ` +
+        `without ".." segments.`,
+    );
+  }
+  return safe;
+}
+
+/**
+ * Build a validated `name:container:mode` spec for a named volume.
+ *
+ * Named volumes are namespaced per application by the callers in `volumes.ts`,
+ * so unlike a host path there is nothing here for a manifest to reach outside
+ * of — the check is that the generated name is still a name.
+ */
+export function buildVolumeBind(name: string, containerPath: string, mode?: string): string {
+  if (!VOLUME_NAME.test(name)) {
+    throw new MountPolicyError(
+      `"${name}" is not a usable volume name. Volume names must start with a letter or digit ` +
+        `and contain only letters, digits, dots, dashes and underscores.`,
+    );
+  }
+  return `${name}:${assertContainerPath(containerPath)}:${assertModeAllowed(mode)}`;
+}
+
+/**
+ * Apply the mount policy to a container's intents, once.
+ *
+ * Returns the two shapes `createContainer` takes: `binds` for anything backed
+ * by the filesystem or a volume, and `tmpfs` for anything backed by memory.
+ *
+ * @throws MountPolicyError, which the deploy path reports as a 400 — a rejected
+ * mount is a problem with the manifest, and the container must not start
+ * without the storage it asked for.
+ */
+export function realizeMounts(
+  intents: readonly MountIntent[],
+): { binds: string[]; tmpfs: Record<string, string> } {
+  const binds: string[] = [];
+  const tmpfs: Record<string, string> = {};
+
+  for (const intent of intents) {
+    switch (intent.kind) {
+      case 'bind':
+        binds.push(buildHostBind(intent.source, intent.target, intent.mode));
+        break;
+      case 'volume':
+        binds.push(buildVolumeBind(intent.name, intent.target, intent.mode));
+        break;
+      case 'tmpfs':
+        tmpfs[assertContainerPath(intent.target)] = intent.options ?? DEFAULT_TMPFS_OPTS;
+        break;
+    }
+  }
+
+  return { binds, tmpfs };
+}
+
+/**
  * Paths that are never mountable, even if an operator allow-lists a parent.
  * These are the routes to container escape or host takeover; allow-listing `/`
  * or `/var` should not silently re-open them.
@@ -153,15 +246,7 @@ export function buildHostBind(
 ): string {
   const safeHost = assertHostPathAllowed(hostPath);
   const safeMode = assertModeAllowed(mode);
-
-  const safeContainer = normalizeHostPath(containerPath);
-  if (safeContainer === null) {
-    throw new MountPolicyError(
-      `Invalid container mount path "${containerPath}": must be an absolute path without ".." segments.`,
-    );
-  }
-
-  return `${safeHost}:${safeContainer}:${safeMode}`;
+  return `${safeHost}:${assertContainerPath(containerPath)}:${safeMode}`;
 }
 
 /** True when host path mounts are available at all. Useful for UI hints. */

@@ -21,7 +21,8 @@ import {
   teardownAppNetwork,
 } from '$lib/server/networks';
 import { env } from '$lib/server/env';
-import { buildHostBind, MountPolicyError } from '$lib/server/mounts';
+import { MountPolicyError, realizeMounts, type MountIntent } from '$lib/server/mounts';
+import { singleMountIntents } from '$lib/server/volumes';
 import {
   SINGLE_IMAGE_KEY,
   parseDigestRecord,
@@ -235,6 +236,31 @@ async function reservedPortsForWorker(
     }
   }
   return taken;
+}
+
+// ── Mounts ───────────────────────────────────────────────────────────────────
+
+/**
+ * Turn a container's mount intents into the two arguments `createContainer`
+ * takes, and add the secrets tmpfs when there are file-mode secrets to deliver.
+ *
+ * This is the only place the mount policy runs. Every format reaches it, so a
+ * denied host path fails identically whether it came from a compose file, a
+ * Kubernetes manifest or the application form.
+ *
+ * The secrets mount is applied last on purpose: a manifest that declares
+ * storage at `/run/secrets` does not get to displace it.
+ */
+function containerMounts(
+  intents: readonly MountIntent[],
+  hasSecretFiles: boolean,
+): { binds?: string[]; tmpfs?: Record<string, string> } {
+  const { binds, tmpfs } = realizeMounts(intents);
+  if (hasSecretFiles) tmpfs[SECRETS_DIR] = SECRETS_TMPFS_OPTS;
+  return {
+    binds: binds.length > 0 ? binds : undefined,
+    tmpfs: Object.keys(tmpfs).length > 0 ? tmpfs : undefined,
+  };
 }
 
 // ── Network aliases ──────────────────────────────────────────────────────────
@@ -779,10 +805,6 @@ export async function executeApplicationDeploy(
             ...container.env,
           ];
 
-          const binds = Object.entries(container.volumes)
-            .filter(([hostPath]) => hostPath)
-            .map(([hostPath, v]) => buildHostBind(hostPath, v.bind, v.options));
-
           const composeName = nameFor(container.name);
           const containerResult = await podmanClient.createContainer({
             name: composeName,
@@ -794,16 +816,13 @@ export async function executeApplicationDeploy(
             command: container.command,
             entrypoint: container.entrypoint,
             workingDir: container.workingDir,
-            binds: binds.length > 0 ? binds : undefined,
             memory: container.memory,
             cpuQuota: container.cpuShares ? container.cpuShares * 100 : undefined,
             cpuPeriod: container.cpuShares ? 100000 : undefined,
             healthcheck: container.healthcheck,
             networkMode: networkName,
             networkAliases: container.aliases,
-            tmpfs: composeSecrets.files.length > 0
-              ? { [SECRETS_DIR]: SECRETS_TMPFS_OPTS }
-              : undefined,
+            ...containerMounts(container.mounts, composeSecrets.files.length > 0),
           });
 
           await deliverSecretFiles(podmanClient, containerResult.Id, composeSecrets.files);
@@ -903,43 +922,33 @@ export async function executeApplicationDeploy(
       ];
       envArray = mergedEnv;
 
-      let binds: string[] = [];
+      // Volumes the application references by id, resolved here so the intent
+      // builder itself stays free of the database.
+      const volumeRegistry = new Map<string, { name: string; containerPath: string }>();
       if (app.volumes) {
+        let referencedIds: string[] = [];
         try {
-          const vols: Array<{ hostPath: string; containerPath: string; mode: string; volumeId?: string }> =
-            JSON.parse(app.volumes);
-
-          const volumeIds = vols.filter((v) => v.volumeId).map((v) => v.volumeId!);
-          const volumeMap = new Map<string, { name: string; containerPath: string }>();
-          if (volumeIds.length > 0) {
-            const registeredVolumes = await db
-              .select()
-              .from(volumes)
-              .where(inArray(volumes.id, volumeIds))
-              .all();
-            for (const rv of registeredVolumes) {
-              volumeMap.set(rv.id, { name: rv.name, containerPath: rv.containerPath });
-            }
+          const declared = JSON.parse(app.volumes);
+          if (Array.isArray(declared)) {
+            referencedIds = declared
+              .map((v: { volumeId?: string }) => v?.volumeId)
+              .filter((id): id is string => !!id);
           }
-
-          binds = vols
-            .map((v) => {
-              if (v.volumeId) {
-                const rv = volumeMap.get(v.volumeId);
-                if (!rv) return null;
-                return `rudder-${app.id.slice(0, 8)}-${rv.name}:${rv.containerPath}:${v.mode || 'rw'}`;
-              }
-              if (!v.hostPath || !v.containerPath) return null;
-              return buildHostBind(v.hostPath, v.containerPath, v.mode);
-            })
-            .filter((b): b is string => b !== null);
-        } catch (e) {
-          // A rejected mount must fail the deploy — never silently drop it,
-          // which would start the container without its expected storage.
-          if (e instanceof MountPolicyError) throw e;
-          // Malformed JSON: no volumes to mount.
+        } catch {
+          // Malformed JSON: nothing to look up, and nothing to mount.
+        }
+        if (referencedIds.length > 0) {
+          const registered = await db
+            .select()
+            .from(volumes)
+            .where(inArray(volumes.id, referencedIds))
+            .all();
+          for (const rv of registered) {
+            volumeRegistry.set(rv.id, { name: rv.name, containerPath: rv.containerPath });
+          }
         }
       }
+      const singleMounts = singleMountIntents(app.id, app.volumes, volumeRegistry);
 
       const baseDomain = process.env.TRAEFIK_BASE_DOMAIN || worker.baseDomain || worker.hostname;
       const appDomain = app.domain || buildAppDomain(app.name, baseDomain) || app.name;
@@ -1063,16 +1072,13 @@ export async function executeApplicationDeploy(
           restartPolicy: app.restartPolicy || 'always',
           command,
           workingDir: cfg.workingDir || undefined,
-          binds: binds.length > 0 ? binds : undefined,
           memory: memBytes,
           cpuQuota: cpuCfg?.cpuQuota,
           cpuPeriod: cpuCfg?.cpuPeriod,
           healthcheck,
           networkMode: networkName,
           networkAliases: singleAliases,
-          tmpfs: appSecrets.files.length > 0
-            ? { [SECRETS_DIR]: SECRETS_TMPFS_OPTS }
-            : undefined,
+          ...containerMounts(singleMounts, appSecrets.files.length > 0),
         });
 
         await deliverSecretFiles(podmanClient, containerResult.Id, appSecrets.files);
@@ -1198,11 +1204,6 @@ export async function executeApplicationDeploy(
             ...k8sEnv,
           ];
 
-          // Build volume binds from parsed K8s volumes
-          const k8sBinds = Object.entries(container.volumes)
-            .filter(([hostPath]) => hostPath)
-            .map(([hostPath, v]) => buildHostBind(hostPath, v.bind, v.options));
-
           const k8sContainerName = nameFor(`${app.name}-${app.id.slice(0, 8)}-${container.name}`);
           const containerResult = await podmanClient.createContainer({
             name: k8sContainerName,
@@ -1216,12 +1217,9 @@ export async function executeApplicationDeploy(
             memory: container.memory,
             cpuQuota: container.cpuShares ? container.cpuShares * 100 : undefined,
             cpuPeriod: container.cpuShares ? 100000 : undefined,
-            binds: k8sBinds.length > 0 ? k8sBinds : undefined,
             networkMode: k8sNetworkName,
             networkAliases: container.aliases,
-            tmpfs: k8sSecrets.files.length > 0
-              ? { [SECRETS_DIR]: SECRETS_TMPFS_OPTS }
-              : undefined,
+            ...containerMounts(container.mounts, k8sSecrets.files.length > 0),
           });
 
           await deliverSecretFiles(podmanClient, containerResult.Id, k8sSecrets.files);

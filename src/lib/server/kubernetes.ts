@@ -1,3 +1,4 @@
+import type { MountIntent } from './mounts';
 import { ALIAS_LABEL, assertDistinctAliases, networkAliases } from './networks';
 import { unreservedPort, type PortAllocator } from './ports';
 
@@ -68,7 +69,8 @@ export interface ParsedK8sContainer {
    * record needs to know which.
    */
   ports: Record<string, Array<{ hostPort: string }>>;
-  volumes: Record<string, { bind: string; options: string }>;
+  /** What the container asked to mount. Policy is applied by the executor. */
+  mounts: MountIntent[];
   /**
    * DNS names siblings can reach this container by.
    *
@@ -120,7 +122,8 @@ export function parseK8sManifest(
   }
   
   const containers: ParsedK8sContainer[] = [];
-  const volumes: Record<string, string> = {};
+  /** Volumes declared by the Pod spec, by name, as written. */
+  const volumes: Record<string, K8sVolume> = {};
   const labels: Record<string, string> = { app: appName };
   if (teamSlug) labels.team = teamSlug;
 
@@ -135,13 +138,7 @@ export function parseK8sManifest(
       const podSpec = spec as K8sPodSpec;
       
       if (podSpec.volumes) {
-        for (const vol of podSpec.volumes) {
-          if (vol.hostPath) {
-            volumes[vol.name] = vol.hostPath.path;
-          } else if (vol.emptyDir) {
-            volumes[vol.name] = '';
-          }
-        }
+        for (const vol of podSpec.volumes) volumes[vol.name] = vol;
       }
 
       if (podSpec.containers) {
@@ -156,11 +153,7 @@ export function parseK8sManifest(
         const podSpec = spec.template.spec as K8sPodSpec;
         
         if (podSpec.volumes) {
-          for (const vol of podSpec.volumes) {
-            if (vol.hostPath) {
-              volumes[vol.name] = vol.hostPath.path;
-            }
-          }
+          for (const vol of podSpec.volumes) volumes[vol.name] = vol;
         }
 
         if (podSpec.containers) {
@@ -254,7 +247,7 @@ export function k8sPodTemplate(
 function parseK8sContainer(
   container: K8sContainer,
   metadata: K8sMetadata,
-  volumes: Record<string, string>,
+  volumes: Record<string, K8sVolume>,
   appName: string,
   allocatePort: PortAllocator,
   restartPolicy?: string
@@ -275,17 +268,17 @@ function parseK8sContainer(
     }
   }
 
-  const containerVolumes: Record<string, { bind: string; options: string }> = {};
-  
+  const mounts: MountIntent[] = [];
+
   if (container.volumeMounts) {
     for (const vm of container.volumeMounts) {
-      const hostPath = volumes[vm.name];
-      if (hostPath !== undefined) {
-        containerVolumes[hostPath] = { 
-          bind: vm.mountPath, 
-          options: vm.readOnly ? 'ro' : 'rw' 
-        };
+      const declared = volumes[vm.name];
+      const mode = vm.readOnly ? 'ro' : 'rw';
+      if (declared?.hostPath?.path) {
+        mounts.push({ kind: 'bind', source: declared.hostPath.path, target: vm.mountPath, mode });
       }
+      // Every other volume kind is still dropped here. Making them work — and
+      // refusing the ones that cannot — is the next piece of this work.
     }
   }
 
@@ -314,7 +307,7 @@ function parseK8sContainer(
     image: container.image || `${container.name}:latest`,
     env,
     ports,
-    volumes: containerVolumes,
+    mounts,
     aliases,
     restartPolicy: restartPolicy || 'always',
     labels: containerLabels,

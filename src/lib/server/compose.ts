@@ -1,7 +1,9 @@
 import { generateTraefikLabelsForApp } from './provisioning';
 import { buildAppDomain, buildServiceDomain, routerName } from './domains';
 import { ALIAS_LABEL, assertDistinctAliases, networkAliases } from './networks';
+import type { MountIntent } from './mounts';
 import { unreservedPort, type PortAllocator } from './ports';
+import { composeVolumeName, isHostPathSource, volumeBaseName } from './volumes';
 
 export interface ComposeService {
   image?: string;
@@ -52,7 +54,8 @@ export interface ParsedContainer {
   image: string;
   env: string[];
   ports: Record<string, Array<{ hostPort: string }>>;
-  volumes: Record<string, { bind: string; options: string }>;
+  /** What the service asked to mount. Policy is applied by the executor. */
+  mounts: MountIntent[];
   restartPolicy: string;
   labels: Record<string, string>;
   command?: string[];
@@ -211,8 +214,8 @@ export function parseCompose(
       }
     }
 
-    const volumes: Record<string, { bind: string; options: string }> = {};
-    
+    const mounts: MountIntent[] = [];
+
     if (service.volumes) {
       for (const volumeEntry of service.volumes) {
         let source: string;
@@ -234,23 +237,22 @@ export function parseCompose(
 
         if (!target) continue;
 
-        // Relative paths (./data, ../data, ~/data) cannot be used as bind mounts on a
-        // remote worker. Convert them to auto-managed named Podman volumes instead.
-        // Named volumes are created automatically by Podman on first use and persist
-        // across redeployments because the name is deterministic (based on appId + service).
-        if (!source || source.startsWith('.') || source.startsWith('~')) {
-          const baseName = (source || target)
-            .replace(/^[.~\/]+/, '')        // strip leading ./ ~/ /
-            .replace(/[^a-zA-Z0-9]+/g, '-') // replace non-alphanumeric with -
-            .replace(/^-+|-+$/g, '')        // strip leading/trailing dashes
-            || 'vol';
-          const prefix = appId ? `rudder-${appId.slice(0, 8)}-` : 'rudder-';
-          source = `${prefix}${serviceName}-${baseName}`;
+        if (isHostPathSource(source)) {
+          // The user knows their worker's filesystem; whether they may mount
+          // this part of it is the executor's call, not the parser's.
+          mounts.push({ kind: 'bind', source, target, mode: options });
+          continue;
         }
-        // Absolute paths (/host/path) are kept as bind mounts (user knows their worker FS).
-        // Named volumes (no '/' prefix, no relative prefix) are kept as-is (Podman auto-creates).
 
-        volumes[source] = { bind: target, options };
+        // Everything else is a named Podman volume, created on first use and
+        // persisting across redeploys because the name is deterministic. A
+        // relative source (./data, ~/cache) has to become one: bound literally
+        // it would resolve against the control plane's working directory, not
+        // the worker's.
+        const name = source && !source.startsWith('.') && !source.startsWith('~')
+          ? source
+          : composeVolumeName(appId, serviceName, volumeBaseName(source, target));
+        mounts.push({ kind: 'volume', name, target, mode: options });
       }
     }
 
@@ -382,7 +384,7 @@ export function parseCompose(
       image: service.image || `${serviceName}:latest`,
       env: Object.entries(env).map(([k, v]) => `${k}=${v}`),
       ports,
-      volumes,
+      mounts,
       restartPolicy,
       labels,
       command: service.command ? (Array.isArray(service.command) ? service.command : [service.command]) : undefined,

@@ -142,10 +142,14 @@ services:
     volumes: ["./data:/var/lib/postgresql/data"]
 `, { appId: 'abcdef1234567890' });
 
-    expect(c.volumes['rudder-abcdef12-db-data']).toEqual({
-      bind: '/var/lib/postgresql/data',
-      options: 'rw',
-    });
+    expect(c.mounts).toEqual([
+      {
+        kind: 'volume',
+        name: 'rudder-abcdef12-db-data',
+        target: '/var/lib/postgresql/data',
+        mode: 'rw',
+      },
+    ]);
   });
 
   test('converts home-relative sources too', () => {
@@ -153,7 +157,7 @@ services:
 services:
   db: { image: postgres, volumes: ["~/data:/data"] }
 `, { appId: 'abcdef1234567890' });
-    expect(Object.keys(c.volumes)[0]).toBe('rudder-abcdef12-db-data');
+    expect(c.mounts[0]).toMatchObject({ kind: 'volume', name: 'rudder-abcdef12-db-data' });
   });
 
   test('keeps absolute paths as bind mounts', () => {
@@ -161,7 +165,9 @@ services:
 services:
   db: { image: postgres, volumes: ["/srv/data:/data:ro"] }
 `);
-    expect(c.volumes['/srv/data']).toEqual({ bind: '/data', options: 'ro' });
+    expect(c.mounts).toEqual([
+      { kind: 'bind', source: '/srv/data', target: '/data', mode: 'ro' },
+    ]);
   });
 
   test('keeps named volumes as-is', () => {
@@ -169,7 +175,9 @@ services:
 services:
   db: { image: postgres, volumes: ["pgdata:/data"] }
 `);
-    expect(c.volumes['pgdata']).toEqual({ bind: '/data', options: 'rw' });
+    expect(c.mounts).toEqual([
+      { kind: 'volume', name: 'pgdata', target: '/data', mode: 'rw' },
+    ]);
   });
 
   test('honours read_only in the long form', () => {
@@ -182,7 +190,17 @@ services:
         target: /data
         read_only: true
 `);
-    expect(c.volumes['/srv/data'].options).toBe('ro');
+    expect(c.mounts[0]).toMatchObject({ mode: 'ro' });
+  });
+
+  test('keeps two mounts from one source rather than collapsing them', () => {
+    // The old representation was keyed by source, so a source mounted at two
+    // paths lost one of them without saying anything.
+    const [c] = parse(`
+services:
+  db: { image: postgres, volumes: ["shared:/a", "shared:/b"] }
+`);
+    expect(c.mounts.map((m) => m.target)).toEqual(['/a', '/b']);
   });
 });
 
