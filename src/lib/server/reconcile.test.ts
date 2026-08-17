@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   APP_ID_LABEL,
   MANAGED_LABEL,
+  desiredState,
   healthFromStatus,
   mayRemove,
   ownedAppId,
@@ -10,7 +11,55 @@ import {
   specHash,
   toObserved,
 } from './reconcile';
-import type { PlannedContainer } from './deploy/plan';
+import { ManifestError, type PlannedContainer } from './deploy/plan';
+import type { applications, workers } from '$lib/db/schema';
+
+// ── Fixtures ─────────────────────────────────────────────────────────────────
+
+function appRow(over: Partial<typeof applications.$inferSelect> = {}): typeof applications.$inferSelect {
+  return {
+    id: 'app-1',
+    teamId: 'team-1',
+    workerId: 'worker-1',
+    name: 'shop',
+    description: null,
+    domain: null,
+    type: 'single',
+    deploymentFormat: 'compose',
+    manifest: 'nginx:1.27',
+    environment: null,
+    volumes: null,
+    restartPolicy: 'always',
+    rateLimitAvg: null,
+    rateLimitBurst: null,
+    authType: 'global',
+    authConfig: null,
+    stackId: null,
+    replicas: 1,
+    gitRepo: null,
+    gitBranch: null,
+    gitDockerfile: null,
+    healthcheck: null,
+    healthTimeoutSeconds: null,
+    retainPreviousMinutes: 0,
+    createdBy: null,
+    createdAt: new Date(0),
+    updatedAt: new Date(0),
+    ...over,
+  } as typeof applications.$inferSelect;
+}
+
+function workerRow(over: Partial<typeof workers.$inferSelect> = {}): typeof workers.$inferSelect {
+  return {
+    id: 'worker-1',
+    name: 'alpha',
+    hostname: 'alpha.example.com',
+    baseDomain: 'alpha.apps.example.com',
+    status: 'online',
+    routingMode: 'http',
+    ...over,
+  } as typeof workers.$inferSelect;
+}
 
 /** The minimum a Podman list entry needs for these tests. */
 function raw(over: Partial<Parameters<typeof toObserved>[0]> = {}) {
@@ -271,5 +320,137 @@ describe('specHash', () => {
   test('ignores the key order of labels', () => {
     const reordered = planned({ labels: { [MANAGED_LABEL]: 'true', app: 'shop' } });
     expect(specHash(reordered)).toBe(specHash(planned()));
+  });
+});
+
+// ── Desired state ────────────────────────────────────────────────────────────
+
+describe('desiredState', () => {
+  test('is a pure function of the rows it is handed', () => {
+    const app = appRow();
+    const worker = workerRow();
+    const a = desiredState({ app, worker });
+    const b = desiredState({ app, worker });
+    expect(a.containers.map((c) => c.specHash)).toEqual(b.containers.map((c) => c.specHash));
+  });
+
+  test('marks every container Rudder owns', () => {
+    const desired = desiredState({ app: appRow(), worker: workerRow() });
+    for (const c of desired.containers) {
+      expect(c.planned.labels[MANAGED_LABEL]).toBe('true');
+      expect(c.planned.labels[APP_ID_LABEL]).toBe('app-1');
+      // The guard that gates every removal has to accept what a deploy creates,
+      // or reconciliation could never clean up after itself.
+      expect(mayRemove({ labels: c.planned.labels })).toBe(true);
+    }
+  });
+
+  test('changing a rate limit does not change any specHash', () => {
+    // The requirement this whole column exists for. An http-mode worker fetches
+    // rate limits on a five-second poll, so editing one must not make the
+    // reconciler want to rebuild a container that is running the right bytes.
+    const before = desiredState({ app: appRow(), worker: workerRow() });
+    const after = desiredState({
+      app: appRow({ rateLimitAvg: 100, rateLimitBurst: 200, authType: 'oidc' }),
+      worker: workerRow(),
+    });
+    expect(after.containers.map((c) => c.specHash)).toEqual(before.containers.map((c) => c.specHash));
+  });
+
+  test('changing the image does change the specHash', () => {
+    const before = desiredState({ app: appRow(), worker: workerRow() });
+    const after = desiredState({ app: appRow({ manifest: 'nginx:1.28' }), worker: workerRow() });
+    expect(after.containers[0].specHash).not.toBe(before.containers[0].specHash);
+  });
+
+  test('changing the domain does not change the specHash', () => {
+    // Routing is served live. Moving an application to a new hostname is a
+    // configuration change the worker picks up on its next fetch.
+    const before = desiredState({ app: appRow(), worker: workerRow() });
+    const after = desiredState({ app: appRow({ domain: 'shop.example.com' }), worker: workerRow() });
+    expect(after.containers[0].specHash).toBe(before.containers[0].specHash);
+    expect(after.containers[0].planned.route?.domain).toBe('shop.example.com');
+  });
+
+  test('allocates nothing when no allocator is supplied', () => {
+    // Reconciling is comparing, not deploying. If a reconcile pass drew real
+    // ports it would reserve one for every application on every cycle.
+    const compose = [
+      'services:',
+      '  web:',
+      '    image: nginx:1.27',
+      '    ports:',
+      '      - "8080"',
+    ].join('\n');
+    const desired = desiredState({
+      app: appRow({ type: 'compose', manifest: compose }),
+      worker: workerRow(),
+    });
+    expect(desired.portsArePlaceholders).toBe(true);
+
+    const real = desiredState({
+      app: appRow({ type: 'compose', manifest: compose }),
+      worker: workerRow(),
+      allocatePort: () => 31234,
+    });
+    expect(real.portsArePlaceholders).toBe(false);
+    expect(real.containers[0].planned.route?.hostPort).toBe(31234);
+  });
+
+  test('placeholder ports do not disturb the hash', () => {
+    // Two passes over the same compose file hand out different placeholder
+    // numbers if the counter advances. Neither may read as drift.
+    const compose = [
+      'services:',
+      '  web:',
+      '    image: nginx:1.27',
+      '    ports:',
+      '      - "8080"',
+      '  api:',
+      '    image: node:22',
+      '    ports:',
+      '      - "3000"',
+    ].join('\n');
+    const app = appRow({ type: 'compose', manifest: compose });
+    const placeholders = desiredState({ app, worker: workerRow() });
+    const allocated = desiredState({ app, worker: workerRow(), allocatePort: () => 31500 });
+    expect(allocated.containers.map((c) => c.specHash)).toEqual(
+      placeholders.containers.map((c) => c.specHash),
+    );
+  });
+
+  test('refuses an application with no manifest', () => {
+    expect(() => desiredState({ app: appRow({ manifest: null }), worker: workerRow() })).toThrow(
+      ManifestError,
+    );
+  });
+
+  test('reports a manifest it will not deploy as a ManifestError', () => {
+    // A reconcile pass catches this per application. One unparseable manifest
+    // must not blind the operator to drift on everything else on the worker.
+    expect(() =>
+      desiredState({ app: appRow({ type: 'compose', manifest: 'services: [' }), worker: workerRow() }),
+    ).toThrow(ManifestError);
+  });
+
+  test('carries the notes the plan produced', () => {
+    const twoContainers = [
+      'apiVersion: v1',
+      'kind: Pod',
+      'metadata:',
+      '  name: shop',
+      'spec:',
+      '  containers:',
+      '    - name: web',
+      '      image: nginx:1.27',
+      '    - name: sidecar',
+      '      image: busybox:1.36',
+    ].join('\n');
+    const desired = desiredState({
+      app: appRow({ type: 'k8s', manifest: twoContainers }),
+      worker: workerRow(),
+    });
+    expect(desired.containers).toHaveLength(2);
+    expect(desired.notes.join(' ')).toContain('localhost');
   });
 });

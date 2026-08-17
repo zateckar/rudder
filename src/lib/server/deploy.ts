@@ -5,14 +5,13 @@ import { db } from '$lib/db';
 import { applications, workers, containers, teams, stacks, volumes, secrets, deployments } from '$lib/db/schema';
 import { and, eq, inArray, ne, or, desc } from 'drizzle-orm';
 import { getRestPodmanClient } from '$lib/server/podman-client';
-import { buildDeploymentPlan } from '$lib/server/deploy/build';
 import {
   ManifestError,
   type DeploymentPlan,
-  type PlanContext,
   type PlannedFile,
   type PlannedRoute,
 } from '$lib/server/deploy/plan';
+import { desiredState, type DesiredApp } from '$lib/server/reconcile';
 import { generateTraefikLabelsForApp, type AppMiddlewareOptions } from '$lib/server/provisioning';
 // Shared with the config generator so `labels` and `http` mode workers apply
 // exactly the same rate limit, auth mode and health check.
@@ -22,7 +21,6 @@ import { decrypt } from '$lib/server/encryption';
 import { ALIAS_LABEL, ensureAppNetwork, teardownAppNetwork } from '$lib/server/networks';
 import { env } from '$lib/server/env';
 import { MountPolicyError, realizeMounts, type MountIntent } from '$lib/server/mounts';
-import { singleMountIntents } from '$lib/server/volumes';
 import {
   parseDigestRecord,
   pinnedImageFor,
@@ -698,41 +696,31 @@ export async function executeApplicationDeploy(
   // leaves the previous generation running on them.
   const takenPorts = await reservedPortsForWorker(worker.id, blueGreen ? undefined : app.id);
 
-  const planContext: PlanContext = {
-    appId: app.id,
-    appName: app.name,
-    appDomain: app.domain,
-    baseDomain: process.env.TRAEFIK_BASE_DOMAIN || worker.baseDomain || worker.hostname,
-    teamSlug: team?.slug,
-    team: team ? { id: team.id, name: team.name } : undefined,
-    stack: stack ? { id: stack.id, name: stack.name } : undefined,
-    replicas: app.replicas,
-    restartPolicy: app.restartPolicy,
-    environment: app.environment,
-    healthcheck: app.healthcheck,
-    gitRepo: app.gitRepo,
-    allocatePort: () => {
-      const port = pickFreePort(takenPorts);
-      takenPorts.add(port);
-      return port;
-    },
-  };
+  // Intent comes from `desiredState`, which the reconciler also calls. Two
+  // definitions of what should be running would eventually disagree, and the
+  // disagreement would show up as a reconciler wanting to rebuild a fleet that
+  // was already correct.
+  const volumeRegistry = await resolveVolumeRegistry(app.volumes);
 
-  let plan: DeploymentPlan;
+  let desired: DesiredApp;
   try {
-    plan = buildDeploymentPlan(
-      {
-        type: app.type,
-        manifest: app.manifest,
-        singleMounts: singleMountIntents(app.id, app.volumes, await resolveVolumeRegistry(app.volumes)),
+    desired = desiredState({
+      app,
+      worker,
+      team,
+      stack,
+      volumeRegistry,
+      allocatePort: () => {
+        const port = pickFreePort(takenPorts);
+        takenPorts.add(port);
+        return port;
       },
-      planContext,
-    );
+    });
     // Apply the mount policy now, and throw the result away. It is applied
     // again per container during creation, but by then the legacy path has
     // already removed the previous generation — so a denied host path would
     // take the application down before saying why.
-    for (const planned of plan.containers) realizeMounts(planned.mounts);
+    for (const { planned } of desired.containers) realizeMounts(planned.mounts);
   } catch (e: any) {
     // A manifest that cannot be deployed as written. Nothing has been created,
     // nothing torn down, and no deployment row records the attempt.
@@ -741,6 +729,13 @@ export async function executeApplicationDeploy(
     }
     throw e;
   }
+
+  const plan: DeploymentPlan = {
+    containers: desired.containers.map((c) => c.planned),
+    notes: desired.notes,
+  };
+  /** Recreation-forcing intent per container, stored so the reconciler can compare. */
+  const specHashes = new Map(desired.containers.map((c) => [c.key, c.specHash]));
 
   await warnOnAliasCollisions(app, [...new Set(plan.containers.map((c) => c.aliases[0]))]);
 
@@ -914,6 +909,10 @@ export async function executeApplicationDeploy(
           generation,
           state: initialState,
           deploymentId,
+          // What the reconciler compares against. Recorded from the plan that
+          // produced this container, so a later pass computing the same intent
+          // reads it as current without needing to inspect the container.
+          specHash: specHashes.get(planned.key) ?? null,
           createdAt: new Date(),
           updatedAt: new Date(),
         });

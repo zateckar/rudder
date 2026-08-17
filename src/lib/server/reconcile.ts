@@ -40,8 +40,12 @@
  * reconciler under-claims rather than over-claims.
  */
 import { createHash } from 'crypto';
+import type { applications, stacks, teams, workers } from '$lib/db/schema';
 import type { Container } from './podman';
-import type { PlannedContainer } from './deploy/plan';
+import { buildDeploymentPlan } from './deploy/build';
+import { ManifestError, type PlanContext, type PlannedContainer } from './deploy/plan';
+import type { PortAllocator } from './ports';
+import { singleMountIntents } from './volumes';
 
 export const MANAGED_LABEL = 'rudder.managed';
 export const APP_ID_LABEL = 'rudder.app.id';
@@ -204,4 +208,125 @@ export function specHash(planned: PlannedContainer): string {
 
 function sha256(input: string): string {
   return createHash('sha256').update(input).digest('hex');
+}
+
+// ── Desired state ────────────────────────────────────────────────────────────
+
+/**
+ * Everything `desiredState` needs, all of it already loaded.
+ *
+ * Rows in, intent out, no database. That is what makes desired state testable
+ * against a fixture and — more to the point — comparable without touching a
+ * worker. The two things that genuinely require I/O are hoisted out to the
+ * caller: the volume registry, and the port allocator.
+ */
+export interface DesiredStateInput {
+  app: typeof applications.$inferSelect;
+  worker: typeof workers.$inferSelect;
+  team?: Pick<typeof teams.$inferSelect, 'id' | 'name' | 'slug'> | null;
+  stack?: Pick<typeof stacks.$inferSelect, 'id' | 'name'> | null;
+  /** Registered volumes the application references, keyed by volume id. */
+  volumeRegistry?: Map<string, { name: string; containerPath: string }>;
+  /**
+   * Draws a free host port on the worker. Supplied by a deploy, which is
+   * allocating for real; omitted when reconciling, which is only comparing.
+   */
+  allocatePort?: PortAllocator;
+}
+
+export interface DesiredContainer {
+  /** Compose service, Kubernetes container, or the application's own name. */
+  key: string;
+  /** Podman name, before any blue/green generation suffix. */
+  name: string;
+  planned: PlannedContainer;
+  /** @see specHash */
+  specHash: string;
+}
+
+export interface DesiredApp {
+  appId: string;
+  appName: string;
+  workerId: string;
+  containers: DesiredContainer[];
+  /** What the manifest asked for that this deployment will not do. */
+  notes: string[];
+  /**
+   * True when no allocator was supplied, so every host port in `planned.ports`
+   * and `planned.route` is a placeholder. Reconciliation does not compare ports —
+   * they are drawn from an allocator and so differ on every recomputation — but
+   * nothing downstream should mistake these for numbers a container will bind.
+   */
+  portsArePlaceholders: boolean;
+}
+
+/**
+ * A port number no container will ever be told to bind.
+ *
+ * Deliberately outside the allocator's 30000–32767 range so a placeholder that
+ * escaped into a Podman call would fail loudly on the port rather than quietly
+ * bind something plausible.
+ */
+const PLACEHOLDER_PORT_BASE = 1;
+
+/**
+ * What should be running for this application, as a pure function of its rows.
+ *
+ * This is the same computation a deploy performs, because it *is* the
+ * computation a deploy performs: `buildDeploymentPlan` has been the single
+ * definition of intent since the three deploy paths were collapsed, and both the
+ * deploy and the reconciler reach it through here. Intent with two definitions
+ * is intent that will disagree with itself, and the disagreement would surface as
+ * a reconciler that wants to rebuild a fleet that is already correct.
+ *
+ * Throws `ManifestError` for a manifest that cannot be deployed as written. A
+ * reconcile pass catches it and reports the application as unreconcilable rather
+ * than failing the whole worker: one bad manifest must not blind the operator to
+ * drift everywhere else.
+ */
+export function desiredState(input: DesiredStateInput): DesiredApp {
+  const { app, worker, team, stack } = input;
+  if (!app.manifest) throw new ManifestError('No manifest found');
+
+  let placeholder = PLACEHOLDER_PORT_BASE;
+  const allocatePort = input.allocatePort ?? (() => placeholder++);
+
+  const ctx: PlanContext = {
+    appId: app.id,
+    appName: app.name,
+    appDomain: app.domain,
+    baseDomain: process.env.TRAEFIK_BASE_DOMAIN || worker.baseDomain || worker.hostname,
+    teamSlug: team?.slug,
+    team: team ? { id: team.id, name: team.name } : undefined,
+    stack: stack ? { id: stack.id, name: stack.name } : undefined,
+    replicas: app.replicas,
+    restartPolicy: app.restartPolicy,
+    environment: app.environment,
+    healthcheck: app.healthcheck,
+    gitRepo: app.gitRepo,
+    allocatePort,
+  };
+
+  const plan = buildDeploymentPlan(
+    {
+      type: app.type,
+      manifest: app.manifest,
+      singleMounts: singleMountIntents(app.id, app.volumes, input.volumeRegistry ?? new Map()),
+    },
+    ctx,
+  );
+
+  return {
+    appId: app.id,
+    appName: app.name,
+    workerId: worker.id,
+    containers: plan.containers.map((planned) => ({
+      key: planned.key,
+      name: planned.name,
+      planned,
+      specHash: specHash(planned),
+    })),
+    notes: plan.notes,
+    portsArePlaceholders: !input.allocatePort,
+  };
 }
