@@ -11,6 +11,7 @@ import { createPodmanClient } from './podman';
 import { getHostStats } from './host-metrics';
 import { getHostStatsHttp } from './host-metrics-http';
 import { evaluateAlerts } from './alerts';
+import { reconcileAllWorkers } from './reconcile';
 import { decryptField } from './encryption';
 
 // Track which provisioning events have already been processed to avoid redundant discovery runs
@@ -482,6 +483,24 @@ async function collectAll(): Promise<void> {
     if (reaped > 0) console.log(`[metrics] Reaped ${reaped} retained container(s)`);
   } catch (e) {
     console.error('[metrics] Generation sweep failed:', (e as any).message || e);
+  }
+
+  // Diff what should be running against what is. Read-only: the pass makes one
+  // Podman call, `listContainers`, and has no path to a create, start, stop or
+  // remove. `apply` stays false until the reports have been watched for a full
+  // release cycle — the failure mode worth catching is a bug in desiredState that
+  // makes a healthy fleet look wrong, and that should be found in a report.
+  //
+  // Runs after the metrics sweep so container statuses in the database are as
+  // fresh as they get before the comparison reads them.
+  try {
+    const reports = await reconcileAllWorkers({ apply: false });
+    const drifted = reports.filter((r) => !r.clean).length;
+    if (drifted > 0) {
+      console.log(`[metrics] Reconciliation found drift on ${drifted}/${reports.length} worker(s)`);
+    }
+  } catch (e) {
+    console.error('[metrics] Reconciliation failed:', (e as any).message || e);
   }
 
   // Evaluate alert rules against freshly collected metrics

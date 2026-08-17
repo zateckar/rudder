@@ -6,6 +6,77 @@
   let activeTab = $state('containers');
   let deploying = $state(false);
 
+  // ── Drift ──────────────────────────────────────────────────────────────────
+  //
+  // What the last reconciliation pass found for this application. Reported, never
+  // corrected on its own: the pass is read-only, so anything shown here is
+  // waiting on a person.
+  interface Drift {
+    kind: 'missing' | 'stale' | 'unhealthy' | 'orphan' | 'foreign';
+    name: string;
+    detail: string;
+  }
+  // Null until a re-check replaces it, so the page keeps following the server's
+  // answer — which is refreshed on every navigation — rather than freezing
+  // whatever it happened to load with.
+  let recheckedDrift = $state<Drift[] | null>(null);
+  const drift = $derived(recheckedDrift ?? data.drift ?? []);
+  let reconciling = $state(false);
+  let rechecking = $state(false);
+
+  const DRIFT_LABEL: Record<Drift['kind'], string> = {
+    missing: 'Not running',
+    stale: 'Out of date',
+    unhealthy: 'Failing health check',
+    orphan: 'Untracked',
+    foreign: 'Not managed by Rudder',
+  };
+
+  /** Re-run the diff now rather than waiting for the next collection cycle. */
+  async function recheckDrift() {
+    rechecking = true;
+    try {
+      const res = await fetch(`/api/applications/${data.application.id}/reconcile`);
+      const body = await res.json();
+      if (res.ok) {
+        const found: Drift[] = body.drift ?? [];
+        recheckedDrift = found;
+        showToast('success', found.length === 0 ? 'No drift — this application matches its configuration' : `${found.length} difference${found.length === 1 ? '' : 's'} found`);
+      } else {
+        showToast('error', body.error || 'Could not check for drift');
+      }
+    } catch (e: any) {
+      showToast('error', e.message);
+    } finally {
+      rechecking = false;
+    }
+  }
+
+  /**
+   * Correct the drift by deploying.
+   *
+   * There is no separate repair path on purpose. A deploy already creates what
+   * is absent, replaces what was built from different configuration, and verifies
+   * the result before routing to it.
+   */
+  async function reconcileNow() {
+    reconciling = true;
+    try {
+      const res = await fetch(`/api/applications/${data.application.id}/reconcile`, { method: 'POST' });
+      const body = await res.json();
+      if (res.ok) {
+        showToast('success', body.message || 'Reconciled');
+        setTimeout(() => window.location.reload(), 800);
+      } else {
+        showToast('error', body.error || 'Reconcile failed');
+      }
+    } catch (e: any) {
+      showToast('error', e.message);
+    } finally {
+      reconciling = false;
+    }
+  }
+
   // Save as template
   let showTemplateModal = $state(false);
   let templateName = $state('');
@@ -708,6 +779,42 @@
     </div>
   {/if}
 </div>
+
+<!-- ── Drift ───────────────────────────────────────────────────────────────
+     What is running disagrees with what should be. Shown above the tabs
+     because it changes how everything below it should be read. -->
+{#if drift.length > 0}
+  <div class="drift-panel">
+    <div class="drift-head">
+      <span class="drift-title">
+        This application has drifted from its configuration
+        <span class="drift-count">{drift.length}</span>
+      </span>
+      <div class="drift-actions">
+        <button class="btn-act" onclick={recheckDrift} disabled={rechecking} title="Re-run the comparison now instead of waiting for the next collection cycle">
+          {rechecking ? 'Checking…' : 'Re-check'}
+        </button>
+        {#if drift.some((d) => d.kind === 'missing' || d.kind === 'stale')}
+          <button class="btn-act btn-start" onclick={reconcileNow} disabled={reconciling} title="Deploy the current configuration, which creates what is missing and replaces what is out of date">
+            {reconciling ? 'Reconciling…' : 'Reconcile now'}
+          </button>
+        {/if}
+      </div>
+    </div>
+    <ul class="drift-list">
+      {#each drift as d}
+        <li>
+          <span class="drift-kind drift-{d.kind}">{DRIFT_LABEL[d.kind] ?? d.kind}</span>
+          <code class="drift-name">{d.name}</code>
+          <span class="drift-detail">{d.detail}</span>
+        </li>
+      {/each}
+    </ul>
+    <p class="drift-foot">
+      Reconciliation only reports. Nothing here has been changed automatically.
+    </p>
+  </div>
+{/if}
 
 <!-- ── Tabs ────────────────────────────────────────────────────────────── -->
 <div class="tabs">
@@ -1827,6 +1934,51 @@
     background: var(--yellow-subtle); margin-left: 4px;
   }
   .btn-notes:hover:not(:disabled) { background: color-mix(in srgb, var(--yellow) 15%, transparent); }
+
+  /* ── Drift ─────────────────────────────────────────────────────────────
+     Amber rather than red: the application may well still be serving, and
+     colouring a two-replica app with one dead replica the same as an outage
+     teaches people to ignore the colour. */
+  .drift-panel {
+    border: 1px solid color-mix(in srgb, var(--yellow) 35%, transparent);
+    background: var(--yellow-subtle);
+    border-radius: 6px;
+    padding: 12px 14px;
+    margin-bottom: 16px;
+  }
+  .drift-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap;
+  }
+  .drift-title { color: var(--yellow-text); font-weight: 600; font-size: 0.9rem; }
+  .drift-count {
+    display: inline-block; min-width: 20px; text-align: center;
+    background: color-mix(in srgb, var(--yellow) 25%, transparent);
+    border-radius: 10px; padding: 1px 7px; margin-left: 6px;
+    font-size: 0.78rem; font-variant-numeric: tabular-nums;
+  }
+  .drift-actions { display: flex; gap: 6px; }
+  .drift-list { list-style: none; margin: 10px 0 0; padding: 0; }
+  .drift-list li {
+    display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+    padding: 5px 0; font-size: 0.82rem;
+    border-top: 1px solid color-mix(in srgb, var(--yellow) 18%, transparent);
+  }
+  .drift-kind {
+    flex: 0 0 auto; font-size: 0.72rem; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.03em;
+    padding: 2px 6px; border-radius: 4px;
+    background: color-mix(in srgb, var(--yellow) 20%, transparent);
+    color: var(--yellow-text);
+  }
+  /* Not running is the one state that means the application is down. */
+  .drift-missing {
+    background: color-mix(in srgb, var(--red) 18%, transparent);
+    color: var(--red);
+  }
+  .drift-name { font-family: var(--font-mono, monospace); font-size: 0.78rem; }
+  .drift-detail { color: var(--text-muted); flex: 1 1 220px; }
+  .drift-foot { margin: 10px 0 0; font-size: 0.76rem; color: var(--text-muted); }
 
   .text-muted { color: var(--text-muted); }
 

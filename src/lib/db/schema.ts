@@ -440,6 +440,31 @@ export const alertEvents = sqliteTable('alert_events', {
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 });
 
+/**
+ * The most recent reconciliation pass for a worker.
+ *
+ * One row per worker, replaced wholesale each pass — this is a current-state
+ * cache, not a history. Drift that persists is the same finding reported again,
+ * and keeping every repetition would grow without bound while telling the
+ * operator nothing the latest row does not.
+ */
+export const reconcileReports = sqliteTable('reconcile_reports', {
+  workerId: text('worker_id').primaryKey().references(() => workers.id),
+  ranAt: integer('ran_at', { mode: 'timestamp' }).notNull(),
+  /** False when anything actionable disagrees. Foreign containers do not count. */
+  clean: integer('clean', { mode: 'boolean' }).notNull().default(true),
+  /** JSON `DriftEntry[]` — see src/lib/server/reconcile.ts. */
+  findings: text('findings').notNull(),
+  /** JSON `UnreconcilableApp[]`: applications whose intent could not be computed. */
+  errors: text('errors'),
+  /**
+   * Hash of the actionable findings, so an unchanged problem is not notified
+   * again on every cycle. Drift usually persists until someone fixes it; without
+   * this, a single dead container would page the operator every five minutes.
+   */
+  fingerprint: text('fingerprint'),
+});
+
 /** Deploy webhooks / CI-CD triggers */
 export const deployWebhooks = sqliteTable('deploy_webhooks', {
   id: text('id').primaryKey(),

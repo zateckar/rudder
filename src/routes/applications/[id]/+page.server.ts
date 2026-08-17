@@ -3,6 +3,7 @@ import { db, safeWorkerColumns } from '$lib/db';
 import { applications, workers, containers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { canAccessApplication, requireAuth } from '$lib/server/auth';
+import { driftForApplication } from '$lib/server/reconcile';
 
 /** Extract per-service URLs from compose container labels (deduplicated by URL). */
 function extractServiceUrls(appContainers: typeof containers.$inferSelect[]): Array<{ name: string; url: string }> {
@@ -77,6 +78,10 @@ export const load = async ({ params, cookies }: { params: { id: string }; cookie
   const appUrl = extractAppUrl(application.name, application.domain, appContainers);
   const serviceUrls = extractServiceUrls(appContainers);
 
+  // From the last reconciliation pass, not computed here: the page must not make
+  // a Podman call per view, and the timer's answer is at most one cycle old.
+  const drift = await driftForApplication(params.id);
+
   return {
     user: ctx.user,
     application,
@@ -84,5 +89,6 @@ export const load = async ({ params, cookies }: { params: { id: string }; cookie
     containers: appContainers,
     appUrl,
     serviceUrls,
+    drift,
   };
 };

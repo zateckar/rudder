@@ -2,15 +2,20 @@ import { describe, expect, test } from 'bun:test';
 import {
   APP_ID_LABEL,
   MANAGED_LABEL,
+  autoCorrectable,
   desiredState,
   diff,
+  driftFingerprint,
   healthFromStatus,
   mayRemove,
+  observedState,
   ownedAppId,
   permittedRemovals,
   podmanName,
   specHash,
+  summarize,
   toObserved,
+  type DriftEntry,
 } from './reconcile';
 import { ManifestError, type PlannedContainer } from './deploy/plan';
 import type { applications, containers, workers } from '$lib/db/schema';
@@ -665,6 +670,56 @@ describe('diff', () => {
     expect(result.drift).toEqual([]);
   });
 
+  test('a running adopted container is not reported as missing', () => {
+    // Found live on the user's fleet. Discovery writes the row with the leading
+    // slash Podman's API sends; a deploy writes it without. The names then never
+    // matched, so `uptime-kuma` — running, healthy, correct — reported NOT
+    // RUNNING on every single pass.
+    const base = healthy();
+    const rows = [containerRow({ name: `/${base.want.name}` })];
+    expect(diff({ ...base, rows }).drift).toEqual([]);
+  });
+
+  test('an adopted container with a name Rudder would never generate still matches', () => {
+    // `/whoami` and `/demo-postgres-postgres`, also from the live fleet. The name
+    // was chosen by whoever created the container, so no name rule can match it.
+    // The row's application id is the authoritative link, and a null spec hash is
+    // exactly the marker of a container Rudder did not build.
+    const base = healthy();
+    const rows = [containerRow({ name: '/whoami', specHash: null })];
+    expect(diff({ ...base, rows }).drift).toEqual([]);
+  });
+
+  test('does not fall back positionally for a container Rudder built', () => {
+    // A row with a hash came from a deploy, so its name matches one of the name
+    // rules. Letting it be claimed by position would pair a renamed application's
+    // containers with the wrong intent and report spurious staleness.
+    const base = healthy();
+    const rows = [containerRow({ name: 'something-else-entirely', specHash: 'a-real-hash' })];
+    const result = diff({ ...base, rows });
+    expect(result.drift.map((d) => d.kind)).toEqual(['missing']);
+  });
+
+  test('a tracked container is not also reported as foreign', () => {
+    // An adopted container has a row but no managed label. Reporting it as "not
+    // managed by Rudder" on the same page that lists it under the application is
+    // simply untrue.
+    const base = healthy();
+    const rows = [containerRow({ name: `/${base.want.name}` })];
+    const observed = [
+      toObserved(raw({ Id: 'abc123', Names: [`/${base.want.name}`], Labels: { app: 'shop' } })),
+    ];
+    expect(diff({ ...base, rows, observed }).drift).toEqual([]);
+  });
+
+  test('but an untracked container is still never removable', () => {
+    // Not reporting something as foreign must not be mistaken for permission to
+    // delete it. The two decisions are independent, and only the label grants the
+    // second.
+    const tracked = toObserved(raw({ Id: 'abc123', Names: ['/adopted'], Labels: { app: 'shop' } }));
+    expect(mayRemove(tracked)).toBe(false);
+  });
+
   test('matches a blue/green name through its generation suffix', () => {
     const base = healthy();
     const rows = [
@@ -699,5 +754,121 @@ describe('diff', () => {
     const observed = [toObserved(raw({ Id: 'c0', Names: [`/${desired.containers[0].name}`] }))];
     const result = diff({ desired: [desired], rows, observed, knownAppIds: new Set(['app-1']) });
     expect(result.drift.map((d) => d.kind)).toEqual(['missing']);
+  });
+});
+
+// ── Report-only ──────────────────────────────────────────────────────────────
+
+describe('observedState', () => {
+  test('reads, and does nothing else', async () => {
+    // The report-only guarantee, enforced rather than trusted. Every method but
+    // `listContainers` throws, so touching one fails the test instead of a
+    // worker.
+    const calls: string[] = [];
+    const readOnlyClient = new Proxy(
+      {},
+      {
+        get(_t, prop: string) {
+          if (prop === 'listContainers') {
+            return async () => {
+              calls.push(prop);
+              return [raw()];
+            };
+          }
+          if (prop === 'then') return undefined; // not a promise
+          return () => {
+            throw new Error(`reconciliation must not call ${prop}`);
+          };
+        },
+      },
+    ) as any;
+
+    const observed = await observedState(readOnlyClient);
+    expect(observed).toHaveLength(1);
+    expect(calls).toEqual(['listContainers']);
+  });
+
+  test('includes stopped containers', async () => {
+    // A container that exited is drift. Listing only running ones would report it
+    // as missing instead, which is a different remedy.
+    const client = {
+      listContainers: async (all: boolean) => {
+        expect(all).toBe(true);
+        return [raw({ State: 'exited', Status: 'Exited (0) 1 hour ago' })];
+      },
+    } as any;
+    const observed = await observedState(client);
+    expect(observed[0].state).toBe('exited');
+  });
+});
+
+describe('autoCorrectable', () => {
+  test('offers only the additive corrections', () => {
+    // `stale` needs a running container replaced and `orphan` needs one deleted;
+    // neither is additive, and neither may ever happen without a person. The
+    // worst case of being wrong about `missing` or `unhealthy` is starting
+    // something that did not need starting.
+    const drift = (['missing', 'stale', 'unhealthy', 'orphan', 'foreign'] as const).map((kind) => ({
+      kind,
+      appId: 'app-1',
+      appName: 'shop',
+      name: `c-${kind}`,
+      detail: '',
+    }));
+    expect(autoCorrectable(drift).map((d) => d.kind)).toEqual(['missing', 'unhealthy']);
+  });
+});
+
+describe('driftFingerprint', () => {
+  const entry = (over: Partial<DriftEntry> = {}): DriftEntry => ({
+    kind: 'missing',
+    appId: 'app-1',
+    appName: 'shop',
+    name: 'shop-1a2b3c4d',
+    detail: 'Container is present but exited (Exited (1) 2 minutes ago).',
+    ...over,
+  });
+
+  test('ignores the detail text', () => {
+    // Details carry Podman's status string, which contains an uptime that ticks
+    // upward. Hashing it would make every cycle look like new drift and notify
+    // the operator every five minutes about one dead container.
+    const a = driftFingerprint([entry()]);
+    const b = driftFingerprint([entry({ detail: 'Container is present but exited (Exited (1) 9 hours ago).' })]);
+    expect(a).toBe(b);
+  });
+
+  test('ignores the order findings were produced in', () => {
+    const one = entry({ name: 'a' });
+    const two = entry({ name: 'b' });
+    expect(driftFingerprint([one, two])).toBe(driftFingerprint([two, one]));
+  });
+
+  test('changes when a new problem appears', () => {
+    expect(driftFingerprint([entry(), entry({ name: 'another', kind: 'unhealthy' })])).not.toBe(
+      driftFingerprint([entry()]),
+    );
+  });
+
+  test('ignores foreign containers entirely', () => {
+    // A co-tenant starting a container is not a change to Rudder's estate and
+    // must not notify anyone.
+    const withForeign = [entry(), entry({ kind: 'foreign', appId: null, name: 'postgres' })];
+    expect(driftFingerprint(withForeign)).toBe(driftFingerprint([entry()]));
+  });
+});
+
+describe('summarize', () => {
+  test('counts by kind in a fixed order', () => {
+    const drift: DriftEntry[] = [
+      { kind: 'unhealthy', appId: null, appName: null, name: 'c', detail: '' },
+      { kind: 'missing', appId: null, appName: null, name: 'a', detail: '' },
+      { kind: 'missing', appId: null, appName: null, name: 'b', detail: '' },
+    ];
+    expect(summarize(drift)).toBe('2 missing, 1 unhealthy');
+  });
+
+  test('says so when there is nothing', () => {
+    expect(summarize([])).toBe('nothing');
   });
 });

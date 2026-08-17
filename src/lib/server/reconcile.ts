@@ -40,8 +40,22 @@
  * reconciler under-claims rather than over-claims.
  */
 import { createHash } from 'crypto';
-import type { applications, containers, stacks, teams, workers } from '$lib/db/schema';
+import { db } from '$lib/db';
+import {
+  alertEvents,
+  applications,
+  containers,
+  notificationChannels,
+  reconcileReports,
+  stacks,
+  teams,
+  volumes,
+  workers,
+} from '$lib/db/schema';
+import { eq, isNull } from 'drizzle-orm';
 import type { Container, PodmanClient } from './podman';
+import { getRestPodmanClient } from './podman-client';
+import { sendNotification } from './notifications';
 import { buildDeploymentPlan } from './deploy/build';
 import { ManifestError, type PlanContext, type PlannedContainer } from './deploy/plan';
 import { parseGenerationalName } from './generations';
@@ -425,9 +439,9 @@ export function diff(input: DiffInput): DiffResult {
   const drift: DriftEntry[] = [];
 
   const observedById = new Map(observed.map((c) => [c.id, c]));
-  /** Container ids Rudder has a row for, so an orphan check can exclude them. */
+  /** Containers Rudder has a row for, so they are not reported as unaccounted for. */
   const trackedIds = new Set(rows.map((r) => r.containerId));
-  const trackedNames = new Set(rows.map((r) => r.name));
+  const trackedNames = new Set(rows.map((r) => podmanName(r.name)));
 
   for (const app of desired) {
     // Only the generation that is supposed to be serving. A `draining` row is a
@@ -502,6 +516,15 @@ export function diff(input: DiffInput): DiffResult {
   }
 
   for (const container of observed) {
+    // Anything Rudder has a row for is accounted for, whether or not it carries
+    // the label. Adopted containers are the case that matters: Rudder tracks
+    // them and shows them on the application page, so calling them "not managed
+    // by Rudder" in the same breath is just wrong. It does not loosen the
+    // ownership rule — `mayRemove` still governs every removal, and an unlabelled
+    // container still cannot be destroyed.
+    const tracked = trackedIds.has(container.id) || trackedNames.has(container.name);
+    if (tracked) continue;
+
     if (!mayRemove(container)) {
       drift.push({
         kind: 'foreign',
@@ -513,8 +536,6 @@ export function diff(input: DiffInput): DiffResult {
       });
       continue;
     }
-
-    if (trackedIds.has(container.id) || trackedNames.has(container.name)) continue;
 
     const claimsApp = ownedAppId(container);
     drift.push({
@@ -534,12 +555,31 @@ export function diff(input: DiffInput): DiffResult {
 }
 
 /**
- * Find the row for a desired container name.
+ * Find the row for a desired container.
  *
- * Exact match first. Blue/green suffixes the Podman name with the generation, so
- * the second attempt strips that — but only as a fallback, because a compose
- * service legitimately called `g2` produces a name the suffix pattern also
- * matches, and the exact comparison gets that right.
+ * Four rules, in descending confidence:
+ *
+ * 1. The name matches exactly.
+ * 2. The name matches once Podman's leading slash is removed. Rows written by
+ *    discovery keep the slash the API sends; rows written by a deploy do not.
+ * 3. The name matches once the blue/green generation suffix is stripped. Last
+ *    among the name rules, because a compose service legitimately called `g2`
+ *    produces a name the suffix pattern also matches, and rule 1 gets that right.
+ * 4. Any unclaimed row of this application whose `spec_hash` is null.
+ *
+ * Rule 4 is what makes an adopted container work. Its name was chosen by whoever
+ * created it — `/whoami`, `/demo-postgres-postgres` — and will never look like a
+ * name Rudder would have generated, so no name rule can ever match it. Without
+ * this, every adopted application reports its running containers as missing
+ * forever, and an operator who learns to ignore that panel is worse off than one
+ * who never had it.
+ *
+ * It is restricted to null-hash rows because that is exactly the set Rudder did
+ * not build and makes no claim about: a container a deploy created carries a hash
+ * and a name one of the first three rules matches. That restriction is also what
+ * keeps a mispairing harmless — a null hash never reads as stale, so the worst a
+ * wrong pairing can do is attribute a health state to the wrong sibling of the
+ * same application.
  */
 function matchRow(
   live: readonly (typeof containers.$inferSelect)[],
@@ -549,6 +589,320 @@ function matchRow(
   const free = live.filter((r) => !claimed.has(r.id));
   return (
     free.find((r) => r.name === wantName) ??
-    free.find((r) => parseGenerationalName(r.name)?.base === wantName)
+    free.find((r) => podmanName(r.name) === wantName) ??
+    free.find((r) => parseGenerationalName(podmanName(r.name))?.base === wantName) ??
+    free.find((r) => !r.specHash)
   );
+}
+
+/** Drift that is worth an operator's attention. Foreign containers are not. */
+export function actionable(drift: readonly DriftEntry[]): DriftEntry[] {
+  return drift.filter((d) => d.kind !== 'foreign');
+}
+
+/**
+ * A stable identity for a set of findings, so an unchanged problem is reported
+ * once rather than every five minutes.
+ *
+ * Excludes the detail strings — they carry Podman's status text, which contains
+ * an uptime that ticks upward. Hashing those would make every cycle look like new
+ * drift, which is the notification storm this is here to prevent.
+ */
+export function driftFingerprint(drift: readonly DriftEntry[]): string {
+  const keys = actionable(drift)
+    .map((d) => `${d.kind}:${d.appId ?? '-'}:${d.name}`)
+    .sort();
+  return sha256(keys.join('\n'));
+}
+
+/**
+ * What could ever be corrected automatically, if `apply` is one day switched on.
+ *
+ * `missing` and `unhealthy` only — the additive corrections, where the worst case
+ * of being wrong is a container that did not need starting. `stale` is excluded
+ * because replacing a running container is not additive; `orphan` because
+ * deletion is not; `foreign` because it is not Rudder's.
+ */
+export function autoCorrectable(drift: readonly DriftEntry[]): DriftEntry[] {
+  return drift.filter((d) => d.kind === 'missing' || d.kind === 'unhealthy');
+}
+
+// ── The pass ─────────────────────────────────────────────────────────────────
+
+export interface ReconcileOptions {
+  /**
+   * Whether this pass may correct what it finds.
+   *
+   * **Wired false everywhere, and it must stay that way for a full release
+   * cycle.** The interesting failure mode of this whole component is not a bad
+   * correction, it is a bug in `desiredState` that makes a healthy fleet look
+   * wrong — and that is a bug you want to discover in a report you are reading,
+   * not in a production estate the reconciler is busy rebuilding.
+   *
+   * Nothing implements it yet. Passing true does not act; it records the
+   * intention in the returned report and nothing else, so the wiring can be
+   * observed before the acting exists. When it is implemented it will cover
+   * `missing` and `unhealthy` only, and orphan removal will stay behind an
+   * explicit human confirmation showing the container list — indefinitely.
+   * Automatic deletion is not a feature worth its blast radius here.
+   */
+  apply?: boolean;
+}
+
+export interface ReconcileReport {
+  workerId: string;
+  workerName: string;
+  ranAt: Date;
+  drift: DriftEntry[];
+  /** Applications whose intent could not be computed. Never a reason to delete. */
+  errors: UnreconcilableApp[];
+  /** True when nothing actionable disagrees. */
+  clean: boolean;
+  /** What a correcting pass would have addressed. Always reported, never acted on. */
+  correctable: DriftEntry[];
+}
+
+/**
+ * Reconcile one worker: compute intent, read reality, classify the difference,
+ * and record it.
+ *
+ * Read-only against the worker. The only Podman call is `listContainers`, and
+ * there is no code path from here to a create, start, stop or remove — which is
+ * what makes the report-only guarantee something you can check by reading rather
+ * than something you have to trust.
+ */
+export async function reconcileWorker(
+  worker: typeof workers.$inferSelect,
+  options: ReconcileOptions = {},
+): Promise<ReconcileReport> {
+  const ranAt = new Date();
+  const workerApps = await db
+    .select()
+    .from(applications)
+    .where(eq(applications.workerId, worker.id))
+    .all();
+
+  // Every application on the worker, whether or not its intent computes. Orphan
+  // detection reads this rather than `desired`, so a manifest that stopped
+  // parsing cannot turn its own healthy containers into deletion candidates.
+  const knownAppIds = new Set(workerApps.map((a) => a.id));
+
+  const teamRows = await db.select().from(teams).all();
+  const teamById = new Map(teamRows.map((t) => [t.id, t]));
+  const stackRows = await db.select().from(stacks).all();
+  const stackById = new Map(stackRows.map((s) => [s.id, s]));
+  const volumeRows = await db.select().from(volumes).all();
+  const volumeById = new Map(
+    volumeRows.map((v) => [v.id, { name: v.name, containerPath: v.containerPath }]),
+  );
+
+  const desired: DesiredApp[] = [];
+  const errors: UnreconcilableApp[] = [];
+  for (const app of workerApps) {
+    try {
+      desired.push(
+        desiredState({
+          app,
+          worker,
+          team: app.teamId ? teamById.get(app.teamId) : null,
+          stack: app.stackId ? stackById.get(app.stackId) : null,
+          volumeRegistry: volumeById,
+        }),
+      );
+    } catch (e: any) {
+      // One unparseable manifest must not blind the operator to drift
+      // everywhere else on the worker.
+      errors.push({ appId: app.id, appName: app.name, message: e?.message ?? String(e) });
+    }
+  }
+
+  const rows = await db.select().from(containers).where(eq(containers.workerId, worker.id)).all();
+
+  const client = getRestPodmanClient(worker);
+  let observed: ObservedContainer[];
+  try {
+    observed = await observedState(client);
+  } finally {
+    client.destroy();
+  }
+
+  const { drift, clean } = diff({ desired, rows, observed, knownAppIds });
+
+  const report: ReconcileReport = {
+    workerId: worker.id,
+    workerName: worker.name,
+    ranAt,
+    drift,
+    errors,
+    clean: clean && errors.length === 0,
+    correctable: autoCorrectable(drift),
+  };
+
+  if (options.apply) {
+    // Deliberately inert. See ReconcileOptions.apply.
+    console.warn(
+      `[reconcile] ${worker.name}: apply was requested but correction is not implemented; ` +
+        `reporting ${report.correctable.length} correctable finding(s) instead.`,
+    );
+  }
+
+  await persistReport(report);
+  return report;
+}
+
+/**
+ * Store the pass, and notify only when the findings actually changed.
+ *
+ * The fingerprint comparison is the whole reason this is one function: drift
+ * persists until someone fixes it, so a pass that notified on every cycle would
+ * page the operator every five minutes about the same dead container until they
+ * stopped reading the alerts entirely.
+ */
+async function persistReport(report: ReconcileReport): Promise<void> {
+  const findings = actionable(report.drift);
+  const fingerprint = findings.length > 0 ? driftFingerprint(report.drift) : null;
+
+  const previous = await db
+    .select()
+    .from(reconcileReports)
+    .where(eq(reconcileReports.workerId, report.workerId))
+    .get();
+
+  await db
+    .insert(reconcileReports)
+    .values({
+      workerId: report.workerId,
+      ranAt: report.ranAt,
+      clean: report.clean,
+      findings: JSON.stringify(report.drift),
+      errors: report.errors.length > 0 ? JSON.stringify(report.errors) : null,
+      fingerprint,
+    })
+    .onConflictDoUpdate({
+      target: reconcileReports.workerId,
+      set: {
+        ranAt: report.ranAt,
+        clean: report.clean,
+        findings: JSON.stringify(report.drift),
+        errors: report.errors.length > 0 ? JSON.stringify(report.errors) : null,
+        fingerprint,
+      },
+    });
+
+  if (!fingerprint || fingerprint === previous?.fingerprint) return;
+
+  const summary = summarize(findings);
+  const message =
+    `Worker ${report.workerName} has drifted from its intended state: ${summary}. ` +
+    `Nothing has been changed — reconciliation is reporting only.`;
+
+  try {
+    await db.insert(alertEvents).values({
+      id: crypto.randomUUID(),
+      // No rule produced this. Drift is not a metric crossing a threshold, and
+      // inventing a rule row to point at would put a rule in the UI that nobody
+      // configured and nobody can edit.
+      ruleId: null,
+      resourceType: 'worker',
+      resourceId: report.workerId,
+      metric: 'drift',
+      value: findings.length,
+      threshold: 0,
+      message,
+      acknowledged: false,
+      createdAt: report.ranAt,
+    });
+  } catch (e: any) {
+    console.error('[reconcile] Could not record the drift event:', e?.message ?? e);
+  }
+
+  // Global channels only. A worker is not owned by a team, so there is no team
+  // channel this legitimately belongs to, and broadcasting one worker's drift to
+  // every team's channel would leak the estate's shape across tenants.
+  const channels = await db
+    .select()
+    .from(notificationChannels)
+    .where(isNull(notificationChannels.teamId))
+    .all();
+
+  for (const channel of channels) {
+    try {
+      await sendNotification(channel, {
+        title: `Drift detected on ${report.workerName}`,
+        message,
+        severity: 'warning',
+      });
+    } catch (e: any) {
+      console.error(`[reconcile] Notification to "${channel.name}" failed:`, e?.message ?? e);
+    }
+  }
+}
+
+/** `2 missing, 1 unhealthy` — counts by kind, in a fixed order. */
+export function summarize(findings: readonly DriftEntry[]): string {
+  const order: DriftKind[] = ['missing', 'stale', 'unhealthy', 'orphan', 'foreign'];
+  const counts = new Map<DriftKind, number>();
+  for (const f of findings) counts.set(f.kind, (counts.get(f.kind) ?? 0) + 1);
+  return (
+    order
+      .filter((k) => counts.has(k))
+      .map((k) => `${counts.get(k)} ${k}`)
+      .join(', ') || 'nothing'
+  );
+}
+
+/**
+ * Reconcile every online worker.
+ *
+ * Called from the metrics timer, which already runs a cycle against every worker
+ * — reusing it means reconciliation inherits the interval an operator has
+ * already tuned, rather than adding a second schedule to reason about.
+ *
+ * A worker that fails is logged and skipped. Reconciliation is diagnostic; one
+ * unreachable machine must not stop the others being examined.
+ */
+export async function reconcileAllWorkers(
+  options: ReconcileOptions = {},
+): Promise<ReconcileReport[]> {
+  const online = await db.select().from(workers).where(eq(workers.status, 'online')).all();
+  const reports: ReconcileReport[] = [];
+
+  for (const worker of online) {
+    try {
+      const report = await reconcileWorker(worker, options);
+      reports.push(report);
+      if (!report.clean) {
+        console.warn(
+          `[reconcile] ${worker.name}: ${summarize(actionable(report.drift))}` +
+            (report.errors.length > 0 ? `, ${report.errors.length} unreconcilable` : ''),
+        );
+      }
+    } catch (e: any) {
+      console.error(`[reconcile] ${worker.name} failed:`, e?.message ?? e);
+    }
+  }
+  return reports;
+}
+
+/** The stored findings for one application, for the page that shows them. */
+export async function driftForApplication(applicationId: string): Promise<DriftEntry[]> {
+  const app = await db.select().from(applications).where(eq(applications.id, applicationId)).get();
+  if (!app?.workerId) return [];
+
+  const report = await db
+    .select()
+    .from(reconcileReports)
+    .where(eq(reconcileReports.workerId, app.workerId))
+    .get();
+  if (!report) return [];
+
+  try {
+    const findings: DriftEntry[] = JSON.parse(report.findings);
+    if (!Array.isArray(findings)) return [];
+    // Foreign containers belong to the worker's page, not an application's — they
+    // are not this application's problem and it cannot act on them.
+    return findings.filter((f) => f.appId === applicationId && f.kind !== 'foreign');
+  } catch {
+    return [];
+  }
 }

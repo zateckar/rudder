@@ -383,6 +383,17 @@ sqlite.run(`
 `);
 
 sqlite.run(`
+  CREATE TABLE IF NOT EXISTS reconcile_reports (
+    worker_id TEXT PRIMARY KEY NOT NULL REFERENCES workers(id),
+    ran_at INTEGER NOT NULL,
+    clean INTEGER NOT NULL DEFAULT 1,
+    findings TEXT NOT NULL,
+    errors TEXT,
+    fingerprint TEXT
+  );
+`);
+
+sqlite.run(`
   CREATE TABLE IF NOT EXISTS deploy_webhooks (
     id TEXT PRIMARY KEY NOT NULL,
     application_id TEXT NOT NULL REFERENCES applications(id),
