@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { showToast } from '$lib/client/toast.svelte';
+  import { confirmAction } from '$lib/client/dialog.svelte';
+
   let { data } = $props();
 
   let busy = $state<Record<string, boolean>>({});
@@ -61,7 +64,16 @@
 
   async function toggleRole(userId: string, currentRole: string) {
     const newRole = currentRole === 'admin' ? 'member' : 'admin';
-    if (!confirm(`${newRole === 'admin' ? 'Promote' : 'Demote'} this user to ${newRole}?`)) return;
+    const promoting = newRole === 'admin';
+    const ok = await confirmAction({
+      title: promoting ? 'Promote this user to admin?' : 'Demote this user to member?',
+      body: promoting
+        ? 'Admins see every team, every worker and the audit log, and can manage users.'
+        : 'They will lose access to workers, users, settings and the audit log.',
+      confirmLabel: promoting ? 'Promote' : 'Demote',
+      danger: !promoting,
+    });
+    if (!ok) return;
 
     busy[userId] = true;
     try {
@@ -74,7 +86,7 @@
         window.location.reload();
       } else {
         const err = await res.json();
-        alert(err.error || 'Failed to update role');
+        showToast('error', err.error || 'Failed to update role');
       }
     } finally {
       busy[userId] = false;
@@ -82,7 +94,13 @@
   }
 
   async function deleteUser(userId: string) {
-    if (!confirm('Delete this user? This cannot be undone.')) return;
+    const ok = await confirmAction({
+      title: 'Delete this user?',
+      body: 'This cannot be undone. Their audit log entries remain, attributed to the deleted account.',
+      confirmLabel: 'Delete user',
+      danger: true,
+    });
+    if (!ok) return;
 
     busy[userId] = true;
     try {
@@ -91,7 +109,7 @@
         window.location.reload();
       } else {
         const err = await res.json();
-        alert(err.error || 'Failed to delete user');
+        showToast('error', err.error || 'Failed to delete user');
       }
     } finally {
       busy[userId] = false;

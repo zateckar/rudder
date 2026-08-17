@@ -33,8 +33,22 @@ describe('parseSingleConfig', () => {
     expect(parseSingleConfig('nginx')).toEqual({ image: 'nginx' });
   });
 
-  test('treats JSON without an image as a bare reference', () => {
-    expect(parseSingleConfig('{"ports":[]}')).toEqual({ image: '{"ports":[]}' });
+  test('refuses JSON that carries no image, rather than using the blob as one', () => {
+    // This used to return { image: '{"ports":[]}' }, which reached Podman and
+    // came back as "invalid reference format" — a 500 describing a string the
+    // user never typed.
+    expect(() => parseSingleConfig('{"ports":[]}')).toThrow(/no image to deploy/i);
+    expect(() => parseSingleConfig('{"image":"","ports":[]}')).toThrow(/no image to deploy/i);
+    expect(() => parseSingleConfig('{"image":"   "}')).toThrow(/no image to deploy/i);
+  });
+
+  test('an empty manifest is refused, not turned into an empty image', () => {
+    expect(() => parseSingleConfig('')).toThrow(/no image to deploy/i);
+    expect(() => parseSingleConfig('   ')).toThrow(/no image to deploy/i);
+  });
+
+  test('still accepts a JSON-quoted bare reference', () => {
+    expect(parseSingleConfig('"nginx:alpine"')).toEqual({ image: 'nginx:alpine' });
   });
 });
 

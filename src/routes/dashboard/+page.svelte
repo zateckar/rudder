@@ -107,7 +107,7 @@
     <div class="stat-card">
       <h3>Workers</h3>
       <p class="value">{data.workers?.length || 0}</p>
-      <p class="label">Total workers</p>
+      <p class="label">{isAdmin ? 'Total workers' : 'Running your applications'}</p>
     </div>
     <div class="stat-card">
       <h3>Applications</h3>
@@ -258,7 +258,12 @@
   <div class="section">
     <h2>Quick Actions</h2>
     <div class="actions">
-      <a href="/workers/new" class="action-btn">Add Worker</a>
+      <!-- Adding a worker is admin-only, and /workers redirects a member
+           straight back here. Offering the button was an invitation to a
+           dead end. -->
+      {#if isAdmin}
+        <a href="/workers/new" class="action-btn">Add Worker</a>
+      {/if}
       <a href="/applications/new" class="action-btn">New Application</a>
     </div>
   </div>

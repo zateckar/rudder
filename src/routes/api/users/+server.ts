@@ -3,7 +3,7 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { users } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { hashPassword } from '$lib/auth';
+import { hashPassword, validatePassword } from '$lib/auth';
 
 export const GET: RequestHandler = async ({ cookies, url }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -55,6 +55,13 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 
   if (!username || !email || !fullName) {
     return json({ error: 'Username, email, and fullName are required' }, { status: 400 });
+  }
+
+  // Accounts created here sign in with a local password. Ones federated through
+  // OIDC are created by that callback and never come through this endpoint.
+  const passwordError = validatePassword(password);
+  if (passwordError) {
+    return json({ error: passwordError }, { status: 400 });
   }
 
   // Check for existing user

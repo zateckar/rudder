@@ -1,5 +1,7 @@
 <script lang="ts">
   import SshKeyPrompt from '$lib/components/SshKeyPrompt.svelte';
+  import { showToast } from '$lib/client/toast.svelte';
+
   let { data } = $props();
 
   let busy = $state<Record<string, boolean>>({});
@@ -23,11 +25,11 @@
       if (response.ok) {
         window.location.reload();
       } else {
-        const result = await response.json();
-        alert('Provisioning failed: ' + result.error);
+        const result = await response.json().catch(() => ({}));
+        showToast('error', `Provisioning failed: ${result.error ?? `HTTP ${response.status}`}`);
       }
-    } catch {
-      alert('Provisioning failed');
+    } catch (e: any) {
+      showToast('error', `Provisioning failed: ${e.message}`);
     } finally {
       busy[workerId] = false;
     }

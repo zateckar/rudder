@@ -1,5 +1,27 @@
 import { plugin } from 'bun';
-import { dirname, resolve } from 'path';
+import { mkdtempSync } from 'fs';
+import { tmpdir } from 'os';
+import { dirname, join, resolve } from 'path';
+
+/**
+ * Point the whole suite at a throwaway database.
+ *
+ * `$lib/db` opens a SQLite file at import time and bootstraps an admin user, so
+ * any test that transitively imports it — several do — reads and writes a real
+ * database. Set here in `preload`, before anything imports it.
+ *
+ * Unconditional, deliberately. Bun loads `.env` automatically and this project's
+ * `.env` sets DATABASE_URL to `./data/rudder.db`, so honouring an existing value
+ * meant `bun test` quietly operated on the developer's own control plane —
+ * which it did, until this line stopped it. A test run has no business reaching
+ * a database it did not create.
+ *
+ * ADMIN_PASSWORD is left unset so the bootstrap is skipped; tests that need
+ * users create their own.
+ */
+process.env.DATABASE_URL = join(mkdtempSync(join(tmpdir(), 'rudder-test-')), 'test.db');
+process.env.NODE_ENV = 'production';
+delete process.env.ADMIN_PASSWORD;
 
 /**
  * `src/lib/server/provisioning/index.ts` inlines its shell assets with Vite's

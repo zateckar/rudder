@@ -33,16 +33,39 @@ export interface SingleConfig {
 /** The most replicas one application may run. */
 export const MAX_REPLICAS = 10;
 
-/** Parse the manifest column, tolerating the bare-image form. */
+/** One wording, whichever check catches it. */
+const NO_IMAGE = 'This application has no image to deploy. Edit it and set a container image.';
+
+/**
+ * Parse the manifest column, tolerating the bare-image form.
+ *
+ * The bare-image fallback applies only to a manifest that is not JSON at all.
+ * It used to catch *any* failure, including well-formed JSON that simply had no
+ * image — so `{"image":"","ports":[]}` came back as an image reference of
+ * `{"image":"","ports":[]}`, and the deploy failed with Podman complaining
+ * about an invalid reference format for a string the user never typed.
+ */
 export function parseSingleConfig(manifest: string): SingleConfig {
+  let parsed: unknown;
   try {
-    const cfg = JSON.parse(manifest);
-    if (!cfg?.image) throw new Error('no image');
-    return cfg;
+    parsed = JSON.parse(manifest);
   } catch {
     // The oldest applications stored the image reference and nothing else.
-    return { image: manifest };
+    const bare = manifest.trim();
+    if (!bare) throw new ManifestError(NO_IMAGE);
+    return { image: bare };
   }
+
+  if (parsed && typeof parsed === 'object') {
+    const cfg = parsed as SingleConfig;
+    if (typeof cfg.image === 'string' && cfg.image.trim()) return cfg;
+    throw new ManifestError(NO_IMAGE);
+  }
+
+  // A JSON scalar: `"nginx"` with the quotes, which is still a reference.
+  const scalar = String(parsed).trim();
+  if (!scalar) throw new ManifestError(NO_IMAGE);
+  return { image: scalar };
 }
 
 export interface ParseSingleOptions {
@@ -65,9 +88,11 @@ export function parseSingle(
     );
   }
 
+  // parseSingleConfig already refuses a manifest with no image; this stays as a
+  // belt-and-braces guard for a config built by some other caller.
   const cfg = parseSingleConfig(manifest);
   if (!cfg.image?.trim()) {
-    throw new ManifestError('This application has no image to deploy.');
+    throw new ManifestError(NO_IMAGE);
   }
 
   const replicaCount = Math.max(1, Math.min(MAX_REPLICAS, ctx.replicas ?? 1));

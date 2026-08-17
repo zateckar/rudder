@@ -1,51 +1,31 @@
+/**
+ * Notification channels.
+ *
+ * Admin-only, matching `/settings/notifications`, which is where they are
+ * managed. Two reasons rather than one: `config` holds the webhook URL, Slack
+ * hook or SMTP credentials, and a channel created with no `teamId` is *global*
+ * — the previous membership check only fired when a `teamId` was supplied, so
+ * any member could create a channel the whole installation would notify
+ * through.
+ *
+ * The rows stay team-scopable in the schema. When section N is finished, the
+ * per-team surface belongs here — with the team taken from the caller's
+ * membership, not from whatever the body asks for.
+ */
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
-import { notificationChannels, users, teamMembers } from '$lib/db/schema';
-import { eq, or } from 'drizzle-orm';
+import { notificationChannels } from '$lib/db/schema';
+import { authErrorResponse, requireAdmin, type AuthContext } from '$lib/server/auth';
 
 export const GET: RequestHandler = async ({ cookies }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
-
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (!user) return json({ error: 'User not found' }, { status: 404 });
-
-  let rows;
-  if (user.role === 'admin') {
-    rows = await db.select().from(notificationChannels).all();
-  } else {
-    // Members see channels from their teams + global (no teamId)
-    const memberships = await db.select({ teamId: teamMembers.teamId })
-      .from(teamMembers)
-      .where(eq(teamMembers.userId, userId))
-      .all();
-    const teamIds = memberships.map(m => m.teamId);
-
-    if (teamIds.length > 0) {
-      rows = await db.select().from(notificationChannels)
-        .where(or(
-          ...teamIds.map(tid => eq(notificationChannels.teamId, tid)),
-          eq(notificationChannels.teamId, '')
-        ))
-        .all();
-      // Also include channels with null teamId (global)
-      const globalRows = await db.select().from(notificationChannels).all();
-      const teamChannelIds = new Set(rows.map(r => r.id));
-      for (const row of globalRows) {
-        if (!row.teamId && !teamChannelIds.has(row.id)) {
-          rows.push(row);
-        }
-      }
-    } else {
-      // No teams — only global channels
-      const allRows = await db.select().from(notificationChannels).all();
-      rows = allRows.filter(r => !r.teamId);
-    }
+  try {
+    await requireAdmin(cookies);
+  } catch (error) {
+    return authErrorResponse(error);
   }
+
+  const rows = await db.select().from(notificationChannels).all();
 
   const result = rows.map(ch => ({
     ...ch,
@@ -57,14 +37,13 @@ export const GET: RequestHandler = async ({ cookies }) => {
 };
 
 export const POST: RequestHandler = async ({ request, cookies }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
-
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (!user) return json({ error: 'User not found' }, { status: 404 });
+  let ctx: AuthContext;
+  try {
+    ctx = await requireAdmin(cookies);
+  } catch (error) {
+    return authErrorResponse(error);
+  }
+  const userId = ctx.user.id;
 
   const body = await request.json();
   const { name, type, config, teamId } = body;
@@ -88,17 +67,6 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
     }
   } else {
     configStr = JSON.stringify(config);
-  }
-
-  // Non-admins must provide a teamId they belong to
-  if (user.role !== 'admin' && teamId) {
-    const membership = await db.select().from(teamMembers)
-      .where(eq(teamMembers.userId, userId))
-      .all();
-    const memberTeamIds = membership.map(m => m.teamId);
-    if (!memberTeamIds.includes(teamId)) {
-      return json({ error: 'Not a member of this team' }, { status: 403 });
-    }
   }
 
   const now = new Date();

@@ -1,7 +1,9 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import AppLayout from '$lib/components/AppLayout.svelte';
-  
+  import Toasts from '$lib/components/Toasts.svelte';
+  import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
+
   let { data, children }: { 
     data: { user: { username: string; role: string; id: string } | null };
     children: any;
@@ -25,6 +27,11 @@
 {:else}
   {@render children()}
 {/if}
+
+<!-- Mounted once, here, so every page can raise a toast or ask for
+     confirmation without each one remembering to render the plumbing. -->
+<Toasts />
+<ConfirmDialog />
 
 <style>
   :global(:root) {

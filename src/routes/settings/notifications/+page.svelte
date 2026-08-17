@@ -1,6 +1,8 @@
 <script lang="ts">
   import AppLayout from '$lib/components/AppLayout.svelte';
   import { page } from '$app/stores';
+  import { showToast } from '$lib/client/toast.svelte';
+  import { confirmAction } from '$lib/client/dialog.svelte';
 
   let { data } = $props();
 
@@ -96,10 +98,20 @@
   }
 
   async function deleteChannel(id: string) {
-    if (!confirm('Delete this notification channel?')) return;
+    const ok = await confirmAction({
+      title: 'Delete this notification channel?',
+      body: 'Alert rules pointing at it will stop notifying anyone.',
+      confirmLabel: 'Delete channel',
+      danger: true,
+    });
+    if (!ok) return;
     const res = await fetch(`/api/notifications/${id}`, { method: 'DELETE' });
     if (res.ok) {
       channels = channels.filter(ch => ch.id !== id);
+      showToast('success', 'Channel deleted');
+    } else {
+      const body = await res.json().catch(() => ({}));
+      showToast('error', body.error || 'Could not delete the channel');
     }
   }
 
@@ -234,10 +246,20 @@
   }
 
   async function deleteRule(id: string) {
-    if (!confirm('Delete this alert rule?')) return;
+    const ok = await confirmAction({
+      title: 'Delete this alert rule?',
+      body: 'Nothing will be notified about this condition again.',
+      confirmLabel: 'Delete rule',
+      danger: true,
+    });
+    if (!ok) return;
     const res = await fetch(`/api/alerts/${id}`, { method: 'DELETE' });
     if (res.ok) {
       rules = rules.filter(r => r.id !== id);
+      showToast('success', 'Rule deleted');
+    } else {
+      const body = await res.json().catch(() => ({}));
+      showToast('error', body.error || 'Could not delete the rule');
     }
   }
 

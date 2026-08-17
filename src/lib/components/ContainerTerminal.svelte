@@ -13,6 +13,8 @@
   let commandHistory = $state<string[]>([]);
   let historyIndex = $state(-1);
   let isExecuting = $state(false);
+  /** Warn once per terminal session that this image has no shell. */
+  let warnedNoShell = $state(false);
   let isStreaming = $state(false);
   let lastWidth = 0;
   let lastHeight = 0;
@@ -272,8 +274,10 @@
       if (term) {
         term.clear();
         term.writeln('\x1b[36mContainer Terminal - Type commands below\x1b[0m');
-        term.writeln('\x1b[33mNote: Each command runs in a new shell (not interactive)\x1b[0m');
+        term.writeln('\x1b[33mNote: each command runs in its own /bin/sh, so pipes and redirects work\x1b[0m');
+        term.writeln('\x1b[33mbut nothing persists between commands — cd and exported variables are lost.\x1b[0m');
         term.writeln('');
+        warnedNoShell = false;
       }
     }
   }
@@ -305,6 +309,13 @@
           term.writeln(`\x1b[31mError: ${result.error}\x1b[0m`);
         }
       } else {
+        // The image has no shell, so the command was exec'd as argv. Say it
+        // once, rather than letting every pipe and redirect fail mysteriously.
+        if (result.shell === null && !warnedNoShell && term) {
+          term.writeln('\x1b[33mThis image has no /bin/sh — commands run directly, so pipes,\x1b[0m');
+          term.writeln('\x1b[33mredirects, && and globs are passed through as literal arguments.\x1b[0m');
+          warnedNoShell = true;
+        }
         if (result.stdout && term) {
           term.write(result.stdout);
           if (!result.stdout.endsWith('\n')) {

@@ -24,7 +24,6 @@ export const GET: RequestHandler = async ({ params, url, cookies }) => {
     let crowdsecInspect: any = null;
     let crowdsecStatus = 'not_found';
     let crowdsecLogs = '';
-    let bouncerKey: string | null = worker.crowdsecBouncerKey || null;
     let decisions: string = '';
     let appsecStatus: string = '';
 
@@ -56,11 +55,17 @@ export const GET: RequestHandler = async ({ params, url, cookies }) => {
       } catch { parsedDecisions = []; }
     }
 
+    // Only the two fields the tab renders. The full `podman inspect` carries
+    // Config.Env, which holds BOUNCER_KEY_traefik in plaintext — sending it to
+    // the browser puts a live credential in DevTools and in any exported HAR.
+    // The bouncer key itself is likewise never returned: whether one is
+    // configured is all the page needs to say.
     return json({
       status: crowdsecStatus,
-      inspect: crowdsecInspect,
+      image: crowdsecInspect?.Config?.Image ?? null,
+      startedAt: crowdsecInspect?.State?.StartedAt ?? null,
       logs: crowdsecLogs,
-      bouncerKey,
+      bouncerKeyConfigured: !!worker.crowdsecBouncerKey,
       decisions: parsedDecisions,
       appsecStatus,
     });

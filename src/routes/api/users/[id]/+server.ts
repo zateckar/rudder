@@ -3,7 +3,7 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { users, sessions, teamMembers, userOidc } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { hashPassword } from '$lib/auth';
+import { hashPassword, validatePassword } from '$lib/auth';
 
 export const GET: RequestHandler = async ({ params, cookies }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -99,7 +99,11 @@ export const PATCH: RequestHandler = async ({ params, request, cookies }) => {
   }
 
   // Password update
-  if (body.password && (isSelf || isAdmin)) {
+  if (body.password !== undefined && (isSelf || isAdmin)) {
+    const passwordError = validatePassword(body.password);
+    if (passwordError) {
+      return json({ error: passwordError }, { status: 400 });
+    }
     updates.passwordHash = await hashPassword(body.password);
   }
 

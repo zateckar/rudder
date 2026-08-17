@@ -2,6 +2,25 @@ import { json } from '@sveltejs/kit';
 import { getRestPodmanClient } from '$lib/server/podman-client';
 import { authErrorResponse, requireContainerAccess } from '$lib/server/auth';
 
+const SHELL = '/bin/sh';
+
+/**
+ * Whether the shell itself was what could not be executed.
+ *
+ * Podman reports a missing executable in the exec's output with a non-zero exit
+ * rather than as a transport error, so the only way to tell "this image has no
+ * shell" from "your command failed" is to read the message back and check that
+ * the thing it could not find is the shell.
+ */
+function shellIsMissing(result: { stdout: string; stderr: string; exitCode: number }): boolean {
+  if (result.exitCode === 0) return false;
+  // Both streams: the runtime reports this on stderr, but a TTY-less exec that
+  // answered without frame headers lands in stdout.
+  const output = `${result.stdout}\n${result.stderr}`;
+  if (!output.includes(SHELL)) return false;
+  return /executable file .*not found|no such file or directory/i.test(output);
+}
+
 export async function POST({ params, request, cookies }: { params: { id: string }; request: Request; cookies: any }) {
   let container, worker;
   try {
@@ -12,7 +31,7 @@ export async function POST({ params, request, cookies }: { params: { id: string 
 
   const { command } = await request.json();
 
-  if (!command) {
+  if (!command || typeof command !== 'string') {
     return json({ error: 'Command required' }, { status: 400 });
   }
 
@@ -24,21 +43,34 @@ export async function POST({ params, request, cookies }: { params: { id: string 
   }
 
   try {
-    // Parse command into arguments array
-    const cmdParts = command.trim().split(/\s+/);
-    
-    // Use HTTP exec - run command directly without shell wrapper
-    const result = await client.execContainerHttp(
+    // Run through a shell, because that is what the terminal claims to be and
+    // what anyone typing `grep x | wc -l` expects. Splitting on whitespace and
+    // exec'ing argv directly passed `&&`, `|` and `>` to the program as literal
+    // arguments, which fails silently and confusingly.
+    let result = await client.execContainerHttp(
       container.containerId,
-      cmdParts
+      [SHELL, '-c', command],
     );
-    
+    let shell: string | null = SHELL;
+
+    // Distroless and scratch images have no shell at all. Fall back to argv, so
+    // those containers keep working, and say so rather than leaving the user to
+    // wonder why their pipe did nothing.
+    if (shellIsMissing(result)) {
+      shell = null;
+      result = await client.execContainerHttp(
+        container.containerId,
+        command.trim().split(/\s+/),
+      );
+    }
+
     client.destroy();
-    
+
     return json({
       stdout: result.stdout,
       stderr: result.stderr,
       exitCode: result.exitCode,
+      shell,
     });
   } catch (error: any) {
     console.error('Exec error:', {

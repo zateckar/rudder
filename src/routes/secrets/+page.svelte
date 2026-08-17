@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  
+  import { showToast } from '$lib/client/toast.svelte';
+  import { confirmAction } from '$lib/client/dialog.svelte';
+
   let { data } = $props();
   let secretsList = $state<any[]>([]);
   let loading = $state(true);
@@ -71,21 +73,29 @@
     if (!fName || !fValue) { error = 'Name and value are required'; return; }
     saving = true; error = '';
     try {
-      if (editing) {
-        const res = await fetch('/api/secrets', {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: editing.id, name: fName, value: fValue, description: fDesc, deliveryMode: fDelivery }),
-        });
-        if (!res.ok) { const b = await res.json(); error = b.error || 'Failed'; }
-      } else {
-        const res = await fetch('/api/secrets', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: fName, value: fValue, description: fDesc, scope: fScope, deliveryMode: fDelivery, teamId: fTeamId || undefined }),
-        });
-        if (!res.ok) { const b = await res.json(); error = b.error || 'Failed'; }
+      const res = editing
+        ? await fetch('/api/secrets', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: editing.id, name: fName, value: fValue, description: fDesc, deliveryMode: fDelivery }),
+          })
+        : await fetch('/api/secrets', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: fName, value: fValue, description: fDesc, scope: fScope, deliveryMode: fDelivery, teamId: fTeamId || undefined }),
+          });
+
+      // Keep the form open on failure. resetForm() clears `error` and closes the
+      // dialog, so falling through to it made a rejected name look like a save.
+      if (!res.ok) {
+        const b = await res.json().catch(() => ({}));
+        error = b.error || `Failed to save secret (HTTP ${res.status})`;
+        return;
       }
+
+      // The cached plaintext is now the previous value.
+      if (editing) delete revealed[editing.id];
+
       resetForm();
       loadSecrets();
     } catch (e: any) { error = e.message; }
@@ -93,10 +103,22 @@
   }
 
   async function deleteSecret(id: string) {
-    if (!confirm('Delete this secret? Containers using it will fail.')) return;
+    const ok = await confirmAction({
+      title: 'Delete this secret?',
+      body: 'It stops being injected on the next deploy. Containers already running keep the value they were given.',
+      confirmLabel: 'Delete secret',
+      danger: true,
+    });
+    if (!ok) return;
     const res = await fetch(`/api/secrets?id=${id}`, { method: 'DELETE' });
-    if (res.ok) { secretsList = secretsList.filter(s => s.id !== id); }
-    else { const b = await res.json(); alert(b.error || 'Failed'); }
+    if (res.ok) {
+      secretsList = secretsList.filter(s => s.id !== id);
+      delete revealed[id];
+      showToast('success', 'Secret deleted');
+    } else {
+      const b = await res.json().catch(() => ({}));
+      showToast('error', b.error || 'Could not delete the secret');
+    }
   }
 
   async function toggleValue(id: string) {

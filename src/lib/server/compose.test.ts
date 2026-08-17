@@ -11,14 +11,110 @@ function sequentialPorts(start = 31000) {
 /** Slices to `abcdef12`, which is what appears in generated names. */
 const APP_ID = 'abcdef1234567890';
 
-function parse(manifest: string, options: Partial<PlanContext> = {}) {
+function plan(manifest: string, options: Partial<PlanContext> = {}) {
   return parseCompose(manifest, {
     appId: APP_ID,
     appName: 'shop',
     allocatePort: sequentialPorts(),
     ...options,
-  }).containers;
+  });
 }
+
+function parse(manifest: string, options: Partial<PlanContext> = {}) {
+  return plan(manifest, options).containers;
+}
+
+/** Every note as one string, for asserting on what was said. */
+function notesOf(manifest: string, options: Partial<PlanContext> = {}) {
+  return plan(manifest, options).notes.join('\n');
+}
+
+describe('deployment notes', () => {
+  test('says how multi-service containers address each other', () => {
+    // The Kubernetes path has always recorded this; compose returned [].
+    const notes = notesOf(`
+services:
+  web:
+    image: nginx
+  api:
+    image: traefik/whoami
+`);
+    expect(notes).toContain('2 containers');
+    expect(notes).toContain('"web"');
+    expect(notes).toContain('"api"');
+    expect(notes).toMatch(/localhost/i);
+  });
+
+  test('a single-service file gets no networking note', () => {
+    expect(notesOf(`
+services:
+  web:
+    image: nginx
+`)).not.toMatch(/bridge network/);
+  });
+
+  test('records that a requested host port was reallocated', () => {
+    const notes = notesOf(`
+services:
+  web:
+    image: nginx
+    ports:
+      - "8080:80"
+`);
+    expect(notes).toContain('host port 8080');
+    expect(notes).toMatch(/allocates host ports itself/);
+  });
+
+  test('says nothing about ports when the file did not pick one', () => {
+    expect(notesOf(`
+services:
+  web:
+    image: nginx
+    ports:
+      - "80"
+`)).not.toMatch(/host port/);
+  });
+
+  test('records dropped traefik labels rather than dropping them silently', () => {
+    const notes = notesOf(`
+services:
+  web:
+    image: nginx
+    labels:
+      traefik.http.routers.mine.rule: Host(\`evil.example.com\`)
+      app: shop
+`);
+    expect(notes).toContain('traefik.http.routers.mine.rule');
+    expect(notes).toMatch(/dropped/);
+  });
+
+  test('warns that a depends_on condition is not waited on', () => {
+    const notes = notesOf(`
+services:
+  web:
+    image: nginx
+    depends_on:
+      db:
+        condition: service_healthy
+  db:
+    image: postgres
+`);
+    expect(notes).toContain('"web"');
+    expect(notes).toMatch(/does not wait for a dependency to become healthy/);
+  });
+
+  test('a plain depends_on list is honoured, so it needs no warning', () => {
+    expect(notesOf(`
+services:
+  web:
+    image: nginx
+    depends_on:
+      - db
+  db:
+    image: postgres
+`)).not.toMatch(/become healthy/);
+  });
+});
 
 describe('network aliases', () => {
   test('gives every service its bare name and a qualified one', () => {
@@ -491,5 +587,12 @@ services:
     const result = validateCompose('services:\n  web:\n   - [unclosed\n');
     expect(result.valid).toBe(false);
     expect(result.errors).toHaveLength(1);
+  });
+
+  test('a YAML error says where it is and says it once', () => {
+    const result = validateCompose('services:\n  web:\n   - [unclosed\n');
+    expect(result.errors[0]).toMatch(/line 3/);
+    // "YAML parse error: YAML Parse error: Unexpected token" said it twice.
+    expect(result.errors[0].match(/parse error/gi)).toHaveLength(1);
   });
 });

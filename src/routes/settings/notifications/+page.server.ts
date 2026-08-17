@@ -14,6 +14,12 @@ export const load = async ({ cookies, url }: { cookies: any; url: URL }) => {
 
   const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
   if (!currentUser) throw redirect(303, '/login');
+
+  // Notification channels carry webhook URLs and credentials, and alert rules
+  // describe the whole fleet. Admin-only, like every other page under /settings.
+  // Hiding the link in the sidebar is presentation, not access control.
+  if (currentUser.role !== 'admin') throw redirect(303, '/dashboard');
+
   const urlTeam = url.searchParams.get('team');
 
   // Load channels

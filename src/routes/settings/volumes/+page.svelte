@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { showToast } from '$lib/client/toast.svelte';
+  import { confirmAction } from '$lib/client/dialog.svelte';
+
   let { data } = $props();
 
   let showForm = $state(false);
@@ -32,7 +35,7 @@
         window.location.reload();
       } else {
         const err = await res.json();
-        alert(err.error || 'Failed to create volume');
+        showToast('error', err.error || 'Failed to create volume');
       }
     } finally {
       isSubmitting = false;
@@ -40,18 +43,24 @@
   }
 
   async function deleteVolume(volumeId: string) {
-    if (!confirm('Are you sure you want to delete this volume?')) return;
-    
+    const ok = await confirmAction({
+      title: 'Delete this volume?',
+      body: 'The registry entry is removed. Data already written on the worker is not deleted, and an application still mounting it will fail to deploy.',
+      confirmLabel: 'Delete volume',
+      danger: true,
+    });
+    if (!ok) return;
+
     try {
       const res = await fetch(`/api/volumes/${volumeId}`, { method: 'DELETE' });
       if (res.ok) {
         window.location.reload();
       } else {
         const err = await res.json();
-        alert(err.error || 'Failed to delete volume');
+        showToast('error', err.error || 'Failed to delete volume');
       }
-    } catch {
-      alert('Failed to delete volume');
+    } catch (e: any) {
+      showToast('error', e.message || 'Failed to delete volume');
     }
   }
 
@@ -73,7 +82,7 @@
 <div class="volumes-container">
   <div class="page-header">
     <div>
-      <a href="/secrets" class="back-link">← Back to Secrets</a>
+      <a href="/dashboard" class="back-link">← Back to Dashboard</a>
       <h1>Volumes</h1>
       <p class="subtitle">Manage persistent storage volumes for containers</p>
     </div>

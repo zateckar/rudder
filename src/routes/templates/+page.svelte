@@ -1,7 +1,35 @@
 <script lang="ts">
   import { enhance } from '$app/forms';
+  import { confirmAction } from '$lib/client/dialog.svelte';
 
   let { data } = $props();
+
+  /**
+   * Guard a form submit with the in-page confirmation.
+   *
+   * `confirm()` was synchronous, so it could veto the submit inline. The
+   * replacement is a promise, so the submit is always cancelled and then
+   * re-issued from the form itself once the answer comes back.
+   */
+  function confirmDelete(templateName: string) {
+    return async (event: Event) => {
+      const button = event.currentTarget as HTMLButtonElement;
+      if (button.dataset.confirmed === 'true') {
+        delete button.dataset.confirmed;
+        return;
+      }
+      event.preventDefault();
+      const ok = await confirmAction({
+        title: `Delete the template "${templateName}"?`,
+        body: 'Applications already created from it are unaffected.',
+        confirmLabel: 'Delete template',
+        danger: true,
+      });
+      if (!ok) return;
+      button.dataset.confirmed = 'true';
+      button.click();
+    };
+  }
 
   let showSaveModal = $state(false);
   let saveAppId = $state('');
@@ -110,9 +138,13 @@
                   </button>
                 </form>
               {/if}
+              <!-- The confirmation is async, so the submit is always cancelled
+                   and re-issued once the operator has answered. -->
               <form method="POST" action="?/delete" use:enhance={() => { return async ({ update }) => { await update(); }; }}>
                 <input type="hidden" name="templateId" value={tpl.id} />
-                <button type="submit" class="btn-action btn-danger" onclick={(e: Event) => { if (!confirm('Delete this template?')) e.preventDefault(); }} title="Delete template">
+                <!-- Icon-only, so it needs a name a screen reader can read;
+                     `title` is a tooltip, not an accessible label. -->
+                <button type="submit" class="btn-action btn-danger" onclick={confirmDelete(tpl.name)} title="Delete template" aria-label="Delete template {tpl.name}">
                   <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 4H13M5 4V3C5 2.44772 5.44772 2 6 2H10C10.5523 2 11 2.44772 11 3V4M6 7V11M10 7V11M4 4L4.5 13C4.5 13.5523 4.94772 14 5.5 14H10.5C11.0523 14 11.5 13.5523 11.5 13L12 4" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 </button>
               </form>

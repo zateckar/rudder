@@ -1,28 +1,27 @@
 <script lang="ts">
   let { data } = $props();
 
+  // Rows written before actions were classified hold the bare HTTP method.
+  const LEGACY_LABELS: Record<string, string> = { POST: 'CREATE', PATCH: 'UPDATE', PUT: 'REPLACE' };
+
+  const ADDITIVE = new Set(['POST', 'CREATE', 'DEPLOY', 'ADOPT', 'IMPORT', 'PROVISION', 'SAVE']);
+  const READ_ONLY = new Set(['EXPORT', 'COLLECT', 'RECONCILE', 'REVEAL']);
+
   function getActionColor(action: string) {
-    switch (action) {
-      case 'POST': return 'action-create';
-      case 'PATCH': return 'action-update';
-      case 'DELETE': return 'action-delete';
-      default: return 'action-default';
-    }
+    if (action === 'DELETE' || action === 'PRUNE') return 'action-delete';
+    if (ADDITIVE.has(action)) return 'action-create';
+    if (READ_ONLY.has(action)) return 'action-default';
+    return 'action-update';
   }
 
   function getActionLabel(action: string) {
-    switch (action) {
-      case 'POST': return 'CREATE';
-      case 'PATCH': return 'UPDATE';
-      case 'DELETE': return 'DELETE';
-      default: return action;
-    }
+    return (LEGACY_LABELS[action] ?? action).replace(/_/g, ' ');
   }
 </script>
 
 <header>
   <div class="header-left">
-    <a href="/secrets" class="back-link">← Back to Secrets</a>
+    <a href="/dashboard" class="back-link">← Back to Dashboard</a>
     <h1>Audit Logs</h1>
   </div>
 </header>
@@ -62,7 +61,10 @@
               </span>
             </td>
             <td>
-              <span class="resource-type">{log.resourceType}</span>
+              <span class="resource-type">{log.resourceType.replace(/_/g, ' ')}</span>
+              {#if log.resourceId}
+                <span class="resource-id" title={log.resourceId}>{log.resourceId.slice(0, 8)}</span>
+              {/if}
             </td>
             <td class="details-cell">
               <code class="details">{log.details}</code>
@@ -220,6 +222,15 @@
     font-weight: 500;
     text-transform: capitalize;
     color: var(--text-primary);
+  }
+
+  /* Enough of the id to match a row against a resource, without a UUID
+     dominating the column. The full value is in the title attribute. */
+  .resource-id {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
   }
 
   .details-cell {

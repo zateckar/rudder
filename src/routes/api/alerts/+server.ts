@@ -1,46 +1,24 @@
+/**
+ * Alert rules. Admin-only for the same reasons as the channels they point at:
+ * a rule describes the whole fleet, and one created with no `teamId` is global
+ * — which the previous membership check, being conditional on `teamId` being
+ * present, did nothing to prevent.
+ */
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
-import { alertRules, users, teamMembers, notificationChannels } from '$lib/db/schema';
-import { eq, or } from 'drizzle-orm';
+import { alertRules, notificationChannels } from '$lib/db/schema';
+import { eq } from 'drizzle-orm';
+import { authErrorResponse, requireAdmin } from '$lib/server/auth';
 
 export const GET: RequestHandler = async ({ cookies }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
-
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (!user) return json({ error: 'User not found' }, { status: 404 });
-
-  let rows;
-  if (user.role === 'admin') {
-    rows = await db.select().from(alertRules).all();
-  } else {
-    const memberships = await db.select({ teamId: teamMembers.teamId })
-      .from(teamMembers)
-      .where(eq(teamMembers.userId, userId))
-      .all();
-    const teamIds = memberships.map(m => m.teamId);
-
-    if (teamIds.length > 0) {
-      rows = await db.select().from(alertRules)
-        .where(or(...teamIds.map(tid => eq(alertRules.teamId, tid))))
-        .all();
-      // Also include global rules (null teamId)
-      const allRows = await db.select().from(alertRules).all();
-      const ruleIds = new Set(rows.map(r => r.id));
-      for (const row of allRows) {
-        if (!row.teamId && !ruleIds.has(row.id)) {
-          rows.push(row);
-        }
-      }
-    } else {
-      const allRows = await db.select().from(alertRules).all();
-      rows = allRows.filter(r => !r.teamId);
-    }
+  try {
+    await requireAdmin(cookies);
+  } catch (error) {
+    return authErrorResponse(error);
   }
+
+  const rows = await db.select().from(alertRules).all();
 
   const result = rows.map(r => ({
     ...r,
@@ -53,14 +31,11 @@ export const GET: RequestHandler = async ({ cookies }) => {
 };
 
 export const POST: RequestHandler = async ({ request, cookies }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
-
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (!user) return json({ error: 'User not found' }, { status: 404 });
+  try {
+    await requireAdmin(cookies);
+  } catch (error) {
+    return authErrorResponse(error);
+  }
 
   const body = await request.json();
   const { name, resourceType, resourceId, metric, operator, threshold, duration, channelId, teamId } = body;
@@ -85,16 +60,6 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
       .get();
     if (!channel) {
       return json({ error: 'Notification channel not found' }, { status: 400 });
-    }
-  }
-
-  // Non-admins must belong to the team
-  if (user.role !== 'admin' && teamId) {
-    const membership = await db.select().from(teamMembers)
-      .where(eq(teamMembers.userId, userId))
-      .all();
-    if (!membership.some(m => m.teamId === teamId)) {
-      return json({ error: 'Not a member of this team' }, { status: 403 });
     }
   }
 

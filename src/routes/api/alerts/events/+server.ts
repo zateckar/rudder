@@ -1,18 +1,21 @@
+/**
+ * Alert history. Admin-only: an event names a worker and describes the estate's
+ * state — "Worker gamma has drifted from its intended state: 2 missing" — which
+ * is not a member's to read, and acknowledging one silences it for everybody.
+ */
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
-import { alertEvents, users } from '$lib/db/schema';
+import { alertEvents } from '$lib/db/schema';
 import { eq, desc } from 'drizzle-orm';
+import { authErrorResponse, requireAdmin } from '$lib/server/auth';
 
 export const GET: RequestHandler = async ({ url, cookies }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
-
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (!user) return json({ error: 'User not found' }, { status: 404 });
+  try {
+    await requireAdmin(cookies);
+  } catch (error) {
+    return authErrorResponse(error);
+  }
 
   const acknowledgedFilter = url.searchParams.get('acknowledged');
 
@@ -46,11 +49,11 @@ export const GET: RequestHandler = async ({ url, cookies }) => {
 
 /** PATCH to acknowledge an event — pass { id, acknowledged: true } */
 export const PATCH: RequestHandler = async ({ request, cookies }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
+  try {
+    await requireAdmin(cookies);
+  } catch (error) {
+    return authErrorResponse(error);
+  }
 
   const body = await request.json();
   const { id, acknowledged } = body;

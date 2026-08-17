@@ -110,9 +110,12 @@ export const GET: RequestHandler = async ({ params, url, cookies }) => {
       } catch {}
     }
 
+    // Narrowed for the same reason as the CrowdSec tab: Traefik's Config.Env
+    // carries the CrowdSec bouncer key it was provisioned with.
     return json({
       status: traefikStatus,
-      inspect: traefikInspect,
+      image: traefikInspect?.Config?.Image ?? null,
+      startedAt: traefikInspect?.State?.StartedAt ?? null,
       logs: traefikLogs,
       staticConfig: traefikStaticConfig,
       dynamicConfigs: traefikDynamicConfigs,

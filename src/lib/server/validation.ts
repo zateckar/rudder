@@ -142,6 +142,20 @@ export const schemas = {
     teamId: z.string().uuid().optional(),
   }),
 
+  /**
+   * Every field optional but the id — a PATCH that only changes the description
+   * must not have to resend the value. Scope and team are deliberately absent:
+   * moving a secret between scopes changes which containers receive it, which
+   * is a create-and-delete, not an edit.
+   */
+  updateSecret: z.object({
+    id: z.string().uuid(),
+    name: z.string().min(1).max(100).regex(/^[A-Z_][A-Z0-9_]*$/, 'Secret name must be uppercase with underscores').optional(),
+    value: z.string().min(1).max(10000).optional(),
+    description: z.string().max(500).optional(),
+    deliveryMode: z.enum(['env', 'file']).optional(),
+  }),
+
   createApiKey: z.object({
     name: z.string().min(1).max(100),
     /** Omit for a global (all-teams) key — admin only. */

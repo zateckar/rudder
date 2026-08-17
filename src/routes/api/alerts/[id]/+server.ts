@@ -1,18 +1,21 @@
+/**
+ * One alert rule. Admin-only: these handlers checked that a session existed and
+ * nothing else, so any member could retune or delete any rule in the fleet —
+ * including switching one to a channel belonging to another team.
+ */
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
-import { alertRules, users } from '$lib/db/schema';
+import { alertRules } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
+import { authErrorResponse, requireAdmin } from '$lib/server/auth';
 
 export const PATCH: RequestHandler = async ({ params, request, cookies }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
-
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (!user) return json({ error: 'User not found' }, { status: 404 });
+  try {
+    await requireAdmin(cookies);
+  } catch (error) {
+    return authErrorResponse(error);
+  }
 
   const { id } = params;
   const existing = await db.select().from(alertRules)
@@ -49,14 +52,11 @@ export const PATCH: RequestHandler = async ({ params, request, cookies }) => {
 };
 
 export const DELETE: RequestHandler = async ({ params, cookies }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
-
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (!user) return json({ error: 'User not found' }, { status: 404 });
+  try {
+    await requireAdmin(cookies);
+  } catch (error) {
+    return authErrorResponse(error);
+  }
 
   const { id } = params;
   const existing = await db.select().from(alertRules)

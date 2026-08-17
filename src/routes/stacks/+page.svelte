@@ -1,5 +1,7 @@
 <script lang="ts">
   import { browser } from '$app/environment';
+  import { showToast } from '$lib/client/toast.svelte';
+  import { confirmAction } from '$lib/client/dialog.svelte';
 
   let { data } = $props();
 
@@ -66,7 +68,13 @@
   }
 
   async function deleteStack(id: string) {
-    if (!confirm('Delete this stack? Applications will be unlinked but not deleted.')) return;
+    const ok = await confirmAction({
+      title: 'Delete this stack?',
+      body: 'Its applications are unlinked, not deleted — they keep running on their workers.',
+      confirmLabel: 'Delete stack',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       const res = await fetch(`/api/stacks/${id}`, { method: 'DELETE' });
       if (res.ok) {
@@ -75,9 +83,13 @@
           selectedStack = null;
           stackDetail = null;
         }
+        showToast('success', 'Stack deleted');
+      } else {
+        const body = await res.json().catch(() => ({}));
+        showToast('error', body.error || 'Could not delete the stack');
       }
     } catch (e: any) {
-      alert(e.message);
+      showToast('error', e.message);
     }
   }
 
@@ -107,53 +119,42 @@
       });
       const result = await res.json();
       if (result.success) {
+        showToast('success', result.message || `${action} complete`);
         // Refresh detail
         await selectStack(selectedStack);
       } else {
-        alert(result.message || 'Action failed');
+        showToast('error', result.message || 'Action failed');
       }
     } catch (e: any) {
-      alert(e.message);
+      showToast('error', e.message);
     } finally {
       bulkActioning = null;
     }
   }
 
-  async function removeAppFromStack(appId: string) {
-    if (!confirm('Remove this application from the stack?')) return;
-    try {
-      // Use the application edit endpoint to unset stackId
-      const res = await fetch(`/api/stacks/${selectedStack.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ removeAppId: appId }),
-      });
-      // Alternatively, directly update the application
-      const updateRes = await fetch(`/api/containers/${appId}`, { method: 'GET' }); // just refresh
-      // Actually, let's use a direct DB approach via a small endpoint
-      // For simplicity, we'll PATCH the stack to remove the app
-      await selectStack(selectedStack);
-      await loadStacks();
-    } catch (e: any) {
-      alert(e.message);
-    }
-  }
-
   async function removeAppDirect(appId: string) {
-    if (!confirm('Remove this application from the stack?')) return;
+    const ok = await confirmAction({
+      title: 'Remove this application from the stack?',
+      body: 'The application keeps running. It stops being included in this stack’s bulk actions.',
+      confirmLabel: 'Remove from stack',
+    });
+    if (!ok) return;
     try {
-      // We'll update the application's stackId to null via fetch
       const res = await fetch(`/api/stacks/${selectedStack.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ removeAppId: appId }),
       });
       if (res.ok) {
+        showToast('success', 'Removed from stack');
         await selectStack(selectedStack);
         await loadStacks();
+      } else {
+        const body = await res.json().catch(() => ({}));
+        showToast('error', body.error || 'Could not remove the application');
       }
     } catch (e: any) {
-      alert(e.message);
+      showToast('error', e.message);
     }
   }
 
@@ -223,18 +224,27 @@
       <div class="empty-state">No stacks yet. Create one to group your applications.</div>
     {:else}
       {#each stacks as stack (stack.id)}
-        <!-- svelte-ignore a11y_click_events_have_key_events -->
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <!-- A button, not a div with a click handler: selecting a stack was
+             unreachable by keyboard and absent from the accessibility tree.
+             The two a11y_ignore comments this replaces were suppressing exactly
+             that warning. -->
         <div
           class="stack-card"
           class:active={selectedStack?.id === stack.id}
+          role="button"
+          tabindex="0"
+          aria-pressed={selectedStack?.id === stack.id}
           onclick={() => selectStack(stack)}
+          onkeydown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectStack(stack); }
+          }}
         >
           <div class="stack-card-header">
             <h3>{stack.name}</h3>
             <button
               class="btn-icon btn-icon-danger"
               title="Delete stack"
+              aria-label="Delete stack {stack.name}"
               onclick={(e) => { e.stopPropagation(); deleteStack(stack.id); }}
             >
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 4h8M5 4V3a1 1 0 011-1h2a1 1 0 011 1v1M6 6.5v3M8 6.5v3M4 4l.5 7a1 1 0 001 1h3a1 1 0 001-1L10 4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>

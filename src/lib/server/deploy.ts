@@ -81,8 +81,20 @@ async function resolveSecrets(teamId: string | null): Promise<ResolvedSecrets> {
 
   const rows = await db.select().from(secrets).where(or(...conditions)).all();
 
-  const resolved: ResolvedSecrets = { env: [], files: [] };
+  // The API rejects a name that is already injected into the same containers,
+  // but databases written before it did can still hold a global and a team
+  // secret sharing a name. The team's value wins — the narrower scope is the
+  // more specific intent — so injection is deterministic either way.
+  const byName = new Map<string, (typeof rows)[number]>();
   for (const s of rows) {
+    const seen = byName.get(s.name);
+    if (!seen || (seen.scope === 'global' && s.scope !== 'global')) {
+      byName.set(s.name, s);
+    }
+  }
+
+  const resolved: ResolvedSecrets = { env: [], files: [] };
+  for (const s of byName.values()) {
     let value: string;
     try {
       value = decrypt(s.value);

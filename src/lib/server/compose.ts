@@ -9,6 +9,7 @@ import {
   type PlannedHealthcheck,
 } from './deploy/plan';
 import { ALIAS_LABEL, assertDistinctAliases, networkAliases } from './networks';
+import { describeYamlError } from './yaml-errors';
 import type { MountIntent } from './mounts';
 import { composeVolumeName, isHostPathSource, volumeBaseName } from './volumes';
 
@@ -59,7 +60,14 @@ export interface ComposeConfig {
 export function parseCompose(manifest: string, ctx: PlanContext): DeploymentPlan {
   const { appName, baseDomain, allocatePort } = ctx;
 
-  const config = Bun.YAML.parse(manifest) as ComposeConfig;
+  let config: ComposeConfig;
+  try {
+    config = Bun.YAML.parse(manifest) as ComposeConfig;
+  } catch (e) {
+    // A ManifestError, so this reaches the user as a refusal with a location
+    // rather than as an unhandled parser exception.
+    throw new ManifestError(describeYamlError(manifest, e));
+  }
 
   if (!config || !config.services) {
     throw new ManifestError('Invalid compose file: no services defined');
@@ -85,6 +93,16 @@ export function parseCompose(manifest: string, ctx: PlanContext): DeploymentPlan
   const containers: PlannedContainer[] = [];
   const assignRoute = createRouteAssigner(ctx);
 
+  /**
+   * What this deploy did not do exactly as the file asked.
+   *
+   * The Kubernetes parser has recorded these from the start; the compose path
+   * returned an empty array, so a compose file whose host ports were reallocated
+   * and whose `traefik.*` labels were dropped deployed with no indication that
+   * anything had been reinterpreted.
+   */
+  const notes: string[] = [];
+
   for (const serviceName of Object.keys(config.services)) {
     const service = config.services[serviceName];
     const containerName = plannedContainerName(ctx, serviceName);
@@ -105,11 +123,13 @@ export function parseCompose(manifest: string, ctx: PlanContext): DeploymentPlan
     }
 
     const ports: Record<string, Array<{ hostPort: string }>> = {};
-    
+
     if (service.ports) {
       for (const portEntry of service.ports) {
         let containerPort: string;
         let proto = 'tcp';
+        /** The host port the file asked for, if it named one. */
+        let requestedHostPort: string | null = null;
 
         if (typeof portEntry === 'string') {
           // Formats: "CONTAINER", "HOST:CONTAINER", "IP:HOST:CONTAINER", "CONTAINER/proto"
@@ -119,11 +139,25 @@ export function parseCompose(manifest: string, ctx: PlanContext): DeploymentPlan
           const [portNum, portProto] = lastPart.split('/');
           containerPort = portNum.replace(/['"]/g, '').trim();
           if (portProto) proto = portProto;
+          if (parts.length > 1) {
+            requestedHostPort = parts[parts.length - 2].replace(/['"]/g, '').trim() || null;
+          }
         } else if (portEntry.target) {
           containerPort = String(portEntry.target).replace(/['"]/g, '').trim();
           if (portEntry.protocol) proto = portEntry.protocol;
+          if (portEntry.published !== undefined) {
+            requestedHostPort = String(portEntry.published).replace(/['"]/g, '').trim() || null;
+          }
         } else {
           continue;
+        }
+
+        if (requestedHostPort && !isNaN(parseInt(requestedHostPort))) {
+          notes.push(
+            `Service "${serviceName}" asks to publish container port ${containerPort} on host ` +
+              `port ${requestedHostPort}. Rudder allocates host ports itself so two applications ` +
+              `can both listen on the same port, and Traefik routes to whichever it was given.`,
+          );
         }
 
         if (!containerPort || isNaN(parseInt(containerPort))) continue;
@@ -210,12 +244,22 @@ export function parseCompose(manifest: string, ctx: PlanContext): DeploymentPlan
     if (service.labels) {
       // Strip any traefik.* labels from user-provided compose to prevent route hijacking
       // (our auto-generated Traefik labels are applied below and should not be overridden)
-      const sanitized = Object.fromEntries(
-        Object.entries(service.labels as Record<string, string>).filter(
-          ([k]) => !k.toLowerCase().startsWith('traefik.')
-        )
-      );
+      const entries = Object.entries(service.labels as Record<string, string>);
+      const dropped = entries.filter(([k]) => k.toLowerCase().startsWith('traefik.'));
+      const sanitized = Object.fromEntries(entries.filter(([k]) => !k.toLowerCase().startsWith('traefik.')));
       Object.assign(labels, sanitized);
+
+      // Silently dropping routing labels is how someone spends an afternoon
+      // wondering why their middleware never runs.
+      if (dropped.length > 0) {
+        notes.push(
+          `Service "${serviceName}" sets ${dropped.length} traefik.* label` +
+            `${dropped.length === 1 ? '' : 's'} (${dropped.map(([k]) => k).join(', ')}), which were ` +
+            `dropped. Rudder generates its own routing labels, and honouring these would let one ` +
+            `application take over another's hostname. Set the domain, rate limit and auth mode on ` +
+            `the application instead.`,
+        );
+      }
     }
     
     // A service that publishes nothing has no route: it is reachable by its
@@ -293,7 +337,36 @@ export function parseCompose(manifest: string, ctx: PlanContext): DeploymentPlan
     startPosition.get(c.key) ?? Number.MAX_SAFE_INTEGER;
   containers.sort((a, b) => positionOf(a) - positionOf(b));
 
-  return { containers, notes: [] };
+  // `depends_on: { condition: service_healthy }` promises the dependency is
+  // *ready*, not merely started. Rudder only orders the starts, so a service
+  // that cannot survive its database being slow will still race it. Stated
+  // whenever the condition is written, because the failure is intermittent and
+  // therefore easy to blame on anything else.
+  const waiters = Object.entries(config.services)
+    .filter(([, s]) => !Array.isArray(s.depends_on) && s.depends_on
+      && Object.values(s.depends_on).some((d) => d?.condition && d.condition !== 'service_started'))
+    .map(([name]) => name);
+  if (waiters.length > 0) {
+    notes.push(
+      `${waiters.map((n) => `"${n}"`).join(', ')} declare a depends_on condition. Rudder starts ` +
+        `services in dependency order but does not wait for a dependency to become healthy, so a ` +
+        `service that cannot tolerate its dependency being slow should retry its own connection.`,
+    );
+  }
+
+  // The counterpart of the Kubernetes multi-container note. Stated whenever the
+  // shape occurs rather than when it bites: whether a container was configured
+  // to talk to a sibling over localhost is in the application, not in the file.
+  if (containers.length > 1) {
+    notes.push(
+      `This application runs ${containers.length} containers on a shared bridge network. They ` +
+        `reach each other by service name — ${containers.map((c) => `"${c.key}"`).join(', ')} — ` +
+        `and localhost reaches only the container it is used from. The container names on the ` +
+        `worker carry a generation prefix; those aliases do not.`,
+    );
+  }
+
+  return { containers, notes };
 }
 
 /** Normalise `depends_on`, which compose accepts as a list or a condition map. */
@@ -428,9 +501,9 @@ export function validateCompose(manifest: string): { valid: boolean; errors: str
         errors.push(`Circular depends_on: ${ordering.cycle.join(' → ')}`);
       }
     }
-  } catch (e: any) {
-    errors.push(`YAML parse error: ${e.message}`);
+  } catch (e) {
+    errors.push(describeYamlError(manifest, e));
   }
-  
+
   return { valid: errors.length === 0, errors };
 }

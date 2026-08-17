@@ -27,6 +27,81 @@ function resolveCert(value: string): string | Buffer {
   return readFileSync(value);    // file path (legacy/dev usage)
 }
 
+/**
+ * A refusal from Podman, with the status it refused under.
+ *
+ * Podman answers "you cannot do that" precisely — 409 for an image still in use
+ * by a container, 404 for one that is not there. Flattening every one of those
+ * into a thrown string meant routes reported them as HTTP 500, so a rule the
+ * user had broken read as the control plane falling over, and the raw JSON body
+ * ended up in front of them because nothing had pulled the sentence out of it.
+ *
+ * The `message` keeps its historical text so existing string matching still
+ * works; `status` and `detail` are what new code should read.
+ */
+export class PodmanApiError extends Error {
+  constructor(
+    readonly status: number,
+    /** Podman's own sentence, extracted from the JSON body when there is one. */
+    readonly detail: string,
+    body: string,
+  ) {
+    super(`Podman API error: ${status} - ${body}`);
+    this.name = 'PodmanApiError';
+  }
+
+  /** Build one from a raw response body, digging out the human-readable part. */
+  static fromResponse(status: number, body: string): PodmanApiError {
+    let detail = body.trim();
+    try {
+      const parsed = JSON.parse(body);
+      const found = parsed?.message ?? parsed?.cause ?? parsed?.Err ?? parsed?.error;
+      if (typeof found === 'string' && found.trim()) detail = found.trim();
+    } catch {
+      // Not JSON — the body is the message, such as it is.
+    }
+    return new PodmanApiError(status, detail || `Podman returned HTTP ${status}`, body);
+  }
+}
+
+/**
+ * Split Podman's multiplexed exec output into the two streams.
+ *
+ * Without a TTY the daemon prefixes every write with an 8-byte header: byte 0
+ * is the stream (1 = stdout, 2 = stderr) and bytes 4–7 are the payload length,
+ * big-endian. A trailing partial frame is kept rather than dropped — it is
+ * output that was written, just cut short.
+ */
+export function demultiplexExecStream(raw: Buffer): { stdout: string; stderr: string } {
+  const out: Buffer[] = [];
+  const err: Buffer[] = [];
+  let offset = 0;
+
+  while (offset + 8 <= raw.length) {
+    const streamType = raw[offset];
+    const size = raw.readUInt32BE(offset + 4);
+
+    // Not a frame header: some Podman versions answer a TTY-less exec with a
+    // plain body. Treat the remainder as stdout rather than losing it.
+    if (streamType !== 1 && streamType !== 2) {
+      out.push(raw.subarray(offset));
+      offset = raw.length;
+      break;
+    }
+
+    const end = Math.min(offset + 8 + size, raw.length);
+    (streamType === 2 ? err : out).push(raw.subarray(offset + 8, end));
+    offset = offset + 8 + size;
+  }
+
+  if (offset < raw.length) out.push(raw.subarray(offset));
+
+  return {
+    stdout: Buffer.concat(out).toString('utf-8'),
+    stderr: Buffer.concat(err).toString('utf-8'),
+  };
+}
+
 export interface PodmanConfig {
   apiUrl: string;
   caCert?: string;
@@ -289,7 +364,7 @@ export class PodmanClient {
         res.on('data', (chunk) => { data += chunk; });
         res.on('end', () => {
           if (res.statusCode && res.statusCode >= 400) {
-            reject(new Error(`Podman API error: ${res.statusCode} - ${data}`));
+            reject(PodmanApiError.fromResponse(res.statusCode, data));
             return;
           }
           try {
@@ -359,7 +434,7 @@ export class PodmanClient {
           res.on('data', (chunk) => { data += chunk; });
           res.on('end', () => {
             if (res.statusCode && res.statusCode >= 400) {
-              reject(new Error(`Podman API error: ${res.statusCode} - ${data}`));
+              reject(PodmanApiError.fromResponse(res.statusCode, data));
               return;
             }
             resolve();
@@ -1192,14 +1267,20 @@ export class PodmanClient {
       tty?: boolean;
     } = {}
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    // Without a TTY, Podman frames the two streams with an 8-byte header each,
+    // which is the only way to tell them apart. With one, they are merged and
+    // stderr is unrecoverable — which is why this used to return `stderr: ''`
+    // unconditionally while the caller had a branch for colouring it red.
+    const tty = options.tty ?? false;
+
     // Step 1: Create exec instance
     const createResult = await this.request<{ Id: string }>(`/containers/${id}/exec`, {
       method: 'POST',
       body: JSON.stringify({
-        AttachStdout: true,
-        AttachStderr: true,
-        AttachStdin: false,
-        Tty: true,
+        AttachStdout: options.attachStdout ?? true,
+        AttachStderr: options.attachStderr ?? true,
+        AttachStdin: options.attachStdin ?? false,
+        Tty: tty,
         Cmd: cmd,
       }),
     });
@@ -1212,7 +1293,7 @@ export class PodmanClient {
     const agent = this.getAgent(url);
     const reqModule = nodeUrl.protocol === 'https:' ? https : http;
 
-    let stdout = '';
+    const chunks: Buffer[] = [];
 
     await new Promise<void>((resolve, reject) => {
       const reqOptions = {
@@ -1227,36 +1308,46 @@ export class PodmanClient {
       };
 
       const req = reqModule.request(reqOptions, (res) => {
-        res.setEncoding('utf-8');
-        
-        res.on('data', (chunk: string) => {
-          stdout += chunk;
-        });
-
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
         res.on('end', () => resolve());
-        res.on('error', () => resolve());
+        // Rejecting rather than resolving: a connection that died mid-command
+        // used to be indistinguishable from a command that printed nothing and
+        // exited 0, so a broken worker looked like a silent success.
+        res.on('error', reject);
       });
 
-      req.on('error', () => resolve());
-      req.write(JSON.stringify({ Detach: false, Tty: true }));
+      req.on('error', reject);
+      req.write(JSON.stringify({ Detach: false, Tty: tty }));
       req.end();
     });
 
-    // Step 3: Wait briefly then inspect exec to get exit code
-    await new Promise(r => setTimeout(r, 50));
-    
+    const raw = Buffer.concat(chunks);
+    const { stdout, stderr } = tty
+      ? { stdout: raw.toString('utf-8'), stderr: '' }
+      : demultiplexExecStream(raw);
+
+    // Step 3: Read the exit code, allowing for the exec not having been reaped
+    // yet. A fixed 50 ms sleep was a guess that got the wrong answer whenever
+    // the worker was busy.
     let exitCode = 0;
-    try {
-      const inspectResult = await this.request<{
-        ExitCode: number;
-        Running: boolean;
-      }>(`/exec/${execId}/json`);
-      exitCode = inspectResult.ExitCode;
-    } catch {
-      exitCode = 1;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      try {
+        const inspectResult = await this.request<{
+          ExitCode: number;
+          Running: boolean;
+        }>(`/exec/${execId}/json`);
+        if (!inspectResult.Running) {
+          exitCode = inspectResult.ExitCode ?? 0;
+          break;
+        }
+      } catch {
+        exitCode = 1;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 50));
     }
 
-    return { stdout, stderr: '', exitCode };
+    return { stdout, stderr, exitCode };
   }
 
   async getContainerStats(id: string): Promise<ContainerStats> {

@@ -95,20 +95,34 @@ export async function getPlatformVersions(
 
     let runningImage: string | null = container?.Image ?? null;
     let labels: Record<string, string> | undefined = container?.Labels;
+    // Which reference the version is read from. Separate from `runningImage`,
+    // which stays the digest-pinned reference the container was created from —
+    // that is the fact worth reporting, it just carries no version.
+    let versionRef: string | null = runningImage;
 
     // The compat API's container labels do not always carry the image's own
     // labels, so fall back to inspecting the image when the version is missing.
-    if (container && !versionFromLabels(labels, runningImage)) {
+    if (container && !versionFromLabels(labels, versionRef)) {
       try {
         const image = await client.getImageJson(container.ImageID || container.Image);
         labels = { ...(image.Config?.Labels ?? {}), ...(labels ?? {}) };
         if (!runningImage) runningImage = image.RepoTags?.[0] ?? null;
+
+        // Provisioning pins by digest, so the container's reference is usually
+        // `repo@sha256:…`, which has no tag to read a version out of. CrowdSec's
+        // image sets no version label either, so it reported "unknown" while
+        // Traefik — which does set one — reported fine. The image's own repo tag
+        // is the same bytes by construction and does carry the version.
+        if (!versionRef || versionRef.includes('@sha256:')) {
+          const tagged = image.RepoTags?.find((t) => t && !t.endsWith(':<none>'));
+          if (tagged) versionRef = tagged;
+        }
       } catch {
         // Image gone or unreachable — stays unknown.
       }
     }
 
-    const runningVersion = versionFromLabels(labels, runningImage);
+    const runningVersion = versionFromLabels(labels, versionRef);
 
     results.push({
       component,

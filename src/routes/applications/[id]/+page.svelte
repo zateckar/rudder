@@ -1,6 +1,21 @@
 <script lang="ts">
   import ContainerTerminal from '$lib/components/ContainerTerminal.svelte';
   import YamlEditor from '$lib/components/YamlEditor.svelte';
+  import { showToast } from '$lib/client/toast.svelte';
+  import { confirmAction, type ConfirmRequest } from '$lib/client/dialog.svelte';
+
+  /**
+   * Deploy errors and deployment notes, shown properly.
+   *
+   * These were handed to `alert()`, which renders multi-paragraph prose as one
+   * unwrapped wall of text and is suppressed entirely in some browsers — so the
+   * notes explaining why a manifest was reinterpreted could not be read at all.
+   */
+  let detail = $state<{ title: string; paragraphs: string[] } | null>(null);
+
+  function showDetail(title: string, paragraphs: string[]) {
+    detail = { title, paragraphs };
+  }
 
   let { data } = $props();
   let activeTab = $state('containers');
@@ -32,24 +47,63 @@
     foreign: 'Not managed by Rudder',
   };
 
+  /** Why the last check could not run, if it could not. */
+  let driftError = $state<string | null>(null);
+
+  /**
+   * Recompute the diff now and adopt the answer.
+   *
+   * Returns the findings, or null when the check itself failed. The endpoint
+   * stores what it computes, so calling this also brings the snapshot that the
+   * page load reads up to date — which is what lets an action refresh the panel
+   * by running this before reloading.
+   */
+  async function runDriftCheck(): Promise<Drift[] | null> {
+    try {
+      const res = await fetch(`/api/applications/${data.application.id}/reconcile`);
+      const body = await res.json();
+      if (!res.ok) {
+        driftError = body.error || 'Could not check for drift';
+        return null;
+      }
+      driftError = null;
+      recheckedDrift = body.drift ?? [];
+      return recheckedDrift;
+    } catch (e: any) {
+      driftError = e.message;
+      return null;
+    }
+  }
+
   /** Re-run the diff now rather than waiting for the next collection cycle. */
   async function recheckDrift() {
     rechecking = true;
     try {
-      const res = await fetch(`/api/applications/${data.application.id}/reconcile`);
-      const body = await res.json();
-      if (res.ok) {
-        const found: Drift[] = body.drift ?? [];
-        recheckedDrift = found;
-        showToast('success', found.length === 0 ? 'No drift — this application matches its configuration' : `${found.length} difference${found.length === 1 ? '' : 's'} found`);
+      const found = await runDriftCheck();
+      if (found === null) {
+        showToast('error', driftError || 'Could not check for drift');
       } else {
-        showToast('error', body.error || 'Could not check for drift');
+        showToast('success', found.length === 0 ? 'No drift — this application matches its configuration' : `${found.length} difference${found.length === 1 ? '' : 's'} found`);
       }
-    } catch (e: any) {
-      showToast('error', e.message);
     } finally {
       rechecking = false;
     }
+  }
+
+  /**
+   * Reload the page after something changed the containers, with the drift
+   * check re-run first.
+   *
+   * The panel reads the last stored reconciliation pass, so reloading straight
+   * after a deploy re-rendered the timer's pre-deploy answer — it claimed the
+   * container was still exited while the Containers tab showed it running.
+   * Recomputing first replaces that snapshot, so the two agree.
+   */
+  function reloadWithFreshDrift(delayMs = 800) {
+    setTimeout(async () => {
+      await runDriftCheck();
+      window.location.reload();
+    }, delayMs);
   }
 
   /**
@@ -66,7 +120,7 @@
       const body = await res.json();
       if (res.ok) {
         showToast('success', body.message || 'Reconciled');
-        setTimeout(() => window.location.reload(), 800);
+        reloadWithFreshDrift();
       } else {
         showToast('error', body.error || 'Reconcile failed');
       }
@@ -134,7 +188,13 @@
   }
 
   async function deleteWebhook() {
-    if (!confirm('Delete this deploy webhook? Any CI/CD pipelines using it will stop working.')) return;
+    const ok = await confirmAction({
+      title: 'Delete this deploy webhook?',
+      body: 'Any CI/CD pipeline using it will stop working. A new webhook gets a new token.',
+      confirmLabel: 'Delete webhook',
+      danger: true,
+    });
+    if (!ok) return;
     webhookDeleting = true;
     try {
       const res = await fetch(`/api/applications/${data.application.id}/webhook`, { method: 'DELETE' });
@@ -180,15 +240,6 @@
     fetchWebhook();
   });
 
-  // Toast notifications
-  interface Toast { id: number; type: 'success' | 'error'; message: string }
-  let toasts = $state<Toast[]>([]);
-  let toastCounter = 0;
-  function showToast(type: 'success' | 'error', message: string) {
-    const id = ++toastCounter;
-    toasts.push({ id, type, message });
-    setTimeout(() => { toasts = toasts.filter(t => t.id !== id); }, 4000);
-  }
 
   // ── Deployment history ────────────────────────────────────────────────────
   interface Deployment {
@@ -240,6 +291,20 @@
   }
 
   let deploymentsList = $state<Deployment[]>([]);
+
+  /**
+   * The deployment actually serving traffic: the newest one that finished
+   * successfully. A rollback writes its own row with status `rolled_back`, and
+   * that row is what runs afterwards, so it counts as current too.
+   *
+   * The badge used to follow the newest row whatever its status, so a failed
+   * deploy was labelled CURRENT while the previous version carried on serving —
+   * exactly backwards, on the screen someone reads during an incident.
+   */
+  const currentDeploymentId = $derived(
+    deploymentsList.find((d) => d.status === 'succeeded' || d.status === 'rolled_back')?.id ?? null,
+  );
+
   let deploymentsLoading = $state(false);
   let deploymentsLoaded = $state(false);
   let rollbackBusy = $state<string | null>(null);
@@ -266,10 +331,14 @@
     const what = dep.fastRollback
       ? `Version ${dep.version} is still on the worker, stopped. Rolling back restarts those ` +
         `containers and moves traffic to them — a few seconds, no image pull.`
-      : `Roll back to version ${dep.version}? This redeploys the application from that version's ` +
-        `configuration: the image is pulled and the containers are recreated, which takes as long ` +
-        `as a normal deploy.`;
-    if (!confirm(what)) return;
+      : `This redeploys the application from that version's configuration: the image is pulled ` +
+        `and the containers are recreated, which takes as long as a normal deploy.`;
+    const ok = await confirmAction({
+      title: `Roll back to version ${dep.version}?`,
+      body: what,
+      confirmLabel: dep.fastRollback ? 'Roll back (instant)' : 'Roll back',
+    });
+    if (!ok) return;
     rollbackBusy = dep.id;
     try {
       const res = await fetch(`/api/applications/${data.application.id}/deployments`, {
@@ -280,7 +349,7 @@
       const body = await res.json();
       if (res.ok) {
         showToast('success', body.message || 'Rolled back successfully');
-        setTimeout(() => window.location.reload(), 800);
+        reloadWithFreshDrift();
       } else {
         showToast('error', body.error || 'Rollback failed');
       }
@@ -311,7 +380,7 @@
         if (action === 'delete') { window.location.href = '/applications'; return; }
         showToast('success', body.message || 'Done');
         if (['deploy', 'start', 'stop', 'restart'].includes(action)) {
-          setTimeout(() => window.location.reload(), 800);
+          reloadWithFreshDrift();
         }
       } else {
         showToast('error', body.error || 'Action failed');
@@ -350,8 +419,8 @@
   // ── Per-container actions ────────────────────────────────────────────────
   let containerBusy = $state<Record<string, boolean>>({});
 
-  async function containerAction(containerId: string, action: string, confirmMsg?: string) {
-    if (confirmMsg && !confirm(confirmMsg)) return;
+  async function containerAction(containerId: string, action: string, confirmRequest?: ConfirmRequest) {
+    if (confirmRequest && !(await confirmAction(confirmRequest))) return;
     containerBusy[containerId] = true;
     try {
       const res = await fetch(`/api/containers/${containerId}`, {
@@ -380,7 +449,12 @@
   }
 
   async function updateContainer(containerId: string) {
-    if (!confirm('Pull the latest image and recreate this container?')) return;
+    const ok = await confirmAction({
+      title: 'Pull the latest image and recreate this container?',
+      body: 'The container is replaced, so it restarts. Traffic to it is interrupted while that happens.',
+      confirmLabel: 'Pull and recreate',
+    });
+    if (!ok) return;
     containerBusy[containerId] = true;
     try {
       const res = await fetch(`/api/containers/${containerId}/recreate`, {
@@ -648,12 +722,20 @@
   }
 </script>
 
-<!-- ── Toast container ─────────────────────────────────────────────────── -->
-<div class="toasts">
-  {#each toasts as toast (toast.id)}
-    <div class="toast {toast.type}">{toast.message}</div>
-  {/each}
-</div>
+{#if detail}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="detail-backdrop" onclick={() => (detail = null)}></div>
+  <div class="detail-modal" role="dialog" aria-modal="true" aria-labelledby="detail-title">
+    <h2 id="detail-title">{detail.title}</h2>
+    {#each detail.paragraphs as paragraph}
+      <p class="detail-text">{paragraph}</p>
+    {/each}
+    <div class="detail-actions">
+      <button class="btn-act" onclick={() => (detail = null)}>Close</button>
+    </div>
+  </div>
+{/if}
 
 <!-- ── Header ──────────────────────────────────────────────────────────── -->
 <header>
@@ -782,7 +864,12 @@
 
 <!-- ── Drift ───────────────────────────────────────────────────────────────
      What is running disagrees with what should be. Shown above the tabs
-     because it changes how everything below it should be read. -->
+     because it changes how everything below it should be read.
+
+     Rendered even when there is nothing to report: the stored answer is up to
+     one collection cycle old, so the moment you most want to re-run the
+     comparison is exactly when the panel has nothing in it yet. Hiding the
+     control until drift appeared put it out of reach at that moment. -->
 {#if drift.length > 0}
   <div class="drift-panel">
     <div class="drift-head">
@@ -813,6 +900,19 @@
     <p class="drift-foot">
       Reconciliation only reports. Nothing here has been changed automatically.
     </p>
+  </div>
+{:else}
+  <div class="drift-clean">
+    <span class="drift-clean-text">
+      {#if driftError}
+        Drift could not be checked — {driftError}
+      {:else}
+        No drift reported. The stored comparison can be up to one collection cycle old.
+      {/if}
+    </span>
+    <button class="btn-act" onclick={recheckDrift} disabled={rechecking} title="Re-run the comparison now instead of waiting for the next collection cycle">
+      {rechecking ? 'Checking…' : 'Re-check'}
+    </button>
   </div>
 {/if}
 
@@ -875,7 +975,12 @@
                 {#if isRunning}
                   <button
                     class="btn-act btn-stop"
-                    onclick={() => containerAction(container.id, 'stop', 'Stop this container?')}
+                    onclick={() => containerAction(container.id, 'stop', {
+                      title: 'Stop this container?',
+                      body: `"${container.name}" stops serving traffic until it is started again.`,
+                      confirmLabel: 'Stop',
+                      danger: true,
+                    })}
                     disabled={busy}
                     title="Stop this container"
                   >Stop</button>
@@ -1172,13 +1277,17 @@
           </thead>
           <tbody>
             {#each deploymentsList as dep, i (dep.id)}
-              {@const isLatest = i === 0}
+              {@const isCurrent = dep.id === currentDeploymentId}
               {@const isBusy = rollbackBusy === dep.id}
-              <tr class="deployment-row" class:latest={isLatest}>
+              <tr class="deployment-row" class:latest={isCurrent}>
                 <td class="version-cell">
                   <span class="version-number">v{dep.version}</span>
-                  {#if isLatest}
+                  {#if isCurrent}
                     <span class="current-badge">current</span>
+                  {:else if i === 0 && dep.status === 'failed'}
+                    <span class="attempt-badge" title="This deploy did not take effect — the version marked current is still serving">
+                      last attempt
+                    </span>
                   {/if}
                 </td>
                 <td>
@@ -1226,7 +1335,11 @@
                   {/if}
                 </td>
                 <td>
-                  {#if !isLatest && dep.status === 'succeeded'}
+                  <!-- No rollback offered for the version already serving.
+                       Keyed on current rather than newest, so after a failed
+                       deploy the serving version stops offering to roll back
+                       to itself. -->
+                  {#if !isCurrent && dep.status === 'succeeded'}
                     <button
                       class="btn-act btn-rollback"
                       class:btn-rollback-fast={dep.fastRollback}
@@ -1242,14 +1355,14 @@
                   {#if dep.errorMessage}
                     <button
                       class="btn-act btn-error-detail"
-                      onclick={() => alert(dep.errorMessage)}
+                      onclick={() => showDetail(`Version ${dep.version} failed`, [dep.errorMessage!])}
                       title="View error details"
                     >Error</button>
                   {/if}
                   {#if dep.notes?.length}
                     <button
                       class="btn-act btn-notes"
-                      onclick={() => alert(dep.notes.join('\n\n'))}
+                      onclick={() => showDetail(`Notes on version ${dep.version}`, dep.notes!)}
                       title="This deploy succeeded, but not everything the manifest asked for was done as written"
                     >{dep.notes.length} note{dep.notes.length === 1 ? '' : 's'}</button>
                   {/if}
@@ -1532,18 +1645,22 @@
 {/if}
 
 <style>
-  /* ── Toast ─────────────────────────────────────────────────────────── */
-  .toasts {
-    position: fixed; top: 20px; right: 20px; z-index: 2000;
-    display: flex; flex-direction: column; gap: 8px;
+  /* ── Detail modal — deploy errors and notes ────────────────────────── */
+  .detail-backdrop { position: fixed; inset: 0; z-index: 2500; background: rgba(0,0,0,0.5); }
+  .detail-modal {
+    position: fixed; z-index: 2501;
+    top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: min(620px, calc(100vw - 32px));
+    max-height: min(70vh, 640px); overflow-y: auto;
+    background: var(--bg-raised); border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg); box-shadow: var(--shadow-md); padding: 20px 22px;
   }
-  .toast {
-    padding: 12px 20px; border-radius: var(--radius-md); font-size: 14px; font-weight: 500;
-    box-shadow: var(--shadow-md); animation: slide-in 0.2s ease;
+  .detail-modal h2 { margin: 0 0 12px; font-size: 16px; color: var(--text-primary); }
+  .detail-text {
+    margin: 0 0 12px; font-size: 13px; line-height: 1.6; color: var(--text-secondary);
+    white-space: pre-wrap; word-break: break-word;
   }
-  .toast.success { background: var(--green-subtle); color: var(--green-text); border: 1px solid var(--green); }
-  .toast.error   { background: var(--red-subtle); color: var(--red-text); border: 1px solid var(--red); }
-  @keyframes slide-in { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
+  .detail-actions { display: flex; justify-content: flex-end; }
 
   /* ── Header ────────────────────────────────────────────────────────── */
   header {
@@ -1889,6 +2006,12 @@
     background: var(--accent-subtle); color: var(--accent); text-transform: uppercase;
     letter-spacing: 0.03em;
   }
+  /* The newest row when it failed: newest, but not what is serving. */
+  .attempt-badge {
+    padding: 1px 7px; border-radius: 10px; font-size: 10px; font-weight: 600;
+    background: var(--bg-overlay); color: var(--text-muted); text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
   .image-cell { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
   .digest-line {
     display: block;
@@ -1958,6 +2081,15 @@
     font-size: 0.78rem; font-variant-numeric: tabular-nums;
   }
   .drift-actions { display: flex; gap: 6px; }
+
+  /* The clean state is a quiet one-liner, not a second amber banner — it is
+     the normal condition and should not compete with anything on the page. */
+  .drift-clean {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap;
+    margin-bottom: 16px;
+  }
+  .drift-clean-text { color: var(--text-muted); font-size: 0.78rem; }
   .drift-list { list-style: none; margin: 10px 0 0; padding: 0; }
   .drift-list li {
     display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;

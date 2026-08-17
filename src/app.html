@@ -9,10 +9,17 @@
 		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 		%sveltekit.head%
 	</head>
+	<!--
+		No CSRF token field here. `%sveltekit.csrf%` is not a SvelteKit
+		placeholder, so the hidden input that used to sit here shipped that
+		literal string on every page, and nothing in the app ever read `__csrf`.
+		It implied a mechanism that did not exist.
+
+		The real protection is SvelteKit's own origin check on form submissions
+		(`csrf.checkOrigin`, on by default), plus session cookies being
+		SameSite — see svelte.config.js and src/lib/auth.
+	-->
 	<body data-sveltekit-preload-data="hover">
-		<form hidden>
-			<input type="hidden" name="__csrf" value="%sveltekit.csrf%" />
-		</form>
 		<div style="display: contents">%sveltekit.body%</div>
 	</body>
 </html>

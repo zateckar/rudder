@@ -30,6 +30,26 @@ async function cleanupExpiredSessions(): Promise<void> {
   }
 }
 
+/** Minimum length, matching what the Add User form advertises. */
+export const MIN_PASSWORD_LENGTH = 8;
+
+/**
+ * Reject a password the policy does not allow; returns null when it is fine.
+ *
+ * Both user endpoints are called with `fetch` from a modal rather than by
+ * submitting a form, so the `minlength="8"` attribute never runs. This is the
+ * only check that actually happens, which is why it lives next to the hashing.
+ */
+export function validatePassword(password: unknown): string | null {
+  if (typeof password !== 'string' || password.length === 0) {
+    return 'Password is required';
+  }
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    return `Password must be at least ${MIN_PASSWORD_LENGTH} characters`;
+  }
+  return null;
+}
+
 export async function hashPassword(password: string): Promise<string> {
   return await Bun.password.hash(password, { algorithm: 'bcrypt', cost: 12 });
 }

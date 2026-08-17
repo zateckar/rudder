@@ -2,10 +2,28 @@
  * Helper to get a REST-only PodmanClient from a worker record.
  * SSH is used only for worker provisioning, not for container operations.
  */
-import { createPodmanClient, type PodmanClient } from './podman';
+import { createPodmanClient, PodmanApiError, type PodmanClient } from './podman';
 import { decryptField } from './encryption';
 import { env } from './env';
 import type { workers } from '$lib/db/schema';
+import { json } from '@sveltejs/kit';
+
+/**
+ * Turn a failed Podman call into the response the caller deserves.
+ *
+ * A refusal Podman is entitled to make — the image is still in use, the
+ * container is already gone — is the client's problem and keeps its own 4xx.
+ * Everything else is either Podman failing (502: Rudder reached it and it broke)
+ * or Rudder failing before it got there (500).
+ */
+export function podmanErrorResponse(error: unknown, fallback = 'Podman request failed') {
+  if (error instanceof PodmanApiError) {
+    const status = error.status >= 400 && error.status < 500 ? error.status : 502;
+    return json({ error: error.detail }, { status });
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return json({ error: message || fallback }, { status: 500 });
+}
 
 export function getRestPodmanClient(
   worker: typeof workers.$inferSelect

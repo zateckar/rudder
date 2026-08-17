@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import SshKeyPrompt from '$lib/components/SshKeyPrompt.svelte';
+  import { showToast } from '$lib/client/toast.svelte';
+  import { confirmAction } from '$lib/client/dialog.svelte';
 
   let { data } = $props();
 
@@ -351,17 +353,26 @@
   }
 
   async function deleteImage(imageId: string) {
-    if (!confirm('Delete this image? This cannot be undone.')) return;
+    const ok = await confirmAction({
+      title: 'Delete this image?',
+      body: 'It will be removed from this worker. Podman refuses if a container is still using it.',
+      confirmLabel: 'Delete image',
+      danger: true,
+    });
+    if (!ok) return;
     imageDeleting = imageId;
     try {
       const res = await fetch(`/api/workers/${workerId}/images?image=${encodeURIComponent(imageId)}`, {
         method: 'DELETE',
       });
       const body = await res.json();
+      // A 409 here is Podman saying the image is still in use — a sentence the
+      // operator can act on, which is why it goes to a toast and not an alert().
       if (!res.ok) throw new Error(body.error || 'Delete failed');
+      showToast('success', 'Image deleted');
       await loadImages();
     } catch (e: any) {
-      alert(e.message);
+      showToast('error', e.message);
     } finally {
       imageDeleting = null;
     }
@@ -407,7 +418,13 @@
   }
 
   async function deleteNetwork(networkName: string) {
-    if (!confirm(`Delete network "${networkName}"? This cannot be undone.`)) return;
+    const ok = await confirmAction({
+      title: `Delete network "${networkName}"?`,
+      body: 'This cannot be undone. Containers attached to it will lose that network.',
+      confirmLabel: 'Delete network',
+      danger: true,
+    });
+    if (!ok) return;
     networkDeleting = networkName;
     try {
       const res = await fetch(`/api/workers/${workerId}/networks?name=${encodeURIComponent(networkName)}`, {
@@ -415,9 +432,10 @@
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || 'Delete failed');
+      showToast('success', 'Network deleted');
       await loadNetworks();
     } catch (e: any) {
-      alert(e.message);
+      showToast('error', e.message);
     } finally {
       networkDeleting = null;
     }
@@ -502,16 +520,22 @@
   }
 
   async function pruneSystem() {
-    if (!confirm('Prune unused images, containers, volumes, and networks?')) return;
+    const ok = await confirmAction({
+      title: 'Prune this worker?',
+      body: 'Removes unused images, stopped containers, unused volumes and networks. Anything still in use is kept.',
+      confirmLabel: 'Prune',
+      danger: true,
+    });
+    if (!ok) return;
     pruning = true;
     try {
       const res = await fetch(`/api/workers/${workerId}/prune`, { method: 'POST' });
       const body = await res.json();
       if (body.success) {
-        alert('Prune completed');
-        window.location.reload();
+        showToast('success', 'Prune completed');
+        setTimeout(() => window.location.reload(), 800);
       } else {
-        alert(body.error || 'Prune failed');
+        showToast('error', body.error || 'Prune failed');
       }
     } finally {
       pruning = false;
@@ -608,7 +632,13 @@
   }
 
   async function clearOidcSettings() {
-    if (!confirm('Remove all OIDC configuration from this worker? Applications set to "Default" auth will become public.')) return;
+    const ok = await confirmAction({
+      title: 'Remove OIDC configuration?',
+      body: 'Applications set to "Default" auth will become public on this worker.',
+      confirmLabel: 'Remove OIDC',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       const res = await fetch(`/api/workers/${workerId}/oidc`, { method: 'DELETE' });
       if (!res.ok) throw new Error((await res.json()).error || 'Delete failed');
@@ -627,17 +657,23 @@
 
 
   async function deleteWorker() {
-    if (!confirm(`Delete worker "${data.worker.name}"? This cannot be undone.`)) return;
+    const ok = await confirmAction({
+      title: `Delete worker "${data.worker.name}"?`,
+      body: 'This removes it from Rudder. Containers already running on the host are not touched, and Rudder will stop managing them.',
+      confirmLabel: 'Delete worker',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       const res = await fetch(`/api/workers/${workerId}`, { method: 'DELETE' });
       const body = await res.json();
       if (res.ok) {
         window.location.href = '/workers';
       } else {
-        alert(body.error || 'Delete failed');
+        showToast('error', body.error || 'Delete failed');
       }
     } catch (e: any) {
-      alert(e.message);
+      showToast('error', e.message);
     }
   }
 
@@ -826,17 +862,53 @@
     </svg>`;
   }
 
+  /**
+   * What a chart's numbers are, so the axis can say so.
+   *
+   * This used to be a free-form string that only `'%'` was ever checked
+   * against, so everything else fell through to the byte formatter — and the
+   * container-count chart announced `8.8 B` on its axis and `Running: 2 B` in
+   * its legend.
+   */
+  type ChartUnit = 'percent' | 'bytes' | 'count';
+
+  function formatChartValue(value: number, unit: ChartUnit): string {
+    if (unit === 'percent') return value.toFixed(1) + '%';
+    // formatBytes reports nothing for a falsy value, which is right for a
+    // missing measurement and wrong for an axis: the baseline is zero bytes.
+    if (unit === 'bytes') return value <= 0 ? '0 B' : formatBytes(value);
+    return Math.round(value).toString();
+  }
+
   // Chart component for multiple series
   function chart(
     series: { values: (number | null)[]; color: string; label: string }[],
     width = 600,
     height = 120,
-    unit = ''
+    unit: ChartUnit = 'bytes'
   ): string {
     const allNums = series.flatMap(s => s.values.filter((v): v is number => v != null && !isNaN(v)));
     if (allNums.length < 2) return '<p class="chart-empty">No data collected yet</p>';
     const min = 0;
-    const max = Math.max(...allNums) * 1.1 || 1;
+    const rawMax = Math.max(...allNums);
+
+    // Counts get a whole-numbered axis with a step that divides evenly. The
+    // shared `* 1.1` headroom is what produced ticks like 6.6000000000000005 —
+    // meaningless for a quantity that only comes in ones.
+    let max: number;
+    let divisions: number;
+    if (unit === 'count') {
+      const tick = Math.max(1, Math.ceil(Math.max(rawMax, 1) / 4));
+      divisions = Math.ceil(Math.max(rawMax, 1) / tick);
+      max = tick * divisions;
+    } else {
+      max = rawMax * 1.1 || 1;
+      // The 10% headroom put "102.9%" at the top of a CPU chart. A percentage
+      // of a host's capacity does not go above 100.
+      if (unit === 'percent') max = Math.min(100, max);
+      divisions = 4;
+    }
+
     const labels: string[] = [];
     let paths = '';
 
@@ -846,16 +918,17 @@
       const step = width / (nums.length - 1);
       const pts = nums.map((v, i) => `${i * step},${height - ((v - min) / (max - min)) * (height - 16) - 8}`).join(' ');
       paths += `<polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="1.5" />`;
-      labels.push(`<span style="color:${s.color}">${s.label}: ${nums[nums.length - 1] != null ? (unit === '%' ? nums[nums.length - 1].toFixed(1) + '%' : formatBytes(nums[nums.length - 1])) : '—'}</span>`);
+      const latest = nums[nums.length - 1];
+      labels.push(`<span style="color:${s.color}">${s.label}: ${latest != null ? formatChartValue(latest, unit) : '—'}</span>`);
     }
 
     // Grid lines
     let grid = '';
-    for (let i = 0; i <= 4; i++) {
-      const y = 8 + (i / 4) * (height - 16);
-      const val = max - (i / 4) * max;
+    for (let i = 0; i <= divisions; i++) {
+      const y = 8 + (i / divisions) * (height - 16);
+      const val = max - (i / divisions) * max;
       grid += `<line x1="0" y1="${y}" x2="${width}" y2="${y}" stroke="#303744" stroke-width="0.5" />`;
-      grid += `<text x="${width + 4}" y="${y + 3}" fill="#7a8494" font-size="9">${unit === '%' ? val.toFixed(0) + '%' : formatBytes(val)}</text>`;
+      grid += `<text x="${width + 4}" y="${y + 3}" fill="#7a8494" font-size="9">${formatChartValue(val, unit)}</text>`;
     }
 
     return `<div class="chart-container">
@@ -1108,13 +1181,18 @@
           {#each systemInfo.platform ?? [] as comp (comp.component)}
             <div class="cfg">
               <span class="cfg-label">{comp.component}</span>
+              <!-- One statement, not two. `runningVersion ?? 'unknown'` and the
+                   badge both fired when the version could not be read, so the
+                   row said "unknown version unknown". -->
               <span class="cfg-value">
-                {comp.runningVersion ?? 'unknown'}
-                {#if comp.upToDate === false}
-                  <span class="patch-warn" title={`Re-provisioning would install ${comp.expectedImage}`}>
-                    → {comp.expectedVersion}
-                  </span>
-                {:else if comp.upToDate === null}
+                {#if comp.runningVersion}
+                  {comp.runningVersion}
+                  {#if comp.upToDate === false}
+                    <span class="patch-warn" title={`Re-provisioning would install ${comp.expectedImage}`}>
+                      → {comp.expectedVersion}
+                    </span>
+                  {/if}
+                {:else}
                   <span class="patch-unknown" title={`This control plane installs ${comp.expectedImage}`}>version unknown</span>
                 {/if}
               </span>
@@ -1228,14 +1306,14 @@
           <h3>CPU Usage</h3>
           {@html chart(
             [{ values: m.map((pt: any) => pt.cpuPercent).reverse(), color: '#58a6ff', label: 'CPU' }],
-            600, 120, '%'
+            600, 120, 'percent'
           )}
         </div>
         <div class="section">
           <h3>Memory Usage</h3>
           {@html chart(
             [{ values: m.map((pt: any) => pt.memPercent).reverse(), color: '#3fb950', label: 'Memory' }],
-            600, 120, '%'
+            600, 120, 'percent'
           )}
         </div>
         <div class="section">
@@ -1245,7 +1323,7 @@
               { values: m.map((pt: any) => pt.containersRunning).reverse(), color: '#3fb950', label: 'Running' },
               { values: m.map((pt: any) => pt.containersTotal).reverse(), color: '#7a8494', label: 'Total' },
             ],
-            600, 120, ''
+            600, 120, 'count'
           )}
         </div>
         <div class="section">
@@ -1255,7 +1333,7 @@
               { values: m.map((pt: any) => pt.diskUsageBytes).reverse(), color: '#38bdf8', label: 'Podman Used' },
               { values: m.map((pt: any) => pt.diskLimitBytes).reverse(), color: '#7a8494', label: 'Host Total' },
             ],
-            600, 120, ''
+            600, 120, 'bytes'
           )}
         </div>
         <div class="section">
@@ -1265,7 +1343,7 @@
               { values: m.map((pt: any) => pt.netRxBytes).reverse(), color: '#58a6ff', label: 'RX' },
               { values: m.map((pt: any) => pt.netTxBytes).reverse(), color: '#f0883e', label: 'TX' },
             ],
-            600, 120, ''
+            600, 120, 'bytes'
           )}
         </div>
         <p class="section-hint">{m.length} samples</p>
@@ -1624,11 +1702,11 @@
         </div>
         <div class="config-grid">
           <div class="cfg"><span class="cfg-label">Container</span><span class="status-badge {traefik.status === 'running' ? 'online' : 'offline'}">{traefik.status}</span></div>
-          {#if traefik.inspect?.Config?.Image}
-            <div class="cfg"><span class="cfg-label">Image</span><span class="cfg-value mono">{traefik.inspect.Config.Image}</span></div>
+          {#if traefik.image}
+            <div class="cfg"><span class="cfg-label">Image</span><span class="cfg-value mono">{traefik.image}</span></div>
           {/if}
-          {#if traefik.inspect?.State?.StartedAt}
-            <div class="cfg"><span class="cfg-label">Started</span><span class="cfg-value">{new Date(traefik.inspect.State.StartedAt).toLocaleString()}</span></div>
+          {#if traefik.startedAt}
+            <div class="cfg"><span class="cfg-label">Started</span><span class="cfg-value">{new Date(traefik.startedAt).toLocaleString()}</span></div>
           {/if}
         </div>
       </div>
@@ -1705,15 +1783,16 @@
         </div>
         <div class="config-grid">
           <div class="cfg"><span class="cfg-label">Container</span><span class="status-badge {crowdsec.status === 'running' ? 'online' : 'offline'}">{crowdsec.status}</span></div>
-          {#if crowdsec.inspect?.Config?.Image}
-            <div class="cfg"><span class="cfg-label">Image</span><span class="cfg-value mono">{crowdsec.inspect.Config.Image}</span></div>
+          {#if crowdsec.image}
+            <div class="cfg"><span class="cfg-label">Image</span><span class="cfg-value mono">{crowdsec.image}</span></div>
           {/if}
-          {#if crowdsec.inspect?.State?.StartedAt}
-            <div class="cfg"><span class="cfg-label">Started</span><span class="cfg-value">{new Date(crowdsec.inspect.State.StartedAt).toLocaleString()}</span></div>
+          {#if crowdsec.startedAt}
+            <div class="cfg"><span class="cfg-label">Started</span><span class="cfg-value">{new Date(crowdsec.startedAt).toLocaleString()}</span></div>
           {/if}
-          {#if crowdsec.bouncerKey}
-            <div class="cfg"><span class="cfg-label">Bouncer Key</span><span class="cfg-value mono">{crowdsec.bouncerKey}</span></div>
-          {/if}
+          <div class="cfg">
+            <span class="cfg-label">Bouncer Key</span>
+            <span class="cfg-value">{crowdsec.bouncerKeyConfigured ? 'Configured' : 'Not configured'}</span>
+          </div>
         </div>
       </div>
 

@@ -1,5 +1,7 @@
 <script lang="ts">
   import { browser } from '$app/environment';
+  import { showToast } from '$lib/client/toast.svelte';
+  import { confirmAction } from '$lib/client/dialog.svelte';
 
   let { data } = $props();
   
@@ -68,10 +70,10 @@
         await loadQuota();
       } else {
         const result = await res.json();
-        alert(result.error || 'Failed to save quota');
+        showToast('error', result.error || 'Failed to save quota');
       }
     } catch (e: any) {
-      alert(e.message);
+      showToast('error', e.message);
     } finally {
       quotaSaving = false;
     }
@@ -107,7 +109,13 @@
   }
 
   async function removeMember(memberId: string) {
-    if (!confirm('Are you sure you want to remove this member?')) return;
+    const ok = await confirmAction({
+      title: 'Remove this member?',
+      body: 'They lose access to this team’s applications, secrets and volumes. Their account is not deleted.',
+      confirmLabel: 'Remove member',
+      danger: true,
+    });
+    if (!ok) return;
     
     try {
       const response = await fetch(`/api/teams/${data.team.id}/members?memberId=${memberId}`, {
@@ -118,15 +126,21 @@
         window.location.reload();
       } else {
         const result = await response.json();
-        alert(result.error || 'Failed to remove member');
+        showToast('error', result.error || 'Failed to remove member');
       }
     } catch (e: any) {
-      alert(e.message);
+      showToast('error', e.message);
     }
   }
 
   async function deleteTeam() {
-    if (!confirm('Are you absolutely sure you want to delete this team? This action cannot be undone.')) return;
+    const ok = await confirmAction({
+      title: `Delete the team "${data.team.name}"?`,
+      body: 'This cannot be undone. Applications, secrets and volumes belonging to it lose their team.',
+      confirmLabel: 'Delete team',
+      danger: true,
+    });
+    if (!ok) return;
     
     try {
       const response = await fetch(`/api/teams/${data.team.id}`, {
@@ -137,10 +151,10 @@
         window.location.href = '/teams';
       } else {
         const result = await response.json();
-        alert(result.error || 'Failed to delete team');
+        showToast('error', result.error || 'Failed to delete team');
       }
     } catch (e: any) {
-      alert(e.message);
+      showToast('error', e.message);
     }
   }
 
@@ -195,27 +209,41 @@
   }
 
   async function deleteApiKey(keyId: string) {
-    if (!confirm('Are you sure you want to revoke this API key? Any services using it will immediately lose access.')) return;
+    const ok = await confirmAction({
+      title: 'Revoke this API key?',
+      body: 'Anything using it — kubectl, CI, scripts — loses access immediately. This cannot be undone; issue a new key instead.',
+      confirmLabel: 'Revoke key',
+      danger: true,
+    });
+    if (!ok) return;
 
     try {
       const res = await fetch(`/api/api-keys?id=${keyId}`, { method: 'DELETE' });
       if (res.ok) {
         apiKeysList = apiKeysList.filter(k => k.id !== keyId);
+        // The "copy it now" banner was still showing the token of the key that
+        // was just revoked, inviting someone to copy a credential that no
+        // longer works.
+        createdKeyValue = null;
+        showToast('success', 'API key revoked');
       } else {
         const result = await res.json();
-        alert(result.error || 'Failed to delete API key');
+        showToast('error', result.error || 'Failed to delete API key');
       }
     } catch (e: any) {
-      alert(e.message);
+      showToast('error', e.message);
     }
   }
 
   function copyToClipboard(text: string) {
     navigator.clipboard.writeText(text).then(() => {
-      alert('API key copied to clipboard!');
+      showToast('success', 'API key copied to clipboard');
     }).catch(() => {
-      // Fallback for non-HTTPS
-      prompt('Copy this API key (it will not be shown again):', text);
+      // The clipboard API needs a secure context, so this fails over plain
+      // HTTP. The key is already on screen in full — select it there rather
+      // than putting a live credential into a prompt() the browser may
+      // remember, and which some browsers suppress outright.
+      showToast('error', 'Could not reach the clipboard — select the key above and copy it manually');
     });
   }
 

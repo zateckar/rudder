@@ -11,6 +11,7 @@ import {
 import { DEFAULT_TMPFS_OPTS, type MountIntent } from './mounts';
 import { ALIAS_LABEL, assertDistinctAliases, networkAliases } from './networks';
 import type { PortAllocator } from './ports';
+import { parseYamlDocuments } from './yaml-errors';
 
 export interface K8sMetadata {
   name?: string;
@@ -266,7 +267,13 @@ export function parseK8sManifest(manifest: string, ctx: PlanContext): Deployment
       docs = [];
     }
   } else {
-    docs = manifest.split('---').map(doc => Bun.YAML.parse(doc) as any).filter(Boolean);
+    try {
+      docs = parseYamlDocuments(manifest) as any[];
+    } catch (e: any) {
+      // A refusal that says where, rather than the parser's exception escaping
+      // to the caller as a 500.
+      throw new ManifestError(e.message);
+    }
   }
 
   const containers: PlannedContainer[] = [];
@@ -709,9 +716,9 @@ export function validateK8sManifest(manifest: string): { valid: boolean; errors:
         docs = [];
       }
     } else {
-      docs = manifest.split('---').map(doc => Bun.YAML.parse(doc) as any).filter(Boolean);
+      docs = parseYamlDocuments(manifest) as any[];
     }
-    
+
     if (docs.length === 0) {
       errors.push('Empty manifest');
       return { valid: false, errors };
@@ -734,8 +741,10 @@ export function validateK8sManifest(manifest: string): { valid: boolean; errors:
       }
     }
   } catch (e: any) {
-    errors.push(`Manifest parse error: ${e.message}`);
+    // Already located and worded by parseYamlDocuments; prefixing it again is
+    // what produced "YAML parse error: YAML Parse error: …".
+    errors.push(e.message);
   }
-  
+
   return { valid: errors.length === 0, errors };
 }

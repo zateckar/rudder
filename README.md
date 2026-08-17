@@ -82,7 +82,9 @@ On first start the app creates the database, runs all migrations, and bootstraps
 | Username | `admin` |
 | Password | `admin` |
 
-Open <http://localhost:5173> and log in.
+Open <http://localhost:7244> and log in. The dev port is set once, in
+`vite.config.ts`, with `strictPort` so a busy port fails loudly rather than
+silently moving the app somewhere `ORIGIN` does not point at.
 
 > **Tip:** set `ADMIN_PASSWORD=yourpassword` in a `.env` file before the first start to use a custom password instead of the default.
 
@@ -179,7 +181,7 @@ The GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatical
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `ADMIN_PASSWORD` | **Yes** (production) | `admin` (dev only) | Password for the auto-created `admin` account. Set before first boot; ignored once the user exists. |
-| `PUBLIC_URL` | **Yes** | `http://localhost:5173` | External URL of the app — used in OIDC redirects and links. |
+| `PUBLIC_URL` | **Yes** | `http://localhost:7244` | External URL of the app — used in OIDC redirects and links. |
 | `ORIGIN` | **Yes** (behind a proxy) | — | Browser-facing URL, used for CSRF origin checks. |
 | `ENCRYPTION_KEY` | No | auto-generated | Min 32-char string for secret encryption (AES-256-GCM). Auto-generated and persisted on first boot. A shorter value is rejected at startup. |
 | `SESSION_MAX_AGE` | No | `604800` (7 days) | Session lifetime in seconds. |

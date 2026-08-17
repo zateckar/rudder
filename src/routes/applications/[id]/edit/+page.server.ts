@@ -5,6 +5,7 @@ import { eq, inArray, or, isNull } from 'drizzle-orm';
 import { assertDomainAvailable } from '$lib/server/domains';
 import { ALLOWED_DOMAINS_UNSUPPORTED } from '$lib/server/oidc';
 import { DEFAULT_HEALTH_TIMEOUT_S } from '$lib/server/generations';
+import { imageReferenceError } from '$lib/server/image-reference';
 
 export const load = async ({ params, cookies }: { params: { id: string }; cookies: any }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -139,14 +140,22 @@ export const actions = {
     let volumes: string | null = app.volumes;
 
     if (app.type === 'single') {
-      // Re-parse / validate
+      // Re-parse / validate. Same shape as the create form: the catch branch
+      // used to wrap whatever arrived without re-checking, so an empty or
+      // malformed image was stored and only surfaced at deploy time.
       if (!gitRepo) {
+        let image: string;
         try {
           const cfg = JSON.parse(manifest);
-          if (!cfg.image) return fail(400, { error: 'Container image is required' });
+          image = typeof cfg?.image === 'string' ? cfg.image.trim() : '';
         } catch {
-          manifest = JSON.stringify({ image: manifest });
+          image = manifest.trim();
+          manifest = JSON.stringify({ image });
         }
+
+        if (!image) return fail(400, { error: 'Container image is required' });
+        const badImage = imageReferenceError(image);
+        if (badImage) return fail(400, { error: badImage });
       } else {
         // For git-based apps, set a placeholder image in manifest
         try {

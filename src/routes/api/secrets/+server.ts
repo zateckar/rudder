@@ -40,6 +40,37 @@ async function canReveal(ctx: AuthContext, secret: typeof secrets.$inferSelect):
   return !!membership;
 }
 
+/**
+ * An existing secret whose name would collide with this one at injection time.
+ *
+ * A container receives every global secret plus its own team's, so a team
+ * secret and a global one sharing a name both land in the same environment and
+ * the value that wins is whichever the loop happened to reach last. Rejecting
+ * the collision at write time is what keeps injection unambiguous — hence the
+ * asymmetric rule: a global name conflicts with everything, a team name only
+ * with globals and its own team.
+ */
+async function conflictingSecret(
+  name: string,
+  scope: 'global' | 'team',
+  teamId: string | null,
+  excludeId?: string,
+): Promise<typeof secrets.$inferSelect | null> {
+  const rows = await db.select().from(secrets).where(eq(secrets.name, name)).all();
+  for (const row of rows) {
+    if (excludeId && row.id === excludeId) continue;
+    if (scope === 'global' || row.scope === 'global') return row;
+    if (row.teamId === teamId) return row;
+  }
+  return null;
+}
+
+function conflictMessage(name: string, conflict: typeof secrets.$inferSelect): string {
+  return conflict.scope === 'global'
+    ? `A global secret named "${name}" already exists, and global secrets are injected into every application`
+    : `A secret named "${name}" already exists in this team`;
+}
+
 /** Shape a secret for the list response — never includes the plaintext. */
 function listShape(s: typeof secrets.$inferSelect, revealable: boolean) {
   const { value: _value, ...rest } = s;
@@ -164,6 +195,15 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
     }
   }
 
+  const conflict = await conflictingSecret(
+    name,
+    finalScope,
+    finalScope === 'team' ? teamId! : null,
+  );
+  if (conflict) {
+    return json({ error: conflictMessage(name, conflict) }, { status: 409 });
+  }
+
   const now = new Date();
   const id = crypto.randomUUID();
 
@@ -194,12 +234,17 @@ export const PATCH: RequestHandler = async ({ request, cookies }) => {
     return authErrorResponse(error);
   }
 
-  const body = await request.json();
-  const { id, name, value, description, deliveryMode } = body;
-  if (!id) return json({ error: 'Secret ID required' }, { status: 400 });
-  if (deliveryMode !== undefined && deliveryMode !== 'env' && deliveryMode !== 'file') {
-    return json({ error: "deliveryMode must be 'env' or 'file'" }, { status: 400 });
+  let body;
+  try {
+    body = await parseJsonBody(request, schemas.updateSecret);
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      return json({ error: error.message }, { status: 400 });
+    }
+    throw error;
   }
+
+  const { id, name, value, description, deliveryMode } = body;
 
   const existing = await db.select().from(secrets).where(eq(secrets.id, id)).get();
   if (!existing) return json({ error: 'Secret not found' }, { status: 404 });
@@ -208,6 +253,18 @@ export const PATCH: RequestHandler = async ({ request, cookies }) => {
   // Keying on createdBy meant teammates could see a secret they could not edit.
   if (!(await canReveal(ctx, existing))) {
     return json({ error: 'Not authorized to edit this secret' }, { status: 403 });
+  }
+
+  if (name !== undefined && name !== existing.name) {
+    const conflict = await conflictingSecret(
+      name,
+      existing.scope as 'global' | 'team',
+      existing.teamId,
+      existing.id,
+    );
+    if (conflict) {
+      return json({ error: conflictMessage(name, conflict) }, { status: 409 });
+    }
   }
 
   const updates: Record<string, any> = { updatedAt: new Date() };

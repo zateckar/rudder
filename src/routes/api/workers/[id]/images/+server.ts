@@ -3,7 +3,7 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { workers, users } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { getRestPodmanClient } from '$lib/server/podman-client';
+import { getRestPodmanClient, podmanErrorResponse } from '$lib/server/podman-client';
 
 export const GET: RequestHandler = async ({ params, cookies }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -65,8 +65,8 @@ export const POST: RequestHandler = async ({ params, request, cookies }) => {
     } finally {
       client.destroy();
     }
-  } catch (error: any) {
-    return json({ error: error.message }, { status: 500 });
+  } catch (error: unknown) {
+    return podmanErrorResponse(error, 'Could not pull image');
   }
 };
 
@@ -96,7 +96,9 @@ export const DELETE: RequestHandler = async ({ params, url, cookies }) => {
     } finally {
       client.destroy();
     }
-  } catch (error: any) {
-    return json({ error: error.message }, { status: 500 });
+  } catch (error: unknown) {
+    // Podman refuses to remove an image a container still references. That is a
+    // 409 the operator can act on, not a server error.
+    return podmanErrorResponse(error, 'Could not remove image');
   }
 };

@@ -5,6 +5,8 @@ import { eq, inArray, or, isNull, and } from 'drizzle-orm';
 import { selectWorker, getAllWorkerResources, getAllEligibleWorkers } from '$lib/server/worker-selector';
 import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
 import { ALLOWED_DOMAINS_UNSUPPORTED } from '$lib/server/oidc';
+import { imageReferenceError } from '$lib/server/image-reference';
+import { checkApplicationQuota } from '$lib/server/quota';
 
 export const load = async ({ cookies }: { cookies: any }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -112,6 +114,14 @@ export const actions = {
       return fail(400, { error: `An application named "${name}" already exists in this team` });
     }
 
+    // The same limit kubectl is held to. This path did not check it at all, so
+    // a team at its application quota was refused by `kubectl apply` and
+    // allowed by the New Application button.
+    const quota = await checkApplicationQuota(teamId);
+    if (!quota.allowed) {
+      return fail(400, { error: quota.message ?? 'Team quota exceeded' });
+    }
+
     // Worker selection — use form data or auto-select
     const formWorkerId = formData.get('workerId')?.toString();
     let worker;
@@ -148,14 +158,26 @@ export const actions = {
       // For single containers, manifest is already a JSON string from the hidden input
       // Validate it has an image (unless git-based)
       if (!gitRepo) {
+        let image: string;
         try {
           const cfg = JSON.parse(manifest);
-          if (!cfg.image) {
-            return fail(400, { error: 'Container image is required' });
-          }
+          image = typeof cfg?.image === 'string' ? cfg.image.trim() : '';
         } catch {
-          // If manifest is plain text (image name), wrap it
-          manifest = JSON.stringify({ image: manifest });
+          // Plain text is the image name itself.
+          image = manifest.trim();
+          manifest = JSON.stringify({ image });
+        }
+
+        // Checked here rather than only at deploy time. The catch branch used to
+        // wrap whatever arrived without re-checking, so an empty image was
+        // stored and only surfaced later as a Podman "invalid reference format"
+        // — an HTTP 500 for what is plainly a form error.
+        if (!image) {
+          return fail(400, { error: 'Container image is required' });
+        }
+        const badImage = imageReferenceError(image);
+        if (badImage) {
+          return fail(400, { error: badImage });
         }
       } else {
         // For git-based apps, set a placeholder image in manifest

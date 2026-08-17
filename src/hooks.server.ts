@@ -4,6 +4,7 @@ import { db } from '$lib/db';
 import { users, auditLogs, apiKeys } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { getSessionIdFromCookies, validateSession } from '$lib/auth';
+import { classifyRequest, isAuditable } from '$lib/server/audit';
 import { env } from '$env/dynamic/private';
 import { hashKey } from '$lib/server/encryption';
 
@@ -44,6 +45,30 @@ const securityHeaders: Handle = async ({ event, resolve }) => {
   return response;
 };
 
+/**
+ * How stale `lastUsedAt` is allowed to get.
+ *
+ * This column answers "is this key still in use, and roughly when last?" — a
+ * question nobody asks to the second. Writing it on every authenticated request
+ * put a database write in front of every `kubectl` call, including the reads,
+ * which is the hot path for the Kubernetes-compatible API.
+ */
+const API_KEY_TOUCH_INTERVAL_MS = 5 * 60 * 1000;
+
+/** Record that a key was used, at most once per interval. */
+async function touchApiKey(id: string, lastUsedAt: Date | null): Promise<void> {
+  const now = new Date();
+  if (lastUsedAt && now.getTime() - lastUsedAt.getTime() < API_KEY_TOUCH_INTERVAL_MS) {
+    return;
+  }
+  try {
+    await db.update(apiKeys).set({ lastUsedAt: now }).where(eq(apiKeys.id, id));
+  } catch (e) {
+    // Never fail a request because we could not record its timestamp.
+    console.error('[auth] Could not update API key lastUsedAt:', e);
+  }
+}
+
 const authentication: Handle = async ({ event, resolve }) => {
   let userId: string | null = null;
   let teamId: string | null = null;
@@ -74,7 +99,7 @@ const authentication: Handle = async ({ event, resolve }) => {
             event.locals.teamId = apiKey.teamId;
             event.locals.apiKeyId = apiKey.id;
             event.locals.apiKeyName = apiKey.name;
-            await db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, apiKey.id));
+            await touchApiKey(apiKey.id, apiKey.lastUsedAt);
           }
         } catch (e) {
           console.error('Bearer auth error:', e);
@@ -95,18 +120,13 @@ const authentication: Handle = async ({ event, resolve }) => {
 
   if (isMutation && (userId || event.locals.apiUser)) {
     const url = new URL(event.request.url);
-    if (!url.pathname.startsWith('/api/auth/')) {
-      let resourceType = 'unknown';
-      const action = event.request.method;
-
-      if (url.pathname.startsWith('/api/applications')) resourceType = 'application';
-      else if (url.pathname.startsWith('/api/workers')) resourceType = 'worker';
-      else if (url.pathname.startsWith('/api/containers')) resourceType = 'container';
-      else if (url.pathname.startsWith('/api/teams')) resourceType = 'team';
-      else if (url.pathname.startsWith('/api/domains')) resourceType = 'domain';
-      else if (url.pathname.startsWith('/api/secrets')) resourceType = 'secret';
-      else if (url.pathname.startsWith('/api/api-keys')) resourceType = 'api_key';
-      else if (url.pathname.startsWith('/k8s/')) resourceType = 'k8s';
+    if (isAuditable(url.pathname)) {
+      // What was done, not which HTTP verb carried it — see classifyRequest.
+      const { action, resourceType, resourceId } = classifyRequest(
+        event.request.method,
+        url.pathname,
+        url.search,
+      );
 
       try {
         await db.insert(auditLogs).values({
@@ -115,7 +135,9 @@ const authentication: Handle = async ({ event, resolve }) => {
           teamId: event.locals.teamId ?? null,
           action,
           resourceType,
+          resourceId,
           details: JSON.stringify({
+            method: event.request.method,
             path: url.pathname,
             status: response.status,
             // Identify the actor when there is no user behind the request.
