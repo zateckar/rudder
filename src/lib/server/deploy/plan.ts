@@ -171,11 +171,18 @@ export function plannedContainerName(ctx: PlanContext, suffix?: string): string 
  * `rudder.managed` is the reconciler's ownership marker: it will only ever
  * delete containers carrying it, so a co-tenant's workload on a shared worker
  * is never garbage collected. Previously only some formats set it.
+ *
+ * `rudder.app.id` says *which* application owns it. The `app` label carries the
+ * name, which is not enough: names are not unique across teams, and renaming an
+ * application would strand its containers under a name nothing claims. The id
+ * is what lets the reconciler tell an orphan — managed, but belonging to an
+ * application that no longer exists — from a container of a different app.
  */
 export function identityLabels(ctx: PlanContext): Record<string, string> {
   const labels: Record<string, string> = {
     app: ctx.appName,
     'rudder.managed': 'true',
+    'rudder.app.id': ctx.appId,
   };
   if (ctx.teamSlug) labels.team = ctx.teamSlug;
   if (ctx.team) {

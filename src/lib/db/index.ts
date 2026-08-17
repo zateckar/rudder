@@ -132,6 +132,7 @@ sqlite.run(`
     generation INTEGER NOT NULL DEFAULT 1,
     state TEXT NOT NULL DEFAULT 'active',
     deployment_id TEXT,
+    spec_hash TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   );
@@ -519,6 +520,7 @@ for (const col of [
   `ALTER TABLE containers ADD COLUMN generation INTEGER NOT NULL DEFAULT 1;`,
   `ALTER TABLE containers ADD COLUMN state TEXT NOT NULL DEFAULT 'active';`,
   `ALTER TABLE containers ADD COLUMN deployment_id TEXT;`,
+  `ALTER TABLE containers ADD COLUMN spec_hash TEXT;`,
   `ALTER TABLE applications ADD COLUMN health_timeout_seconds INTEGER;`,
   `ALTER TABLE applications ADD COLUMN retain_previous_minutes INTEGER NOT NULL DEFAULT 0;`,
 ]) {

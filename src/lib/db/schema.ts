@@ -196,6 +196,23 @@ export const containers = sqliteTable('containers', {
    * the ports the old generation holds.
    */
   state: text('state', { enum: ['pending', 'active', 'draining'] }).notNull().default('active'),
+  /**
+   * Hash of the parts of this container's intent that can only be changed by
+   * recreating it — image, entrypoint, command, environment, mounts, resource
+   * limits, health check, restart policy.
+   *
+   * Deliberately excludes everything a worker in `http` routing mode now fetches
+   * live: the domain, router name, rate limits, auth mode and middleware chain.
+   * That exclusion is the point. Without it the reconciler would call a
+   * container stale — and therefore want a new generation — every time someone
+   * edited a rate limit, which is exactly the redeploy 2-02 removed the need
+   * for.
+   *
+   * Null on containers deployed before this column existed, and on adopted
+   * containers, neither of which Rudder can claim to know the intent of. A null
+   * hash never reads as stale.
+   */
+  specHash: text('spec_hash'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
