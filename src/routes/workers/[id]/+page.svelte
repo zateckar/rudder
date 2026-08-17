@@ -93,6 +93,94 @@
   let routingSaving = $state(false);
   let routingMsg = $state('');
 
+  // ── Adoption ──────────────────────────────────────────────────────────────
+  //
+  // Containers on this worker that Rudder does not manage. Nothing is imported
+  // automatically any more: adoption changes what Rudder claims to own, so it
+  // happens when someone here says so.
+  interface Adoptable {
+    containerId: string;
+    name: string;
+    image: string;
+    status: string;
+    domain: string | null;
+    suggestedName: string;
+    suggestedTeamId: string | null;
+  }
+  let adoptable = $state<Adoptable[]>([]);
+  let adoptLoading = $state(false);
+  let adoptLoaded = $state(false);
+  let adopting = $state(false);
+  let adoptMsg = $state('');
+  /** Per-container operator edits, keyed by container id. */
+  let adoptPick = $state<Record<string, { selected: boolean; name: string; teamId: string }>>({});
+
+  async function loadAdoptable() {
+    adoptLoading = true;
+    adoptMsg = '';
+    try {
+      const res = await fetch(`/api/workers/${workerId}/adopt`);
+      const body = await res.json();
+      if (res.ok) {
+        adoptable = body.containers ?? [];
+        const picks: typeof adoptPick = {};
+        for (const c of adoptable) {
+          picks[c.containerId] = {
+            selected: false,
+            name: c.suggestedName,
+            teamId: c.suggestedTeamId ?? '',
+          };
+        }
+        adoptPick = picks;
+        adoptLoaded = true;
+      } else {
+        adoptMsg = body.error || 'Could not list containers';
+      }
+    } catch (e: any) {
+      adoptMsg = e.message;
+    } finally {
+      adoptLoading = false;
+    }
+  }
+
+  async function adoptSelected() {
+    const chosen = adoptable.filter((c) => adoptPick[c.containerId]?.selected);
+    if (chosen.length === 0) {
+      adoptMsg = 'Select at least one container';
+      return;
+    }
+    adopting = true;
+    adoptMsg = '';
+    try {
+      const res = await fetch(`/api/workers/${workerId}/adopt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          containers: chosen.map((c) => ({
+            containerId: c.containerId,
+            name: adoptPick[c.containerId].name,
+            teamId: adoptPick[c.containerId].teamId || null,
+            domain: c.domain,
+          })),
+        }),
+      });
+      const body = await res.json();
+      if (res.ok) {
+        adoptMsg = body.message;
+        if (body.skipped?.length) {
+          adoptMsg += ` — ${body.skipped.map((s: any) => s.reason).join('; ')}`;
+        }
+        if (body.adopted?.length) setTimeout(() => window.location.reload(), 1200);
+      } else {
+        adoptMsg = body.error || 'Adoption failed';
+      }
+    } catch (e: any) {
+      adoptMsg = e.message;
+    } finally {
+      adopting = false;
+    }
+  }
+
   // Images tab state
   let images = $state<any[]>([]);
   let imagesLoading = $state(false);
@@ -1270,6 +1358,60 @@
 
   <!-- Containers tab -->
   {:else if activeTab === 'containers'}
+    <!-- Adoption. Rudder used to walk a re-provisioned worker and import
+         whatever it found, reverse-engineering configuration out of Traefik
+         labels. Now it asks. -->
+    <div class="section">
+      <div class="section-header">
+        <h3>Adopt existing containers</h3>
+        <button class="btn-tiny" onclick={loadAdoptable} disabled={adoptLoading} title="List containers on this worker that Rudder does not manage">
+          {adoptLoading ? 'Scanning…' : adoptLoaded ? 'Rescan' : 'Scan for containers'}
+        </button>
+      </div>
+      {#if adoptMsg}
+        <p class="adopt-msg">{adoptMsg}</p>
+      {/if}
+      {#if adoptLoaded && adoptable.length === 0}
+        <p class="empty">Every container on this worker is already managed by Rudder.</p>
+      {:else if adoptable.length > 0}
+        <p class="help-text">
+          Adopting a container records it as an application so it can be redeployed and
+          reconciled. It cannot add Rudder's ownership label — Podman fixes labels when a
+          container is created — so an adopted container is never removed by the reconciler
+          until its first deploy. Authentication and rate limits start empty; a secret that
+          only existed in the container's labels cannot be recovered.
+        </p>
+        <div class="adopt-list">
+          {#each adoptable as c}
+            <div class="adopt-row">
+              <label class="adopt-check">
+                <input type="checkbox" bind:checked={adoptPick[c.containerId].selected} />
+                <code>{c.name}</code>
+              </label>
+              <span class="status-badge {c.status}">{c.status}</span>
+              <span class="adopt-image">{c.image}</span>
+              <input
+                class="adopt-input"
+                bind:value={adoptPick[c.containerId].name}
+                placeholder="Application name"
+                title="Name for the application Rudder will create"
+              />
+              <select class="adopt-input" bind:value={adoptPick[c.containerId].teamId} title="Team that will own this application">
+                <option value="">No team</option>
+                {#each data.teams as t}
+                  <option value={t.id}>{t.name}</option>
+                {/each}
+              </select>
+              <span class="adopt-domain">{c.domain ?? 'not routed'}</span>
+            </div>
+          {/each}
+        </div>
+        <button class="btn-tiny btn-primary-tiny" onclick={adoptSelected} disabled={adopting} title="Create applications for the selected containers">
+          {adopting ? 'Adopting…' : 'Adopt selected'}
+        </button>
+      {/if}
+    </div>
+
     {#if data.containers.length === 0}
       <div class="section"><p class="empty">No containers on this worker</p></div>
     {:else}
@@ -2044,6 +2186,36 @@
 
   .patch-warn { color: var(--yellow-text, var(--accent)); font-weight: 600; }
   .patch-unknown { color: var(--text-muted); font-style: italic; }
+
+  /* ── Adoption ──────────────────────────────────── */
+
+  .help-text { font-size: 11.5px; color: var(--text-muted); line-height: 1.5; margin: 0 0 12px; }
+  .adopt-msg { font-size: 12px; color: var(--text); margin: 0 0 10px; }
+  .adopt-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+  .adopt-row {
+    display: grid;
+    grid-template-columns: minmax(160px, 1.4fr) auto minmax(120px, 1.2fr) minmax(120px, 1fr) minmax(110px, 1fr) minmax(120px, 1fr);
+    align-items: center; gap: 8px;
+    padding: 7px 9px; font-size: 12px;
+    background: var(--bg-overlay); border-radius: var(--radius-sm);
+  }
+  .adopt-check { display: flex; align-items: center; gap: 7px; cursor: pointer; min-width: 0; }
+  .adopt-check code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .adopt-image, .adopt-domain {
+    color: var(--text-muted); font-size: 11px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .adopt-input {
+    background: var(--bg-input, var(--bg)); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 3px 6px; font-size: 11.5px; min-width: 0;
+  }
+  .btn-primary-tiny { border-color: var(--accent); color: var(--accent); }
+
+  /* One column per row below the point where six of them stop being readable. */
+  @media (max-width: 900px) {
+    .adopt-row { grid-template-columns: 1fr; }
+  }
 
   /* ── Provisioning dialog extras ────────────────── */
 

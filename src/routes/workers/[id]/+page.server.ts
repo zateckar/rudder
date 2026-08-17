@@ -1,6 +1,6 @@
 import { error, redirect } from '@sveltejs/kit';
 import { db } from '$lib/db';
-import { workers, containers, workerPings, workerMetrics } from '$lib/db/schema';
+import { workers, containers, workerPings, workerMetrics, teams } from '$lib/db/schema';
 import { eq, and, gte, desc } from 'drizzle-orm';
 import { canManageWorker } from '$lib/server/auth';
 
@@ -45,9 +45,14 @@ export const load = async ({ params, cookies }: { params: { id: string }; cookie
   // configToken is a bearer credential for this worker's routing configuration —
   // never serialise it to the browser.
   const { podmanCaCert: _a, podmanClientCert: _b, podmanClientKey: _c, crowdsecBouncerKey: _d, oidcClientSecret: _e, oidcEncryptionKey: _f, configToken: _g, ...safeWorker } = worker;
+  // For the adoption panel: the operator picks which team owns an adopted
+  // container. Rudder no longer creates a team from a container label.
+  const allTeams = await db.select({ id: teams.id, name: teams.name }).from(teams).all();
+
   return {
     user: ctx.user,
     worker: safeWorker,
+    teams: allTeams,
     containers: workerContainers,
     pings: pings.map(p => ({
       ...p,

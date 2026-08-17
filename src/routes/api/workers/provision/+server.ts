@@ -247,22 +247,15 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
             lastSeenAt: new Date(),
           }).where(eq(workers.id, workerId));
 
-          // Discover and import existing applications
-          // Skip discovery during initial provisioning - Let's Encrypt certificates take 30-60s to obtain
-          // Discovery will run automatically on the next metrics collection cycle (every 5 minutes)
-          let discoveryResults = { appsDiscovered: 0, teamsCreated: 0, stacksCreated: 0 };
-          console.log(
-            '[app-discovery] Skipping during provisioning - Traefik needs time to obtain Let\'s Encrypt certificates. ' +
-            'Discovery will run on the next metrics collection cycle.'
-          );
-
+          // Provisioning no longer imports anything. Containers already on the
+          // machine are offered for adoption on the worker's page, where a person
+          // chooses which of them Rudder should manage. The counts this used to
+          // return were always zero anyway — discovery was deferred to the metrics
+          // cycle, so the response reported an import that had not happened yet.
           return json({
             success: true,
             message: 'Worker provisioned successfully',
             mtlsEnabled: hasCerts,
-            appsDiscovered: discoveryResults.appsDiscovered,
-            teamsCreated: discoveryResults.teamsCreated,
-            stacksCreated: discoveryResults.stacksCreated,
           });
         } catch (error: any) {
           console.error('Provisioning error:', error);

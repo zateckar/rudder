@@ -4,7 +4,7 @@
  * Call startMetricsCollection() once at server startup (guarded by globalThis flag).
  */
 import { db, sqlite } from '$lib/db';
-import { containers, workers, containerMetrics, workerMetrics, workerPings, systemSettings, applications, users } from '$lib/db/schema';
+import { containers, workers, containerMetrics, workerMetrics, workerPings, systemSettings, applications } from '$lib/db/schema';
 import { eq, lt } from 'drizzle-orm';
 import { getRestPodmanClient } from './podman-client';
 import { createPodmanClient } from './podman';
@@ -15,7 +15,6 @@ import { reconcileAllWorkers } from './reconcile';
 import { decryptField } from './encryption';
 
 // Track which provisioning events have already been processed to avoid redundant discovery runs
-const lastProcessedProvisioning = new Map<string, number>();
 
 const DEFAULT_INTERVAL_SECONDS = 60;    // 1 minute
 const DEFAULT_RETENTION_DAYS = 30;
@@ -248,31 +247,14 @@ async function collectWorkerMetrics(): Promise<void> {
         lastSeenAt: pingStatus === 'online' ? now : worker.lastSeenAt,
       }).where(eq(workers.id, worker.id));
 
-      // Run app discovery when worker is online and recently provisioned
-      if (pingStatus === 'online' && worker.provisionedAt) {
-        const provTime = new Date(worker.provisionedAt).getTime();
-        const nowTime = now.getTime();
-        const recentlyProvisioned = (nowTime - provTime) < 3600000; // Within last hour
-
-        if (recentlyProvisioned && lastProcessedProvisioning.get(worker.id) !== provTime) {
-          console.log(`[metrics] Worker ${worker.name} was recently provisioned - running app discovery`);
-          try {
-            const { discoverApplicationsOnWorker } = await import('./app-discovery');
-            // Find an admin user to attribute discovered resources to
-            const adminUser = await db.select().from(users).where(eq(users.role, 'admin')).limit(1).get();
-            const discoveryUserId = adminUser?.id ?? null;
-            const results = await discoverApplicationsOnWorker(worker.id, discoveryUserId);
-            console.log(
-              `[metrics] Discovery complete: ${results.appsDiscovered} apps, ` +
-              `${results.teamsCreated} teams, ${results.stacksCreated} stacks`
-            );
-            // Mark this provisioning as processed
-            lastProcessedProvisioning.set(worker.id, provTime);
-          } catch (e: any) {
-            console.error(`[metrics] App discovery failed for ${worker.name}:`, e.message);
-          }
-        }
-      }
+      // Discovery used to run here: a recently provisioned worker had its
+      // containers walked, reverse-engineered into application records and
+      // written to the database, with nobody asked. It existed because nothing
+      // reconciled, so import had to guess at everything to be useful.
+      //
+      // Reconciliation now reports drift, and adoption is an operator decision
+      // made on the worker's page. Rudder does not decide what it owns while the
+      // person who provisioned a machine is looking somewhere else.
 
       if (pingStatus !== 'online' || !sysInfo) continue;
 

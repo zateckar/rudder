@@ -23,6 +23,8 @@ Container orchestration platform built with SvelteKit, Drizzle ORM, and SQLite. 
 - **Application scaling** -- run multiple replicas with Traefik load balancing
 - **Application stacks** -- group applications for bulk deploy/stop/restart operations
 - **Config export/import** -- export application configuration as JSON, import on any instance
+- **Drift detection** -- every collection cycle diffs what should be running against what is, and reports containers that are absent, out of date, failing their health check, or unaccounted for. Reporting only: nothing is corrected automatically, and containers Rudder does not own are never touched (see [Reconciliation](#reconciliation))
+- **Container adoption** -- containers already on a worker are offered for adoption on its Containers tab, and become applications when an operator confirms which ones and which team owns them
 
 ### Security
 - **CrowdSec WAF** -- AppSec virtual patching inline, OWASP Core Rule Set out-of-band, plus behavioral IP banning on all workers
@@ -323,6 +325,67 @@ reaches a worker through the Podman API and cannot connect to a published port
 itself — an application without one is accepted as soon as its containers have
 stayed up briefly. Define a health check on anything where "the process started"
 and "the process can serve" are meaningfully different.
+
+---
+
+## Reconciliation
+
+Every collection cycle, Rudder computes what each application's containers
+*should* be from the database, reads what is actually running from each worker's
+Podman API, and records the difference. Drift shows up on the application's page
+with a **Re-check** to run the comparison immediately and, where a deploy would
+fix it, a **Reconcile now**.
+
+| Finding | Means |
+| --- | --- |
+| **Not running** | Intent says run it and it is not running — a deploy that failed partway through its containers, or something removed it. |
+| **Out of date** | Running, but built from different configuration. Only a new deploy can replace it; a running container cannot be rebuilt in place. |
+| **Failing health check** | Running and failing its own health check. |
+| **Untracked** | Carries Rudder's ownership label, but Rudder has no record of it — usually an application that was deleted while its containers were left behind. |
+| **Not managed by Rudder** | Someone else's container. Reported so it is visible, and never modified. |
+
+**Reconciliation only reports.** It makes exactly one Podman call per worker,
+`listContainers`, and has no code path to a create, start, stop or remove.
+Correction is a deliberate act: pressing Reconcile now, which runs an ordinary
+deploy.
+
+Two rules govern it, and neither is negotiable:
+
+- **A container is only ever removable if it carries `rudder.managed=true`.**
+  Workers are not necessarily single-tenant, and a reconciler that garbage
+  collected containers it did not recognise would destroy a co-tenant's workload
+  the first time it ran. The test lives in exactly one function.
+- **An application whose manifest stops parsing loses nothing.** Its intent cannot
+  be computed, so it is reported as unreconcilable — never as an application with
+  no containers, which would make a typo in a YAML file look like a reason to
+  delete things.
+
+A container whose configuration Rudder did not produce — one adopted from a
+worker, or deployed before this existed — has no recorded configuration hash and
+is therefore never reported out of date. Rudder does not claim to know what built
+it.
+
+### Adopting existing containers
+
+Containers already running on a worker are listed on its **Containers** tab under
+*Adopt existing containers*. Choosing some of them, naming the applications and
+picking their teams creates the application records; nothing is imported on its
+own, and provisioning a worker imports nothing at all.
+
+Two limits are worth knowing before you rely on it:
+
+- **An adopted container cannot be labelled.** Podman fixes labels when a
+  container is created and offers no way to add one afterwards, so an adopted
+  container is not `rudder.managed` and the reconciler will never remove it. It
+  picks the label up on its first deploy.
+- **Authentication settings do not survive.** An OIDC client secret and session
+  key only ever existed inside the container's Traefik labels, and cannot be
+  recovered from them. Adopted applications start with authentication off, and you
+  set it. Rudder used to write `authType: oidc` with an empty configuration here,
+  which looked configured and was not.
+
+The image, environment, mounts, restart policy, and the hostname the container's
+own Traefik router serves are all read off the container and carried over.
 
 ---
 
