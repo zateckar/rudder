@@ -40,10 +40,11 @@
  * reconciler under-claims rather than over-claims.
  */
 import { createHash } from 'crypto';
-import type { applications, stacks, teams, workers } from '$lib/db/schema';
-import type { Container } from './podman';
+import type { applications, containers, stacks, teams, workers } from '$lib/db/schema';
+import type { Container, PodmanClient } from './podman';
 import { buildDeploymentPlan } from './deploy/build';
 import { ManifestError, type PlanContext, type PlannedContainer } from './deploy/plan';
+import { parseGenerationalName } from './generations';
 import type { PortAllocator } from './ports';
 import { singleMountIntents } from './volumes';
 
@@ -329,4 +330,225 @@ export function desiredState(input: DesiredStateInput): DesiredApp {
     notes: plan.notes,
     portsArePlaceholders: !input.allocatePort,
   };
+}
+
+// ── Observed state ───────────────────────────────────────────────────────────
+
+/**
+ * Every container on the worker, as Podman reports it.
+ *
+ * Deliberately *not* filtered to managed containers. The `foreign`
+ * classification — present, unmanaged, report only, never touch — is the whole
+ * mechanism protecting a co-tenant's workload, and it cannot be produced from a
+ * list that has already dropped everything unmanaged. Filtering happens in the
+ * diff, where the decision is visible.
+ *
+ * One call per worker per pass. `all: true` includes stopped containers, which
+ * matters: a container that exited is drift, and a list of running ones would
+ * report it as missing instead — a different remedy.
+ */
+export async function observedState(client: PodmanClient): Promise<ObservedContainer[]> {
+  const raw = await client.listContainers(true);
+  return raw.map(toObserved);
+}
+
+// ── Diff ─────────────────────────────────────────────────────────────────────
+
+export type DriftKind = 'missing' | 'stale' | 'unhealthy' | 'orphan' | 'foreign';
+
+export interface DriftEntry {
+  kind: DriftKind;
+  /** The application concerned, when one is known. Null for a foreign container. */
+  appId: string | null;
+  appName: string | null;
+  /** Desired name for `missing`; the observed Podman name otherwise. */
+  name: string;
+  /** Podman id. Absent for `missing`, which is about something that is not there. */
+  containerId?: string;
+  /** What to tell the operator. One sentence, naming the thing and the reason. */
+  detail: string;
+}
+
+/** An application whose intent could not be computed, and why. */
+export interface UnreconcilableApp {
+  appId: string;
+  appName: string;
+  message: string;
+}
+
+export interface DiffInput {
+  /** Intent, one entry per application on this worker whose manifest parsed. */
+  desired: readonly DesiredApp[];
+  /** `containers` rows for this worker — what Rudder believes it created. */
+  rows: readonly (typeof containers.$inferSelect)[];
+  observed: readonly ObservedContainer[];
+  /**
+   * Every application assigned to this worker, whether or not its intent could
+   * be computed.
+   *
+   * Separate from `desired` on purpose, and the separation is load-bearing. An
+   * application whose manifest stops parsing is absent from `desired`; if orphan
+   * detection worked off `desired` alone, that application's perfectly healthy
+   * containers would all be proposed for deletion. A parse error must never
+   * become a reason to destroy something.
+   */
+  knownAppIds: ReadonlySet<string>;
+}
+
+export interface DiffResult {
+  drift: DriftEntry[];
+  /** True when nothing anywhere disagrees. */
+  clean: boolean;
+}
+
+/**
+ * Classify every difference between intent and reality. Pure.
+ *
+ * Nothing here decides anything or touches a worker — it returns the
+ * classification as data so the dangerous part downstream stays small enough to
+ * read in one sitting.
+ *
+ * The five kinds, and what each actually means:
+ *
+ * - `missing`   — intent says run it, and it is not running. Either a deploy
+ *                 failed partway through its containers, or something removed it.
+ * - `stale`     — running, but built from different intent. Needs a new
+ *                 generation, which means a deploy; it cannot be patched in place.
+ * - `unhealthy` — running and failing its own health check.
+ * - `orphan`    — Rudder's label, but Rudder is not tracking it. Removal
+ *                 candidate, never removed without a human saying so.
+ * - `foreign`   — not Rudder's. Reported so the operator can see it, and
+ *                 otherwise left alone forever.
+ */
+export function diff(input: DiffInput): DiffResult {
+  const { desired, rows, observed, knownAppIds } = input;
+  const drift: DriftEntry[] = [];
+
+  const observedById = new Map(observed.map((c) => [c.id, c]));
+  /** Container ids Rudder has a row for, so an orphan check can exclude them. */
+  const trackedIds = new Set(rows.map((r) => r.containerId));
+  const trackedNames = new Set(rows.map((r) => r.name));
+
+  for (const app of desired) {
+    // Only the generation that is supposed to be serving. A `draining` row is a
+    // superseded generation being retained for a fast rollback: present on the
+    // worker by design, and absent from intent by design.
+    const live = rows.filter(
+      (r) => r.applicationId === app.appId && (r.state === 'active' || r.state === 'pending'),
+    );
+    const claimed = new Set<string>();
+
+    for (const want of app.containers) {
+      const row = matchRow(live, want.name, claimed);
+      if (!row) {
+        drift.push({
+          kind: 'missing',
+          appId: app.appId,
+          appName: app.appName,
+          name: want.name,
+          detail: `No container recorded for '${want.key}'. A deploy may have failed partway through.`,
+        });
+        continue;
+      }
+      claimed.add(row.id);
+
+      const container = observedById.get(row.containerId);
+      if (!container) {
+        drift.push({
+          kind: 'missing',
+          appId: app.appId,
+          appName: app.appName,
+          name: row.name,
+          detail: `Container '${row.name}' is recorded but not present on the worker.`,
+        });
+        continue;
+      }
+
+      // A null hash is a container deployed before the column existed, or one
+      // adopted from a worker. Rudder does not know what intent built it, and
+      // guessing that unknown means stale would propose rebuilding the fleet on
+      // the first pass after an upgrade.
+      if (row.specHash && row.specHash !== want.specHash) {
+        drift.push({
+          kind: 'stale',
+          appId: app.appId,
+          appName: app.appName,
+          name: row.name,
+          containerId: container.id,
+          detail: `Container '${row.name}' was built from different configuration. A deploy will replace it.`,
+        });
+      }
+
+      if (container.health === 'unhealthy') {
+        drift.push({
+          kind: 'unhealthy',
+          appId: app.appId,
+          appName: app.appName,
+          name: row.name,
+          containerId: container.id,
+          detail: `Container '${row.name}' is failing its health check (${container.status}).`,
+        });
+      } else if (container.state !== 'running') {
+        drift.push({
+          kind: 'missing',
+          appId: app.appId,
+          appName: app.appName,
+          name: row.name,
+          containerId: container.id,
+          detail: `Container '${row.name}' is present but ${container.state} (${container.status}).`,
+        });
+      }
+    }
+  }
+
+  for (const container of observed) {
+    if (!mayRemove(container)) {
+      drift.push({
+        kind: 'foreign',
+        appId: null,
+        appName: null,
+        name: container.name,
+        containerId: container.id,
+        detail: `Container '${container.name}' is not managed by Rudder. Reported only; it will never be modified.`,
+      });
+      continue;
+    }
+
+    if (trackedIds.has(container.id) || trackedNames.has(container.name)) continue;
+
+    const claimsApp = ownedAppId(container);
+    drift.push({
+      kind: 'orphan',
+      appId: claimsApp,
+      appName: container.labels.app ?? null,
+      name: container.name,
+      containerId: container.id,
+      detail:
+        claimsApp && knownAppIds.has(claimsApp)
+          ? `Container '${container.name}' carries Rudder's label for an application that exists, but Rudder has no record of it.`
+          : `Container '${container.name}' belongs to an application that no longer exists.`,
+    });
+  }
+
+  return { drift, clean: drift.every((d) => d.kind === 'foreign') };
+}
+
+/**
+ * Find the row for a desired container name.
+ *
+ * Exact match first. Blue/green suffixes the Podman name with the generation, so
+ * the second attempt strips that — but only as a fallback, because a compose
+ * service legitimately called `g2` produces a name the suffix pattern also
+ * matches, and the exact comparison gets that right.
+ */
+function matchRow(
+  live: readonly (typeof containers.$inferSelect)[],
+  wantName: string,
+  claimed: ReadonlySet<string>,
+): (typeof containers.$inferSelect) | undefined {
+  const free = live.filter((r) => !claimed.has(r.id));
+  return (
+    free.find((r) => r.name === wantName) ??
+    free.find((r) => parseGenerationalName(r.name)?.base === wantName)
+  );
 }

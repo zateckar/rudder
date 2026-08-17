@@ -3,6 +3,7 @@ import {
   APP_ID_LABEL,
   MANAGED_LABEL,
   desiredState,
+  diff,
   healthFromStatus,
   mayRemove,
   ownedAppId,
@@ -12,7 +13,7 @@ import {
   toObserved,
 } from './reconcile';
 import { ManifestError, type PlannedContainer } from './deploy/plan';
-import type { applications, workers } from '$lib/db/schema';
+import type { applications, containers, workers } from '$lib/db/schema';
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -47,6 +48,32 @@ function appRow(over: Partial<typeof applications.$inferSelect> = {}): typeof ap
     updatedAt: new Date(0),
     ...over,
   } as typeof applications.$inferSelect;
+}
+
+function containerRow(
+  over: Partial<typeof containers.$inferSelect> = {},
+): typeof containers.$inferSelect {
+  return {
+    id: 'row-1',
+    applicationId: 'app-1',
+    workerId: 'worker-1',
+    containerId: 'abc123',
+    name: 'shop-app-1',
+    image: 'nginx:1.27',
+    status: 'running',
+    ports: null,
+    exposedPort: null,
+    domain: null,
+    routerName: null,
+    labels: null,
+    generation: 1,
+    deploymentId: 'dep-1',
+    state: 'active',
+    specHash: null,
+    createdAt: new Date(0),
+    updatedAt: new Date(0),
+    ...over,
+  } as typeof containers.$inferSelect;
 }
 
 function workerRow(over: Partial<typeof workers.$inferSelect> = {}): typeof workers.$inferSelect {
@@ -452,5 +479,225 @@ describe('desiredState', () => {
     });
     expect(desired.containers).toHaveLength(2);
     expect(desired.notes.join(' ')).toContain('localhost');
+  });
+});
+
+// ── Diff ─────────────────────────────────────────────────────────────────────
+
+describe('diff', () => {
+  /** A single-container application, deployed, running, and correct. */
+  function healthy() {
+    const desired = desiredState({ app: appRow(), worker: workerRow() });
+    const want = desired.containers[0];
+    const rows = [containerRow({ name: want.name, specHash: want.specHash })];
+    const observed = [
+      toObserved(raw({ Id: 'abc123', Names: [`/${want.name}`], Status: 'Up 3 hours' })),
+    ];
+    return { desired: [desired], rows, observed, knownAppIds: new Set(['app-1']), want };
+  }
+
+  test('reports nothing when reality matches intent', () => {
+    const result = diff(healthy());
+    expect(result.drift).toEqual([]);
+    expect(result.clean).toBe(true);
+  });
+
+  test('a container removed by hand is missing', () => {
+    const base = healthy();
+    const result = diff({ ...base, observed: [] });
+    expect(result.drift.map((d) => d.kind)).toEqual(['missing']);
+    expect(result.drift[0].detail).toContain('recorded but not present');
+    expect(result.clean).toBe(false);
+  });
+
+  test('a deploy that never created a container is missing', () => {
+    // The partially failed deploy this plan exists to make self-healing: intent
+    // names a container and no row was ever written for it.
+    const base = healthy();
+    const result = diff({ ...base, rows: [], observed: [] });
+    expect(result.drift.map((d) => d.kind)).toEqual(['missing']);
+    expect(result.drift[0].detail).toContain('failed partway through');
+  });
+
+  test('a container built from different configuration is stale', () => {
+    const base = healthy();
+    const rows = [containerRow({ name: base.want.name, specHash: 'a-hash-from-an-older-deploy' })];
+    const result = diff({ ...base, rows });
+    expect(result.drift.map((d) => d.kind)).toEqual(['stale']);
+    expect(result.drift[0].containerId).toBe('abc123');
+  });
+
+  test('a container with no recorded hash is never stale', () => {
+    // Deployed before the column existed, or adopted. Rudder does not know what
+    // intent built it, and treating unknown as stale would propose rebuilding
+    // every application on the first pass after the upgrade.
+    const base = healthy();
+    const result = diff({ ...base, rows: [containerRow({ name: base.want.name, specHash: null })] });
+    expect(result.drift).toEqual([]);
+  });
+
+  test('a container failing its health check is unhealthy, not missing', () => {
+    const base = healthy();
+    const observed = [
+      toObserved(raw({ Id: 'abc123', Names: [`/${base.want.name}`], Status: 'Up 5 minutes (unhealthy)' })),
+    ];
+    const result = diff({ ...base, observed });
+    expect(result.drift.map((d) => d.kind)).toEqual(['unhealthy']);
+  });
+
+  test('a container that exited is missing rather than unhealthy', () => {
+    // Different remedies: an unhealthy container is running and can be restarted
+    // in place, an exited one has to be recreated.
+    const base = healthy();
+    const observed = [
+      toObserved(
+        raw({
+          Id: 'abc123',
+          Names: [`/${base.want.name}`],
+          State: 'exited',
+          Status: 'Exited (1) 2 minutes ago',
+        }),
+      ),
+    ];
+    const result = diff({ ...base, observed });
+    expect(result.drift.map((d) => d.kind)).toEqual(['missing']);
+    expect(result.drift[0].detail).toContain('exited');
+  });
+
+  test('an unmanaged container is foreign and does not make the worker dirty', () => {
+    const base = healthy();
+    const observed = [
+      ...base.observed,
+      toObserved(raw({ Id: 'traefik1', Names: ['/traefik'], Labels: { app: 'traefik' } })),
+    ];
+    const result = diff({ ...base, observed });
+    expect(result.drift.map((d) => d.kind)).toEqual(['foreign']);
+    // Foreign containers are information, not work. A worker with co-tenants
+    // must not read as permanently drifted.
+    expect(result.clean).toBe(true);
+  });
+
+  test('a co-tenant container is never classified as an orphan', () => {
+    // The catastrophe this plan is guarding against. An unmanaged container has
+    // no application, no row and no label, and every one of those could be read
+    // as "unaccounted for" — but it is someone else's workload.
+    const observed = [
+      toObserved(raw({ Id: 'pg1', Names: ['/postgres'], Labels: {} })),
+      toObserved(raw({ Id: 'redis1', Names: ['/redis'], Labels: { app: 'redis', team: 'other' } })),
+    ];
+    const result = diff({ desired: [], rows: [], observed, knownAppIds: new Set() });
+    expect(result.drift.map((d) => d.kind)).toEqual(['foreign', 'foreign']);
+    // And nothing about them can reach a removal, whatever the diff said.
+    expect(permittedRemovals(observed)).toEqual([]);
+  });
+
+  test('a managed container Rudder has no record of is an orphan', () => {
+    const observed = [
+      toObserved(
+        raw({
+          Id: 'left1',
+          Names: ['/deleted-app-9f8e7d6c'],
+          Labels: { [MANAGED_LABEL]: 'true', [APP_ID_LABEL]: 'app-gone', app: 'deleted-app' },
+        }),
+      ),
+    ];
+    const result = diff({ desired: [], rows: [], observed, knownAppIds: new Set(['app-1']) });
+    expect(result.drift.map((d) => d.kind)).toEqual(['orphan']);
+    expect(result.drift[0].detail).toContain('no longer exists');
+    expect(result.drift[0].appId).toBe('app-gone');
+  });
+
+  test('says so differently when the orphan belongs to an application that exists', () => {
+    // Rudder lost the row rather than the user deleting the application. Same
+    // classification, different remedy, so the message has to distinguish them.
+    const observed = [
+      toObserved(
+        raw({ Id: 'left1', Names: ['/shop-1a2b3c4d'], Labels: { [MANAGED_LABEL]: 'true', [APP_ID_LABEL]: 'app-1' } }),
+      ),
+    ];
+    const result = diff({ desired: [], rows: [], observed, knownAppIds: new Set(['app-1']) });
+    expect(result.drift[0].kind).toBe('orphan');
+    expect(result.drift[0].detail).toContain('has no record of it');
+  });
+
+  test('an application whose manifest stopped parsing loses no containers', () => {
+    // The most dangerous shape in the whole design. `desiredState` throws, so the
+    // application is absent from `desired` — and if orphan detection worked off
+    // `desired` alone, every healthy container it owns would be proposed for
+    // deletion because of a typo in a YAML file.
+    const base = healthy();
+    const result = diff({
+      desired: [],
+      rows: base.rows,
+      observed: base.observed,
+      knownAppIds: base.knownAppIds,
+    });
+    expect(result.drift).toEqual([]);
+  });
+
+  test('a retained previous generation is not drift', () => {
+    // Blue/green keeps the superseded generation stopped-but-present for a fast
+    // rollback. It is on the worker by design and absent from intent by design.
+    const base = healthy();
+    const rows = [
+      ...base.rows,
+      containerRow({
+        id: 'row-old',
+        containerId: 'old123',
+        name: `${base.want.name}-g1`,
+        state: 'draining',
+        status: 'stopped',
+        specHash: 'an-older-hash',
+      }),
+    ];
+    const observed = [
+      ...base.observed,
+      toObserved(
+        raw({
+          Id: 'old123',
+          Names: [`/${base.want.name}-g1`],
+          State: 'exited',
+          Status: 'Exited (0) 1 minute ago',
+        }),
+      ),
+    ];
+    const result = diff({ ...base, rows, observed });
+    expect(result.drift).toEqual([]);
+  });
+
+  test('matches a blue/green name through its generation suffix', () => {
+    const base = healthy();
+    const rows = [
+      containerRow({ name: `${base.want.name}-g4`, containerId: 'g4id', specHash: base.want.specHash }),
+    ];
+    const observed = [
+      toObserved(raw({ Id: 'g4id', Names: [`/${base.want.name}-g4`], Status: 'Up 1 hour' })),
+    ];
+    expect(diff({ ...base, rows, observed }).drift).toEqual([]);
+  });
+
+  test('gives each replica its own row', () => {
+    // Replicas of one application share a key and a spec hash, differing only by
+    // name. Matching has to consume one row per desired container or the second
+    // replica reads as missing while the first is counted twice.
+    const desired = desiredState({ app: appRow({ replicas: 2 }), worker: workerRow() });
+    expect(desired.containers).toHaveLength(2);
+    const rows = desired.containers.map((c, i) =>
+      containerRow({ id: `row-${i}`, containerId: `c${i}`, name: c.name, specHash: c.specHash }),
+    );
+    const observed = desired.containers.map((c, i) =>
+      toObserved(raw({ Id: `c${i}`, Names: [`/${c.name}`], Status: 'Up 1 hour' })),
+    );
+    expect(diff({ desired: [desired], rows, observed, knownAppIds: new Set(['app-1']) }).drift).toEqual([]);
+  });
+
+  test('reports one replica missing when only one is running', () => {
+    const desired = desiredState({ app: appRow({ replicas: 2 }), worker: workerRow() });
+    const rows = [
+      containerRow({ id: 'row-0', containerId: 'c0', name: desired.containers[0].name, specHash: desired.containers[0].specHash }),
+    ];
+    const observed = [toObserved(raw({ Id: 'c0', Names: [`/${desired.containers[0].name}`] }))];
+    const result = diff({ desired: [desired], rows, observed, knownAppIds: new Set(['app-1']) });
+    expect(result.drift.map((d) => d.kind)).toEqual(['missing']);
   });
 });

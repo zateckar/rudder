@@ -734,8 +734,9 @@ export async function executeApplicationDeploy(
     containers: desired.containers.map((c) => c.planned),
     notes: desired.notes,
   };
-  /** Recreation-forcing intent per container, stored so the reconciler can compare. */
-  const specHashes = new Map(desired.containers.map((c) => [c.key, c.specHash]));
+  // Keyed by name, not by key: the replicas of a single-container application
+  // all share one key and differ only by name.
+  const specHashes = new Map(desired.containers.map((c) => [c.name, c.specHash]));
 
   await warnOnAliasCollisions(app, [...new Set(plan.containers.map((c) => c.aliases[0]))]);
 
@@ -912,7 +913,7 @@ export async function executeApplicationDeploy(
           // What the reconciler compares against. Recorded from the plan that
           // produced this container, so a later pass computing the same intent
           // reads it as current without needing to inspect the container.
-          specHash: specHashes.get(planned.key) ?? null,
+          specHash: specHashes.get(planned.name) ?? null,
           createdAt: new Date(),
           updatedAt: new Date(),
         });
