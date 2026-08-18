@@ -132,6 +132,17 @@ export interface ProvisioningOptions {
     /** Bearer token, already decrypted. */
     token: string;
   };
+  /**
+   * This worker's own credential, planted regardless of routing mode.
+   *
+   * `POST /api/workers/register` needs it to tell which worker is calling — the
+   * shared registration secret says only that the caller is *some* worker, and
+   * the endpoint picks its target from the hostname in the body. It is the same
+   * value as `routingConfig.token` when there is one; it gets its own file
+   * because `traefik-config.env` is deleted on a labels-mode run, and workers in
+   * both modes register.
+   */
+  workerToken?: string;
 }
 
 export function generateProvisioningScript(
@@ -144,6 +155,7 @@ export function generateProvisioningScript(
     oidcConfig,
     sshPort,
     routingConfig,
+    workerToken,
     applyUpdates = true,
   } = options;
   const bouncerKey = bouncerKeyParam || '';
@@ -184,6 +196,7 @@ export function generateProvisioningScript(
     SSH_PORT: String(sshPort && sshPort > 0 ? sshPort : 22),
     CONFIG_ENDPOINT: routingConfig?.endpoint ?? '',
     CONFIG_TOKEN: routingConfig?.token ?? '',
+    WORKER_TOKEN: workerToken ?? '',
     APPLY_UPDATES: applyUpdates ? '1' : '0',
     TRAEFIK_IMAGE_VERSION: PLATFORM_IMAGES.traefik.version,
     CROWDSEC_IMAGE_VERSION: PLATFORM_IMAGES.crowdsec.version,

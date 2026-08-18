@@ -5,6 +5,7 @@ import { users, auditLogs, apiKeys } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { getSessionIdFromCookies, validateSession } from '$lib/auth';
 import { classifyRequest, isAuditable } from '$lib/server/audit';
+import { touchApiKey } from '$lib/server/api-keys';
 import { env } from '$env/dynamic/private';
 import { hashKey } from '$lib/server/encryption';
 
@@ -13,7 +14,10 @@ const securityHeaders: Handle = async ({ event, resolve }) => {
 
   // Basic security headers
   response.headers.set('X-Content-Type-Options', 'nosniff');
-  response.headers.set('X-Frame-Options', 'SAMEORIGIN');
+  // DENY, to agree with `frame-ancestors 'none'` in the CSP below rather than
+  // contradict it. Modern browsers take frame-ancestors and ignore this header;
+  // the two disagreeing only mattered to whoever read them next.
+  response.headers.set('X-Frame-Options', 'DENY');
   response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
   // X-XSS-Protection is deliberately not set: the legacy auditor it enables is
   // removed from current browsers and could itself introduce vulnerabilities.
@@ -26,48 +30,23 @@ const securityHeaders: Handle = async ({ event, resolve }) => {
   }
 
   // Content-Security-Policy
-  // Monaco Editor and xterm.js require 'unsafe-eval' and 'unsafe-inline'.
-  // blob: is needed for Monaco worker scripts.
-  const csp = [
-    "default-src 'self'",
-    "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:",
-    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-    "font-src 'self' data: https://fonts.gstatic.com",
-    "img-src 'self' data: blob:",
-    "connect-src 'self' ws: wss:",
-    "worker-src 'self' blob:",
-    "frame-ancestors 'none'",
-    "base-uri 'self'",
-    "form-action 'self'",
-  ].join('; ');
-  response.headers.set('Content-Security-Policy', csp);
+  //
+  // Pages get theirs from SvelteKit, which is the only thing that can put a
+  // nonce on the inline hydration script it emits — see the `csp` block in
+  // svelte.config.js. Setting it here as well would overwrite that nonce and
+  // break every page, so this only fills in the responses SvelteKit does not
+  // cover: API JSON, the Monaco assets, anything else that is not a rendered
+  // page. None of those load subresources, so they get a policy that permits
+  // nothing at all.
+  if (!response.headers.has('Content-Security-Policy')) {
+    response.headers.set(
+      'Content-Security-Policy',
+      "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+    );
+  }
 
   return response;
 };
-
-/**
- * How stale `lastUsedAt` is allowed to get.
- *
- * This column answers "is this key still in use, and roughly when last?" — a
- * question nobody asks to the second. Writing it on every authenticated request
- * put a database write in front of every `kubectl` call, including the reads,
- * which is the hot path for the Kubernetes-compatible API.
- */
-const API_KEY_TOUCH_INTERVAL_MS = 5 * 60 * 1000;
-
-/** Record that a key was used, at most once per interval. */
-async function touchApiKey(id: string, lastUsedAt: Date | null): Promise<void> {
-  const now = new Date();
-  if (lastUsedAt && now.getTime() - lastUsedAt.getTime() < API_KEY_TOUCH_INTERVAL_MS) {
-    return;
-  }
-  try {
-    await db.update(apiKeys).set({ lastUsedAt: now }).where(eq(apiKeys.id, id));
-  } catch (e) {
-    // Never fail a request because we could not record its timestamp.
-    console.error('[auth] Could not update API key lastUsedAt:', e);
-  }
-}
 
 const authentication: Handle = async ({ event, resolve }) => {
   let userId: string | null = null;

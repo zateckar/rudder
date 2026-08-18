@@ -650,6 +650,21 @@ systemctl daemon-reload
 mkdir -p /etc/rudder
 chmod 700 /etc/rudder
 
+# This worker's own identity, in both routing modes.
+#
+# /api/workers/register picks its target from the hostname in the request body,
+# so the shared registration secret cannot say *which* worker is calling and this
+# token is what does. It lives here rather than in traefik-config.env because
+# that file is removed on a labels-mode run, and workers in both modes register.
+if [ -n "{{WORKER_TOKEN}}" ]; then
+  umask 077
+  cat > /etc/rudder/worker.env <<RWEOF
+WORKER_TOKEN={{WORKER_TOKEN}}
+RWEOF
+  chmod 600 /etc/rudder/worker.env
+  umask 022
+fi
+
 if [ -n "{{CONFIG_ENDPOINT}}" ]; then
   # The token is a bearer credential for an endpoint that describes every route
   # on this worker, so the file it lives in is never world-readable.

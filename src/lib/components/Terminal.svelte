@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { browser } from '$app/environment';
-  
+  import { terminalSubprotocols } from '$lib/terminal-protocol';
+
   export let containerId: string;
   export let tokenEndpoint: string = '/api/terminal/token';
   export let wsEndpoint: string = '/api/terminal/ws';
@@ -119,9 +120,13 @@
     
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
-    const wsUrl = `${protocol}//${host}${wsEndpoint}?sessionId=${sessionId}&containerId=${containerId}&token=${terminalToken}`;
-    
-    ws = new WebSocket(wsUrl);
+    // No credential and no target in the URL. The token goes in the handshake's
+    // subprotocol list (see $lib/terminal-protocol), and the server reads which
+    // container to attach to out of the token rather than from the query string,
+    // so there is nothing left here worth putting in a proxy's access log.
+    const wsUrl = `${protocol}//${host}${wsEndpoint}`;
+
+    ws = new WebSocket(wsUrl, terminalSubprotocols(terminalToken));
     
     ws.onopen = () => {
       console.log('Terminal WebSocket connected');

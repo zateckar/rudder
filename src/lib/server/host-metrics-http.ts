@@ -10,7 +10,9 @@
 import type { HostStats } from './host-metrics';
 import https from 'https';
 import http from 'http';
+import tls from 'tls';
 import { decryptField } from './encryption';
+import { env } from './env';
 
 interface MetricsWorker {
   podmanApiUrl: string;
@@ -41,11 +43,17 @@ export async function getHostStatsHttp(worker: MetricsWorker): Promise<HostStats
   if (!metricsUrl) return null;
 
   try {
+    // Same reasoning as the Podman client: trust the public roots plus the
+    // worker's own CA, and actually verify. This endpoint is reached with the
+    // control plane's client certificate, so accepting any server certificate
+    // meant handing it to whoever answered.
     const agentOptions: https.AgentOptions = {
-      rejectUnauthorized: false,
+      rejectUnauthorized: !env.ALLOW_INSECURE_PODMAN,
     };
 
-    if (worker.podmanCaCert) agentOptions.ca = resolveCert(worker.podmanCaCert);
+    if (worker.podmanCaCert) {
+      agentOptions.ca = [...tls.rootCertificates, resolveCert(worker.podmanCaCert).toString()];
+    }
     if (worker.podmanClientCert) agentOptions.cert = resolveCert(worker.podmanClientCert);
     if (worker.podmanClientKey) {
       const key = decryptField(worker.podmanClientKey);

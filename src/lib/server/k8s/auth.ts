@@ -9,6 +9,7 @@ import { db } from '$lib/db';
 import { apiKeys, teams } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { hashKey } from '$lib/server/encryption';
+import { touchApiKey } from '$lib/server/api-keys';
 
 export interface K8sAuthContext {
   apiKeyId: string;
@@ -29,8 +30,10 @@ export async function authenticateK8s(request: Request): Promise<K8sAuthContext 
   if (!apiKey) return null;
   if (apiKey.expiresAt && apiKey.expiresAt < new Date()) return null;
 
-  // Update lastUsedAt (best-effort, don't block)
-  await db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, apiKey.id));
+  // Update lastUsedAt (best-effort, don't block), at most once per interval.
+  // Every kubectl call comes through here, reads included, so writing on each
+  // one put a database write in front of the whole hot path.
+  await touchApiKey(apiKey.id, apiKey.lastUsedAt);
 
   return {
     apiKeyId: apiKey.id,

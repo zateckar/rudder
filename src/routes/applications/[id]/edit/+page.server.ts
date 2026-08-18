@@ -2,10 +2,32 @@ import { redirect, fail } from '@sveltejs/kit';
 import { db, safeWorkerColumns, safeUserColumns } from '$lib/db';
 import { applications, users, workers, teams, teamMembers, volumes, stacks } from '$lib/db/schema';
 import { eq, inArray, or, isNull } from 'drizzle-orm';
+import { canAccessApplication, stackAcceptsTeam } from '$lib/server/auth';
 import { assertDomainAvailable } from '$lib/server/domains';
 import { ALLOWED_DOMAINS_UNSUPPORTED } from '$lib/server/oidc';
 import { DEFAULT_HEALTH_TIMEOUT_S } from '$lib/server/generations';
 import { imageReferenceError } from '$lib/server/image-reference';
+
+/**
+ * Volume-registry ids this application's `volumes` column already names.
+ *
+ * Tolerates the column being absent or malformed the same way `singleMountIntents`
+ * does — a form that cannot be rendered is worse than one missing an option.
+ */
+function referencedVolumeIds(raw: string | null | undefined): Set<string> {
+  const ids = new Set<string>();
+  if (!raw) return ids;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return ids;
+    for (const entry of parsed) {
+      if (entry && typeof entry.volumeId === 'string') ids.add(entry.volumeId);
+    }
+  } catch {
+    // Same as elsewhere: unparseable means nothing to carry over.
+  }
+  return ids;
+}
 
 export const load = async ({ params, cookies }: { params: { id: string }; cookies: any }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -17,9 +39,13 @@ export const load = async ({ params, cookies }: { params: { id: string }; cookie
   if (!userId) throw redirect(303, '/login');
 
   const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
-  const app = await db.select().from(applications).where(eq(applications.id, params.id)).get();
 
-  if (!app) throw redirect(303, '/applications');
+  // Membership decides this, not existence. Loading the row on an id alone put
+  // another team's manifest, plaintext environment and domain into the SSR
+  // payload for anyone who could guess an application id.
+  const access = await canAccessApplication(cookies, params.id);
+  if (!access) throw redirect(303, '/applications');
+  const app = access.application;
 
   let userTeams;
   if (currentUser?.role === 'admin') {
@@ -39,18 +65,33 @@ export const load = async ({ params, cookies }: { params: { id: string }; cookie
 
   const allWorkers = await db.select(safeWorkerColumns).from(workers).all();
 
-  // Load available volumes for the volume registry dropdown
+  // Load available volumes for the volume registry dropdown.
+  //
+  // This used to include every teamless volume for every member, which listed
+  // the names and mount paths of volumes belonging to nobody to anyone who
+  // opened any edit form. Teamless volumes are admin-only now (see
+  // /api/volumes/[id]), so the only reason to show one to a member is that this
+  // application already mounts it — dropping it from the options would silently
+  // remove the mount the next time anyone saved the form.
   let availableVolumes;
   if (currentUser?.role === 'admin') {
     availableVolumes = await db.select().from(volumes).all();
   } else {
     const teamIds = userTeams.map((t: { id: string }) => t.id);
-    availableVolumes =
+    const referencedIds = referencedVolumeIds(app.volumes);
+
+    const candidates =
       teamIds.length > 0
-        ? await db.select().from(volumes)
-            .where(or(inArray(volumes.teamId, teamIds), isNull(volumes.teamId)))
-            .all()
-        : await db.select().from(volumes).where(isNull(volumes.teamId)).all();
+        ? await db.select().from(volumes).where(inArray(volumes.teamId, teamIds)).all()
+        : [];
+    const known = new Set(candidates.map((v) => v.id));
+
+    const stillReferenced = [...referencedIds].filter((id) => !known.has(id));
+    const carriedOver = stillReferenced.length > 0
+      ? await db.select().from(volumes).where(inArray(volumes.id, stillReferenced)).all()
+      : [];
+
+    availableVolumes = [...candidates, ...carriedOver];
   }
 
   // Parse the manifest for single containers
@@ -96,15 +137,13 @@ export const actions = {
     request: Request;
     cookies: any;
   }) => {
-    const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-    const sessionId = getSessionIdFromCookies(cookies);
-    if (!sessionId || !(await validateSession(sessionId))) {
-      return fail(401, { error: 'Unauthorized' });
-    }
-
-    const app = await db.select().from(applications).where(eq(applications.id, params.id)).get();
-    if (!app) return fail(404, { error: 'Application not found' });
+    // Same rule as the loader: the caller must already have access to this
+    // application. Without it any authenticated user could rewrite any
+    // application's manifest, environment, domain and worker — and reassign it
+    // to a team of their own, which hands them every other permission on it.
+    const access = await canAccessApplication(cookies, params.id);
+    if (!access) return fail(404, { error: 'Application not found' });
+    const { ctx, application: app } = access;
 
     const formData = await request.formData();
 
@@ -275,13 +314,39 @@ export const actions = {
 
     const stackId = formData.get('stackId')?.toString() || null;
 
+    // Moving an application between teams is an admin action: it transfers
+    // every permission on it, so a member being able to do it would be a way to
+    // pull another team's workload into their own. The form still submits the
+    // field for admins; for everyone else the current owner stands.
+    let nextTeamId = app.teamId;
+    if (teamId !== app.teamId) {
+      if (ctx.user.role !== 'admin') {
+        return fail(403, { error: 'Only admins can move an application to another team' });
+      }
+      const target = await db.select().from(teams).where(eq(teams.id, teamId)).get();
+      if (!target) return fail(400, { error: 'Target team not found' });
+      nextTeamId = teamId;
+    }
+
+    // The stack is submitted too, and it scopes bulk deploy/stop/restart in
+    // /api/stacks/[id] — so an application parked in another team's stack is one
+    // that team can act on. Only a stack owned by the same team is accepted.
+    //
+    // Checked only when the value is actually changing. A row that already points
+    // at a stack from before this rule — or one whose application has no team at
+    // all, which the schema permits — must stay editable, or the form that could
+    // fix it is the form that refuses to save.
+    if (stackId && stackId !== app.stackId && !(await stackAcceptsTeam(stackId, nextTeamId))) {
+      return fail(400, { error: 'That stack does not belong to this application\'s team' });
+    }
+
     await db
       .update(applications)
       .set({
         name,
         description,
         workerId,
-        teamId,
+        teamId: nextTeamId,
         domain,
         manifest,
         environment,

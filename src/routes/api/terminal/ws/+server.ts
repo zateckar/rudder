@@ -24,8 +24,10 @@ export function GET({ request }: { request: Request }) {
   }
 
   return new Response(
-    'This endpoint accepts WebSocket connections only. ' +
-      'Obtain a token from POST /api/terminal/token, then connect with ?token=…',
+    'This endpoint accepts WebSocket connections only. Obtain a token from ' +
+      'POST /api/terminal/token and offer it as a subprotocol — ' +
+      'Sec-WebSocket-Protocol: rudder.terminal.v1, rudder.token.<token>. ' +
+      'It is deliberately not read from the query string, which proxies log.',
     { status: 426, headers: { Upgrade: 'websocket' } },
   );
 }

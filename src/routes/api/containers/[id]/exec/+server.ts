@@ -5,6 +5,17 @@ import { authErrorResponse, requireContainerAccess } from '$lib/server/auth';
 const SHELL = '/bin/sh';
 
 /**
+ * The shell named as a whole path, not as the beginning of a longer one.
+ *
+ * A plain substring test matched `/bin/shx` as well, so `cat /bin/shx` — an
+ * ordinary command failing for an ordinary reason — was read as "this image has
+ * no shell", ran a second time as argv, and reported `shell: null` for an image
+ * that has one. The path may be quoted or followed by a colon, so the boundary
+ * is "not another path character".
+ */
+const SHELL_PATH = /\/bin\/sh(?![\w./-])/;
+
+/**
  * Whether the shell itself was what could not be executed.
  *
  * Podman reports a missing executable in the exec's output with a non-zero exit
@@ -17,7 +28,12 @@ function shellIsMissing(result: { stdout: string; stderr: string; exitCode: numb
   // Both streams: the runtime reports this on stderr, but a TTY-less exec that
   // answered without frame headers lands in stdout.
   const output = `${result.stdout}\n${result.stderr}`;
-  if (!output.includes(SHELL)) return false;
+  // A line beginning `sh:` or `/bin/sh:` is the shell itself talking, which
+  // proves it is there: `/bin/sh: 1: /app/start: not found` means the script is
+  // missing, not the interpreter. Re-running that as argv would execute the
+  // command a second time to no purpose.
+  if (/(?:^|\n)\s*(?:\/bin\/)?sh:/.test(output)) return false;
+  if (!SHELL_PATH.test(output)) return false;
   return /executable file .*not found|no such file or directory/i.test(output);
 }
 

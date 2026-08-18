@@ -183,12 +183,13 @@ The GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatical
 | `ADMIN_PASSWORD` | **Yes** (production) | `admin` (dev only) | Password for the auto-created `admin` account. Set before first boot; ignored once the user exists. |
 | `PUBLIC_URL` | **Yes** | `http://localhost:7244` | External URL of the app — used in OIDC redirects and links. |
 | `ORIGIN` | **Yes** (behind a proxy) | — | Browser-facing URL, used for CSRF origin checks. |
+| `ADDRESS_HEADER` | Recommended (behind a proxy) | — | Header carrying the real client IP, e.g. `X-Forwarded-For`. Without it, a deployment that declares itself proxied (`PROTOCOL_HEADER` or `HOST_HEADER` set) sees every request as coming from the proxy, so the per-address login limit cannot distinguish callers and is skipped (a warning is logged once); the per-username limit still applies. Only set this if the proxy **overwrites** the header — otherwise a client picks its own rate-limit bucket. |
 | `ENCRYPTION_KEY` | No | auto-generated | Min 32-char string for secret encryption (AES-256-GCM). Auto-generated and persisted on first boot. A shorter value is rejected at startup. |
 | `SESSION_MAX_AGE` | No | `604800` (7 days) | Session lifetime in seconds. |
 | `DATABASE_URL` | No | `./data/rudder.db` | SQLite database path. Accepts a bare path or `file:` URL; generated secrets and `known_hosts` are stored alongside it. |
 | `ALLOWED_HOST_MOUNT_PREFIXES` | No | — | Comma-separated host directories applications may bind-mount. Empty disables host mounts. `/proc`, `/etc`, `/dev`, `/usr` and similar are always denied. |
-| `ALLOW_INSECURE_PODMAN` | No | `false` | Permit talking to a worker's Podman API without mTLS. Development only. |
-| `WORKER_REGISTRATION_SECRET` | No | — | Shared secret for worker self-registration. |
+| `ALLOW_INSECURE_PODMAN` | No | `false` | Permit talking to a worker's Podman API without mTLS, **and** skip verification of the worker's TLS certificate. Development only — with this set, anything on the network path can impersonate a worker and drive its root-equivalent API. |
+| `WORKER_REGISTRATION_SECRET` | No | — | Enables worker self-registration (`POST /api/workers/register`). Shared by every worker, so it only switches the endpoint on: the request must *also* carry the worker's own `configToken` as `workerToken`, which is what identifies which worker is calling. |
 | `OIDC_GOOGLE_CLIENT_ID` | No | — | Google OAuth client ID. |
 | `OIDC_GOOGLE_CLIENT_SECRET` | No | — | Google OAuth client secret. |
 | `OIDC_GITHUB_CLIENT_ID` | No | — | GitHub OAuth client ID. |

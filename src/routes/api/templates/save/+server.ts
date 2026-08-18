@@ -2,16 +2,9 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { applicationTemplates, applications } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
+import { canAccessApplication } from '$lib/server/auth';
 
 export const POST = async ({ request, cookies }: { request: Request; cookies: any }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId || !(await validateSession(sessionId))) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  const userId = await validateSession(sessionId);
   const formData = await request.formData();
 
   const appId = formData.get('appId')?.toString();
@@ -22,10 +15,15 @@ export const POST = async ({ request, cookies }: { request: Request; cookies: an
     return json({ error: 'Application and template name are required' }, { status: 400 });
   }
 
-  const app = await db.select().from(applications).where(eq(applications.id, appId)).get();
-  if (!app) {
+  // A template is a copy of the application's manifest, environment and volumes,
+  // so making one requires access to the application being copied. Checking only
+  // for a session let any authenticated user snapshot any team's configuration.
+  const access = await canAccessApplication(cookies, appId);
+  if (!access) {
     return json({ error: 'Application not found' }, { status: 404 });
   }
+  const { ctx, application: app } = access;
+  const userId = ctx.user.id;
 
   if (!app.teamId) {
     return json({ error: 'Application must belong to a team' }, { status: 400 });
@@ -55,7 +53,7 @@ export const POST = async ({ request, cookies }: { request: Request; cookies: an
       environment: app.environment,
       volumes: app.volumes,
       restartPolicy: app.restartPolicy,
-      createdBy: userId || undefined,
+      createdBy: userId,
       createdAt: new Date(),
       updatedAt: new Date(),
     });

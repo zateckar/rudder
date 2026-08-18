@@ -250,6 +250,40 @@ describe('generateProvisioningScript', () => {
     expect(script).toContain('{{.Status}}');
   });
 
+  describe('worker identity token', () => {
+    // The credential /api/workers/register uses to tell which worker is calling.
+    // It has to be planted in both routing modes: that endpoint serves both, and
+    // only minting it for http-mode workers left every default worker unable to
+    // ever register.
+    test('is written in labels mode, where there is no routing config at all', () => {
+      const labels = generateProvisioningScript('worker-1', {
+        baseDomain: 'apps.example.com',
+        workerToken: 'deadbeef',
+      });
+
+      expect(labels).toContain('WORKER_TOKEN=deadbeef');
+      expect(labels).toContain('/etc/rudder/worker.env');
+      // And not via traefik-config.env, which a labels-mode run deletes.
+      expect(labels).toContain('rm -f /etc/rudder/traefik-config.env');
+    });
+
+    test('is written in http mode too, alongside the routing config', () => {
+      const http = generateProvisioningScript('worker-1', {
+        baseDomain: 'apps.example.com',
+        workerToken: 'deadbeef',
+        routingConfig: { endpoint: 'https://rudder.example.com/x', token: 'deadbeef' },
+      });
+
+      expect(http).toContain('WORKER_TOKEN=deadbeef');
+      expect(http).toContain('CONFIG_TOKEN=deadbeef');
+    });
+
+    test('is kept out of a world-readable file', () => {
+      const labels = generateProvisioningScript('worker-1', { workerToken: 'deadbeef' });
+      expect(labels).toContain('chmod 600 /etc/rudder/worker.env');
+    });
+  });
+
   test('embeds every required config blob', () => {
     // A missing template variable renders as an empty string, which would
     // silently produce `echo "" | base64 -d > <file>` and an empty config.

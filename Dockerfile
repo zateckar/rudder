@@ -58,6 +58,16 @@ RUN mkdir -p /app/data && chown rudder:rudder /app/data
 #   ORIGIN=https://rudder.example.com
 # Only add HOST_HEADER=X-Forwarded-Host if you serve several hostnames AND a
 # trusted proxy strips client-supplied values.
+#
+# ADDRESS_HEADER is not set here either, for the same reason: a client-supplied
+# X-Forwarded-For would let an attacker pick their own rate-limit bucket. But
+# because PROTOCOL_HEADER below declares this deployment proxied, every request
+# appears to come from the proxy, so the login per-address limit cannot tell
+# callers apart — the app detects that from these two variables (never from the
+# request, which the caller controls), logs it once, and falls back to the
+# per-username limit rather than locking out every user at once. Set
+# ADDRESS_HEADER=X-Forwarded-For once your proxy is known to *overwrite* the
+# header rather than append to whatever the client sent.
 ENV PROTOCOL_HEADER=X-Forwarded-Proto
 
 # Switch to non-root user

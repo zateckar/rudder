@@ -93,8 +93,10 @@ const envSchema = z.object({
    */
   ALLOWED_HOST_MOUNT_PREFIXES: z.string().default(''),
   /**
-   * Allow talking to a worker's Podman API without mTLS.  The API is
-   * root-equivalent on the worker, so this is for local development only.
+   * Allow talking to a worker's Podman API without mTLS, *and* stop verifying the
+   * certificate the worker presents.  The API is root-equivalent on the worker
+   * and an unverified server certificate means anything on the network path can
+   * answer for it, so this is for local development only.
    */
   ALLOW_INSECURE_PODMAN: z
     .enum(['true', 'false'])

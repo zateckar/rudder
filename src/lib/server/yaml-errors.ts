@@ -13,8 +13,32 @@
  * and note the first line whose addition breaks it.
  */
 
-/** How many lines a document may have before locating stops being worth it. */
+/**
+ * A first, cheap cut, before the document's width is even looked at.
+ *
+ * Rarely the binding limit — `MAX_LOCATE_CHARS` below bites first for anything
+ * but a document of thousands of near-empty lines — but it costs one comparison
+ * and bounds the *number* of parser calls, which the character budget only
+ * bounds indirectly. Call count matters on its own: 1000 parses of a 40 kB
+ * document measured slower than 500 parses of a 100 kB one.
+ */
 const MAX_LINES_TO_LOCATE = 2000;
+
+/**
+ * How many characters the scan below may hand to the parser in total.
+ *
+ * The search is quadratic: one parse per line, over a prefix that grows each
+ * time, so the work is roughly `lines × length / 2` — not `length`. A line cap
+ * alone does not bound that, because a document under it can still be wide: a
+ * 2000-line manifest failing only on its last line measured just over a second
+ * of synchronous parsing, and Bun serves every other request on the same thread.
+ *
+ * 4 M measures around 50 ms, and still locates the failure in any manifest a
+ * person wrote by hand — roughly 500 lines of ordinary width, or a much wider
+ * document with fewer. Past that the message says what went wrong without saying
+ * where, which is what it did before this module existed.
+ */
+const MAX_LOCATE_CHARS = 4_000_000;
 
 /** Strip the parser's own prefix so a caller can add its own context once. */
 export function bareYamlMessage(error: unknown): string {
@@ -34,6 +58,9 @@ export function bareYamlMessage(error: unknown): string {
 export function firstFailingLine(manifest: string): number | null {
   const lines = manifest.split('\n');
   if (lines.length > MAX_LINES_TO_LOCATE) return null;
+  // Worst case is every line parsed against a prefix averaging half the
+  // document, which is what this bounds.
+  if ((lines.length * manifest.length) / 2 > MAX_LOCATE_CHARS) return null;
 
   for (let i = 0; i < lines.length; i++) {
     const prefix = lines.slice(0, i + 1).join('\n');

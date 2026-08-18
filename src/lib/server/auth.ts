@@ -1,6 +1,6 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
-import { users, teamMembers, applications, workers, teams, containers } from '$lib/db/schema';
+import { users, teamMembers, applications, workers, teams, containers, stacks } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import type { Cookies } from '@sveltejs/kit';
 import { getSessionIdFromCookies, validateSession } from '$lib/auth';
@@ -145,6 +145,43 @@ export async function canAccessApplication(
   if (!membership) return null;
 
   return { ctx, application };
+}
+
+/**
+ * Whether this caller may place a resource in `teamId`.
+ *
+ * Form actions name their owning team in the submitted body.  The dropdown that
+ * offers it is scoped to the caller's teams, but the field is not, so this is what
+ * stands between "pick one of your teams" and "pick any team in the
+ * installation" — the latter lets a stranger inject an application into another
+ * team, where it consumes their quota, claims a domain and gets deployed on their
+ * behalf.
+ *
+ * Returns a boolean rather than throwing because the callers are form actions
+ * answering with `fail()`, not JSON endpoints.
+ */
+export async function canWriteToTeam(ctx: AuthContext, teamId: string): Promise<boolean> {
+  if (ctx.user.role === 'admin') return true;
+  return isTeamMember(ctx.user.id, teamId);
+}
+
+/**
+ * Whether `stackId` is a stack that may hold an application owned by `teamId`.
+ *
+ * A stack is scoped to its own team everywhere else — `/api/stacks/[id]` lists
+ * every application in it and deploys, stops and restarts them in bulk.  So an
+ * application sitting in another team's stack hands that team control of it,
+ * which is why this is required of admins too and not only of members: it is a
+ * coherence rule about the data, not a permission check on the caller.
+ */
+export async function stackAcceptsTeam(stackId: string, teamId: string | null): Promise<boolean> {
+  if (!teamId) return false;
+  const stack = await db
+    .select({ teamId: stacks.teamId })
+    .from(stacks)
+    .where(eq(stacks.id, stackId))
+    .get();
+  return !!stack && stack.teamId === teamId;
 }
 
 export async function canAccessWorker(

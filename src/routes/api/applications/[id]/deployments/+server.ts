@@ -3,6 +3,7 @@ import { db } from '$lib/db';
 import { applications, deployments, users } from '$lib/db/schema';
 import { eq, desc } from 'drizzle-orm';
 import { executeFastRollback, fastRollbackTargets } from '$lib/server/deploy';
+import { canAccessApplication } from '$lib/server/auth';
 
 /** Read the notes column, tolerating rows written before it existed. */
 function parseNotes(raw: string | null): string[] {
@@ -16,15 +17,10 @@ function parseNotes(raw: string | null): string[] {
 }
 
 export async function GET({ params, cookies }: { params: { id: string }; cookies: any }) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId || !(await validateSession(sessionId))) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  const app = await db.select().from(applications).where(eq(applications.id, params.id)).get();
-  if (!app) return json({ error: 'Application not found' }, { status: 404 });
+  // Deploy history names images, digests and failure messages, so it is scoped
+  // to the owning team like the application itself.
+  const access = await canAccessApplication(cookies, params.id);
+  if (!access) return json({ error: 'Application not found' }, { status: 404 });
 
   const rows = await db.select({
     id: deployments.id,
@@ -75,13 +71,14 @@ export async function GET({ params, cookies }: { params: { id: string }; cookies
 }
 
 export async function POST({ params, request, cookies }: { params: { id: string }; request: Request; cookies: any }) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  // A rollback rewrites the application's manifest, environment and volumes and
+  // can restart its containers, so it is authorized before any of that happens.
+  // Checking only for a session let any authenticated user roll back any team's
+  // application: the internal deploy call below would refuse, but by then the
+  // row had already been overwritten and the fast path may already have run.
+  const access = await canAccessApplication(cookies, params.id);
+  if (!access) return json({ error: 'Application not found' }, { status: 404 });
+  const userId = access.ctx.user.id;
 
   const body = await request.json();
   const { deploymentId } = body;
@@ -96,10 +93,6 @@ export async function POST({ params, request, cookies }: { params: { id: string 
   if (source.applicationId !== params.id) {
     return json({ error: 'Deployment does not belong to this application' }, { status: 400 });
   }
-
-  // Load the application
-  const app = await db.select().from(applications).where(eq(applications.id, params.id)).get();
-  if (!app) return json({ error: 'Application not found' }, { status: 404 });
 
   // Update the application record with the old deployment's config
   await db.update(applications)

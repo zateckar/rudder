@@ -16,6 +16,7 @@ import { getRestPodmanClient } from '$lib/server/podman-client';
 import { executeSSHCommand, type SSHConnectionConfig } from '$lib/server/ssh';
 import { authenticateK8s } from '$lib/server/k8s/auth';
 import { podNameOf } from '$lib/server/k8s/mapper';
+import { TERMINAL_SUBPROTOCOL, tokenFromSubprotocols } from '$lib/terminal-protocol';
 import {
   CHANNEL,
   frame,
@@ -41,8 +42,14 @@ function toFetchRequest(request: IncomingMessage, url: URL): Request {
 
 registerWsRoute('terminal', {
   match: (url) => url.pathname === '/api/terminal/ws',
-  handle: async (ws, _request, url) => {
-    const authToken = url.searchParams.get('token');
+  // The browser only accepts the handshake if the server echoes one of the
+  // subprotocols it offered, so this has to be answered even though the value
+  // carries no meaning beyond "understood".
+  selectProtocol: (offered) => (offered.has(TERMINAL_SUBPROTOCOL) ? TERMINAL_SUBPROTOCOL : false),
+  handle: async (ws, request, url) => {
+    // Read from the handshake header, not the query string: a URL is logged by
+    // every proxy in front of this, and this token opens a shell.
+    const authToken = tokenFromSubprotocols(request.headers['sec-websocket-protocol']);
     if (!authToken) {
       ws.close(1008, 'Missing token');
       return;

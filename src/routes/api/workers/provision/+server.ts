@@ -163,13 +163,29 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
               await db.update(workers).set({ status: 'error' }).where(eq(workers.id, workerId));
               return json({ error: unreachable }, { status: 400 });
             }
-            // Re-provisioning rotates the token: the old one may be on a host
-            // that is being rebuilt, and nothing else depends on its value.
-            const token = generateConfigToken();
-            await db.update(workers)
-              .set({ configToken: encryptField(token) })
-              .where(eq(workers.id, workerId));
-            routingConfig = { endpoint: configEndpointUrl(worker.id, env.PUBLIC_URL), token };
+          }
+
+          // Minted for every worker, not only http-mode ones.
+          //
+          // It started life as the bearer credential for the routing-config
+          // endpoint, which only http-mode workers fetch. But it is now also what
+          // /api/workers/register uses to tell which worker is calling, and that
+          // endpoint serves both modes — issuing it conditionally left every
+          // worker in the default `labels` mode unable to self-register, with
+          // re-provisioning no help because it would not mint one either.
+          //
+          // Re-provisioning rotates it: the old one may be on a host that is
+          // being rebuilt, and nothing else depends on its value.
+          const workerToken = generateConfigToken();
+          await db.update(workers)
+            .set({ configToken: encryptField(workerToken) })
+            .where(eq(workers.id, workerId));
+
+          if (worker.routingMode === 'http') {
+            routingConfig = {
+              endpoint: configEndpointUrl(worker.id, env.PUBLIC_URL),
+              token: workerToken,
+            };
           }
 
           const script = generateProvisioningScript(worker.name, {
@@ -178,6 +194,7 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
             oidcConfig: workerOidcConfig,
             sshPort: worker.sshPort,
             routingConfig,
+            workerToken,
             applyUpdates,
           });
           

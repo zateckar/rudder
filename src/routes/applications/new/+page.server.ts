@@ -7,6 +7,7 @@ import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
 import { ALLOWED_DOMAINS_UNSUPPORTED } from '$lib/server/oidc';
 import { imageReferenceError } from '$lib/server/image-reference';
 import { checkApplicationQuota } from '$lib/server/quota';
+import { canWriteToTeam, getAuthUser, stackAcceptsTeam } from '$lib/server/auth';
 
 export const load = async ({ cookies }: { cookies: any }) => {
   const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
@@ -76,14 +77,11 @@ export const load = async ({ cookies }: { cookies: any }) => {
 
 export const actions = {
   default: async ({ request, cookies }: { request: Request; cookies: any }) => {
-    const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-    const sessionId = getSessionIdFromCookies(cookies);
-    if (!sessionId || !(await validateSession(sessionId))) {
+    const ctx = await getAuthUser(cookies);
+    if (!ctx) {
       return fail(401, { error: 'Unauthorized' });
     }
-
-    const userId = await validateSession(sessionId);
+    const userId = ctx.user.id;
     const formData = await request.formData();
 
     const name = formData.get('name')?.toString();
@@ -99,6 +97,20 @@ export const actions = {
 
     if (!name || !teamId) {
       return fail(400, { error: 'Missing required fields (name, team)' });
+    }
+
+    // The team is submitted, not derived, and the loader above only scopes the
+    // *dropdown*. Without this, any authenticated user could name any team in the
+    // installation and have an application created inside it — spending that
+    // team's quota, claiming a domain and deploying on their workers.
+    if (!(await canWriteToTeam(ctx, teamId))) {
+      return fail(403, { error: 'You are not a member of that team' });
+    }
+
+    // Same reasoning for the stack: it scopes bulk deploy/stop/restart, so an
+    // application in another team's stack is an application that team can act on.
+    if (stackId && !(await stackAcceptsTeam(stackId, teamId))) {
+      return fail(400, { error: 'That stack does not belong to this team' });
     }
 
     // Validate name format (lowercase, alphanumeric, hyphens only)

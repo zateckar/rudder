@@ -25,6 +25,21 @@ export function podmanErrorResponse(error: unknown, fallback = 'Podman request f
   return json({ error: message || fallback }, { status: 500 });
 }
 
+/**
+ * Workers already warned about, so the notice does not repeat per request.
+ *
+ * A client is built for every terminal frame, exec and metrics poll, so warning
+ * on each call buries the log it is meant to stand out in — and it is the same
+ * sentence about the same worker every time.
+ */
+const warnedInsecure = new Set<string>();
+
+function warnInsecureOnce(workerId: string, message: string): void {
+  if (warnedInsecure.has(workerId)) return;
+  warnedInsecure.add(workerId);
+  console.warn(message);
+}
+
 export function getRestPodmanClient(
   worker: typeof workers.$inferSelect
 ): PodmanClient {
@@ -36,11 +51,23 @@ export function getRestPodmanClient(
     worker.podmanCaCert && worker.podmanClientCert && worker.podmanClientKey;
 
   if (hasMtls) {
+    if (env.ALLOW_INSECURE_PODMAN) {
+      warnInsecureOnce(
+        `verify:${worker.id}`,
+        `[podman] Not verifying the server certificate of worker "${worker.name}" because ` +
+          `ALLOW_INSECURE_PODMAN is set. Anything on the network path can impersonate it.`,
+      );
+    }
     return createPodmanClient({
       apiUrl: worker.podmanApiUrl,
       caCert: worker.podmanCaCert!,
       clientCert: worker.podmanClientCert!,
       clientKey: decryptField(worker.podmanClientKey!),
+      // Verification is on by default. The escape hatch is the same flag that
+      // already governs talking to a worker with no mTLS at all, so an operator
+      // bringing up a worker whose Traefik has not yet obtained a certificate
+      // has one switch to reason about rather than two.
+      insecureSkipVerify: env.ALLOW_INSECURE_PODMAN,
     });
   }
 
@@ -49,7 +76,8 @@ export function getRestPodmanClient(
   // remote-control endpoint, so this now fails closed unless an operator has
   // explicitly opted in (local/dev workers).
   if (env.ALLOW_INSECURE_PODMAN) {
-    console.warn(
+    warnInsecureOnce(
+      `plaintext:${worker.id}`,
       `[podman] Worker "${worker.name}" has no mTLS credentials — connecting over plain HTTP ` +
         `because ALLOW_INSECURE_PODMAN is set. Do not use this in production.`,
     );

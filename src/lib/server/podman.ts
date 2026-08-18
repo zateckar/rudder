@@ -1,5 +1,6 @@
 import https from 'https';
 import http from 'http';
+import tls from 'tls';
 import { readFileSync, existsSync } from 'fs';
 import { URL } from 'url';
 import { executeSSHCommand, testSSHConnection, type SSHConnectionConfig } from './ssh';
@@ -107,6 +108,15 @@ export interface PodmanConfig {
   caCert?: string;
   clientCert?: string;
   clientKey?: string;
+  /**
+   * Skip verification of the worker's *server* certificate.
+   *
+   * Only for a worker whose Traefik is still serving its self-signed default
+   * certificate — before ACME has issued one — and only because the operator
+   * asked for it. See `getRestPodmanClient`, which is the only caller that sets
+   * it, from ALLOW_INSECURE_PODMAN.
+   */
+  insecureSkipVerify?: boolean;
 }
 
 export interface SSHPodmanConfig {
@@ -295,30 +305,29 @@ export class PodmanClient {
         keepAlive: true,
       };
 
-      if (config.caCert) {
-        httpsAgentOptions.ca = resolveCert(config.caCert);
-      }
-
       if (config.clientCert && config.clientKey) {
         httpsAgentOptions.cert = resolveCert(config.clientCert);
         httpsAgentOptions.key = resolveCert(config.clientKey);
-        // Use CA cert if provided (for verifying the server's cert)
-        // When caCert is our own CA, accept only server certs signed by our CA
-        // When no caCert, accept any server cert (but client still authenticates with cert)
-        if (config.caCert) {
-          httpsAgentOptions.ca = resolveCert(config.caCert);
-          // The server cert may be a Traefik default cert until Let's Encrypt issues one.
-          // We still authenticate the client with the client cert (mTLS).
-          httpsAgentOptions.rejectUnauthorized = false;
-        } else {
-          httpsAgentOptions.rejectUnauthorized = false;
-        }
-      } else if (config.caCert) {
-        httpsAgentOptions.ca = resolveCert(config.caCert);
-        httpsAgentOptions.rejectUnauthorized = true;
-      } else {
-        httpsAgentOptions.rejectUnauthorized = false;
       }
+
+      // Trust the public roots *and* the worker's CA.
+      //
+      // Node's `ca` replaces the default store rather than adding to it, and the
+      // CA provisioning generates signs only the control plane's client
+      // certificate — the server side is Traefik with an ACME certificate. So
+      // pinning `ca` to the worker CA alone would reject every real worker,
+      // which is why this previously turned verification off instead. Trusting
+      // both means an ACME certificate verifies against the public roots and a
+      // Rudder-issued one against the private CA.
+      httpsAgentOptions.ca = config.caCert
+        ? [...tls.rootCertificates, resolveCert(config.caCert).toString()]
+        : undefined;
+
+      // Presenting a client certificate authenticates *us* to the worker; it
+      // says nothing about who answered. Without this the pinned CA was
+      // decorative: anything on the path to the worker could terminate the
+      // connection and drive its root-equivalent Podman API.
+      httpsAgentOptions.rejectUnauthorized = !config.insecureSkipVerify;
 
       this.httpsAgent = new https.Agent(httpsAgentOptions);
     } else {

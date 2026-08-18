@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '$lib/db';
 import { users, oidcConfig, auditLogs } from '$lib/db/schema';
 import { verifyPassword, createSession, setSessionCookie } from '$lib/auth';
-import { consume, reset } from '$lib/server/rate-limit';
+import { addressIsDistinguishing, consume, reset } from '$lib/server/rate-limit';
 
 /** Attempts allowed per identity and per source address before lockout. */
 const PER_USER = { limit: 5, windowMs: 15 * 60_000, blockMs: 15 * 60_000 };
@@ -60,7 +60,16 @@ export const actions = {
     const ip = getClientAddress();
 
     // Throttle before touching bcrypt so a flood costs the server nothing.
-    const ipLimit = consume(`login:ip:${ip}`, PER_IP);
+    //
+    // The per-address bucket is skipped when the address cannot tell callers
+    // apart — behind a proxy with no ADDRESS_HEADER it is the proxy's address for
+    // everyone, so enforcing it would let one attacker lock out the whole
+    // installation. That is read from the deployment's configuration, never from
+    // the request, or the caller would be the one deciding. The per-username
+    // bucket is keyed on something the request actually carries and is unaffected.
+    const ipLimit = addressIsDistinguishing()
+      ? consume(`login:ip:${ip}`, PER_IP)
+      : { allowed: true, retryAfterSeconds: 0, remaining: PER_IP.limit };
     const userLimit = consume(`login:user:${username.toLowerCase()}`, PER_USER);
 
     if (!ipLimit.allowed || !userLimit.allowed) {

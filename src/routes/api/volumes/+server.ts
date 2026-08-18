@@ -62,18 +62,24 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
     return json({ error: 'Name and containerPath are required' }, { status: 400 });
   }
 
+  // Every volume must have an owning team. A teamless volume is invisible in the
+  // listing (which filters on membership) but was readable, editable and
+  // deletable by every authenticated user, because the per-volume checks skip
+  // membership when there is no team to check against.
+  if (!teamId) {
+    return json({ error: 'teamId is required' }, { status: 400 });
+  }
+
   // Verify user has access to the team
-  if (teamId) {
-    const user = await db.select().from(users).where(eq(users.id, userId)).get();
-    if (user?.role !== 'admin') {
-      const { and } = await import('drizzle-orm');
-      const membership = await db.select().from(teamMembers)
-        .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, userId)))
-        .get();
-      
-      if (!membership) {
-        return json({ error: 'Access denied to this team' }, { status: 403 });
-      }
+  const user = await db.select().from(users).where(eq(users.id, userId)).get();
+  if (user?.role !== 'admin') {
+    const { and } = await import('drizzle-orm');
+    const membership = await db.select().from(teamMembers)
+      .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, userId)))
+      .get();
+
+    if (!membership) {
+      return json({ error: 'Access denied to this team' }, { status: 403 });
     }
   }
 
@@ -83,7 +89,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
   await db.insert(volumes).values({
     id: volumeId,
     name,
-    teamId: teamId || null,
+    teamId,
     workerId: workerId || null,
     containerPath,
     sizeLimit: sizeLimit || null,

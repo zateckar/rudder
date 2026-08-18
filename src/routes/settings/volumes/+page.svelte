@@ -25,7 +25,7 @@
         body: JSON.stringify({
           name: formData.name,
           containerPath: formData.containerPath,
-          teamId: formData.teamId || null,
+          teamId: formData.teamId,
           workerId: formData.workerId || null,
           sizeLimit: formData.sizeLimit ? parseInt(formData.sizeLimit) : null,
         }),
@@ -118,13 +118,24 @@
             />
           </div>
           <div class="form-group">
-            <label for="teamId">Team</label>
-            <select id="teamId" bind:value={formData.teamId}>
-              <option value="">No team</option>
+            <label for="teamId">Team *</label>
+            <!--
+              No "No team" option: a volume with no owning team is invisible in
+              this listing (which filters on membership) and reachable only by an
+              admin, so offering it here produced a volume nobody could find. The
+              API refuses one too.
+            -->
+            <select id="teamId" bind:value={formData.teamId} required>
+              <option value="" disabled>Select a team…</option>
               {#each data.teams as team}
                 <option value={team.id}>{team.name}</option>
               {/each}
             </select>
+            {#if data.teams.length === 0}
+              <p class="field-hint">
+                A volume has to belong to a team. Create one first, or ask an admin to add you.
+              </p>
+            {/if}
           </div>
           <div class="form-group">
             <label for="workerId">Worker</label>
@@ -315,6 +326,12 @@
 
   .form-group select {
     cursor: pointer;
+  }
+
+  .field-hint {
+    margin: 6px 0 0;
+    font-size: 12px;
+    color: var(--text-secondary);
   }
 
   .form-actions {

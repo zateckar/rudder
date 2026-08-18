@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { stacks, applications, teams, teamMembers, users, workers, containers } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { getRestPodmanClient } from '$lib/server/podman-client';
 import { executeApplicationDeploy } from '$lib/server/deploy';
 
@@ -13,13 +13,51 @@ async function getUser(cookies: any) {
   return db.select().from(users).where(eq(users.id, userId)).get();
 }
 
+type StackAccess =
+  | { ok: false; response: Response }
+  | { ok: true; user: typeof users.$inferSelect; stack: typeof stacks.$inferSelect };
+
+/**
+ * Resolve a stack the caller is allowed to touch.
+ *
+ * A stack is a handle on a whole team's worth of applications — GET returns
+ * their full rows, POST deploys, stops and restarts every one of them — so
+ * every method here needs the membership check, not just the mutating ones.
+ * 404 rather than 403 so the route does not confirm which stack ids exist.
+ */
+async function requireStackAccess(cookies: any, stackId: string): Promise<StackAccess> {
+  const deny = (message: string, status: number): StackAccess => ({
+    ok: false,
+    response: json({ error: message }, { status }),
+  });
+
+  const user = await getUser(cookies);
+  if (!user) return deny('Unauthorized', 401);
+
+  const stack = await db.select().from(stacks).where(eq(stacks.id, stackId)).get();
+  if (!stack) return deny('Stack not found', 404);
+
+  if (user.role !== 'admin') {
+    // A stack with no team predates team scoping and belongs to nobody, so it
+    // is not something a member may reach either.
+    if (!stack.teamId) return deny('Stack not found', 404);
+
+    const membership = await db
+      .select()
+      .from(teamMembers)
+      .where(and(eq(teamMembers.teamId, stack.teamId), eq(teamMembers.userId, user.id)))
+      .get();
+    if (!membership) return deny('Stack not found', 404);
+  }
+
+  return { ok: true, user, stack };
+}
+
 /** GET: Get stack with its applications */
 export async function GET({ params, cookies }: { params: { id: string }; cookies: any }) {
-  const user = await getUser(cookies);
-  if (!user) return json({ error: 'Unauthorized' }, { status: 401 });
-
-  const stack = await db.select().from(stacks).where(eq(stacks.id, params.id)).get();
-  if (!stack) return json({ error: 'Stack not found' }, { status: 404 });
+  const auth = await requireStackAccess(cookies, params.id);
+  if (!auth.ok) return auth.response;
+  const { stack } = auth;
 
   const apps = await db.select().from(applications).where(eq(applications.stackId, params.id)).all();
   const team = stack.teamId ? await db.select().from(teams).where(eq(teams.id, stack.teamId)).get() : null;
@@ -70,19 +108,27 @@ export async function GET({ params, cookies }: { params: { id: string }; cookies
 
 /** PATCH: Update stack */
 export async function PATCH({ params, request, cookies }: { params: { id: string }; request: Request; cookies: any }) {
-  const user = await getUser(cookies);
-  if (!user) return json({ error: 'Unauthorized' }, { status: 401 });
-
-  const stack = await db.select().from(stacks).where(eq(stacks.id, params.id)).get();
-  if (!stack) return json({ error: 'Stack not found' }, { status: 404 });
+  const auth = await requireStackAccess(cookies, params.id);
+  if (!auth.ok) return auth.response;
 
   const body = await request.json();
 
   // Handle removing an app from the stack
   if (body.removeAppId) {
+    // Confirm the application is actually in this stack before detaching it.
+    // Keying the update on the id alone let a caller detach any application in
+    // the installation, including one in a stack they cannot see.
+    const member = await db
+      .select({ id: applications.id })
+      .from(applications)
+      .where(and(eq(applications.id, body.removeAppId), eq(applications.stackId, params.id)))
+      .get();
+    if (!member) {
+      return json({ error: 'Application is not part of this stack' }, { status: 404 });
+    }
     await db.update(applications)
       .set({ stackId: null, updatedAt: new Date() })
-      .where(eq(applications.id, body.removeAppId));
+      .where(eq(applications.id, member.id));
     return json({ success: true });
   }
 
@@ -98,11 +144,8 @@ export async function PATCH({ params, request, cookies }: { params: { id: string
 
 /** DELETE: Delete stack (unsets stackId on apps, doesn't delete apps) */
 export async function DELETE({ params, cookies }: { params: { id: string }; cookies: any }) {
-  const user = await getUser(cookies);
-  if (!user) return json({ error: 'Unauthorized' }, { status: 401 });
-
-  const stack = await db.select().from(stacks).where(eq(stacks.id, params.id)).get();
-  if (!stack) return json({ error: 'Stack not found' }, { status: 404 });
+  const auth = await requireStackAccess(cookies, params.id);
+  if (!auth.ok) return auth.response;
 
   // Unset stackId on all apps in this stack
   await db.update(applications).set({ stackId: null, updatedAt: new Date() }).where(eq(applications.stackId, params.id));
@@ -115,13 +158,9 @@ export async function DELETE({ params, cookies }: { params: { id: string }; cook
 
 /** POST: Bulk action on all apps in the stack */
 export async function POST({ params, request, cookies }: { params: { id: string }; request: Request; cookies: any }) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
-
-  const stack = await db.select().from(stacks).where(eq(stacks.id, params.id)).get();
-  if (!stack) return json({ error: 'Stack not found' }, { status: 404 });
+  const auth = await requireStackAccess(cookies, params.id);
+  if (!auth.ok) return auth.response;
+  const userId = auth.user.id;
 
   const body = await request.json();
   const { action } = body;
