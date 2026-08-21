@@ -99,20 +99,31 @@ describe('generateTraefikLabelsForApp — middleware chain', () => {
     expect(labels['traefik.http.middlewares.shop-ratelimit.ratelimit.burst']).toBe('20');
   });
 
-  test('the websocket router keeps the WAF but drops every OIDC middleware', () => {
-    // A websocket upgrade cannot follow an OAuth redirect, so auth is skipped
-    // there — but losing the WAF on that route would be a hole.
+  test('the websocket router carries the same chain as the main one', () => {
+    // Its rule matches on two request headers any client can send, so a chain
+    // that skipped authentication here made `Connection: Upgrade` a bypass.
     const labels = generateTraefikLabelsForApp('shop', 'shop.example.com', 31000, true, {
       rateLimitAvg: 10,
       authType: 'oidc',
       authConfig: OIDC_CONFIG,
     }, true);
 
-    const ws = chain(labels, 'shop-secure-ws');
-    expect(ws).toContain('crowdsec@file');
-    expect(ws).toContain('security-headers@file');
-    expect(ws).toContain('shop-ratelimit@docker');
-    expect(ws.some((m) => m.includes('oidc'))).toBe(false);
+    expect(chain(labels, 'shop-secure-ws')).toEqual(chain(labels));
+  });
+
+  test('the websocket router authenticates under global OIDC too', () => {
+    // The old filter matched any middleware whose name contained `-oidc`, which
+    // caught `global-oidc@file` as well as the per-app one.
+    const labels = generateTraefikLabelsForApp('shop', 'shop.example.com', 31000, true, undefined, true);
+    expect(chain(labels, 'shop-secure-ws')).toContain('global-oidc@file');
+  });
+
+  test('a public app leaves the websocket router unauthenticated', () => {
+    // Opting out of auth still has to mean opting out on both routers.
+    const labels = generateTraefikLabelsForApp('shop', 'shop.example.com', 31000, true, {
+      authType: 'none',
+    }, true);
+    expect(chain(labels, 'shop-secure-ws')).toEqual(['crowdsec@file', 'security-headers@file']);
   });
 });
 
@@ -224,6 +235,35 @@ describe('renderGlobalOidcConfig', () => {
     expect(router.service).toBe('noop@internal');
     expect(router.middlewares).toEqual(['global-oidc']);
     expect(router.tls.certResolver).toBe('letsencrypt');
+  });
+
+  function callbackUriFor(callbackPath: string | null | undefined): string {
+    const doc = Bun.YAML.parse(
+      renderGlobalOidcConfig('apps.example.com', {
+        providerURL: 'https://idp.example.com',
+        clientID: 'rudder-worker',
+        clientSecret: 's3cr3t',
+        secret: 'a'.repeat(32),
+        callbackPath,
+      }),
+    ) as any;
+    return doc.http.middlewares['global-oidc'].plugin['traefik-oidc-auth'].CallbackUri;
+  }
+
+  test('honours a callback path the identity provider already has registered', () => {
+    // Providers compare redirect URIs by exact string; /oauth2/callback is the
+    // other common convention, and a mismatch fails at the IdP, not here.
+    expect(callbackUriFor('/oauth2/callback')).toBe('https://auth.apps.example.com/oauth2/callback');
+  });
+
+  test('falls back to the default path when none is set or the stored one is junk', () => {
+    const expected = 'https://auth.apps.example.com/oidc/callback';
+    expect(callbackUriFor(null)).toBe(expected);
+    expect(callbackUriFor('')).toBe(expected);
+    // A path that slipped past validation must not produce a broken CallbackUri
+    // — that would make the middleware unbuildable and cost Traefik the whole file.
+    expect(callbackUriFor('oauth2/callback')).toBe(expected);
+    expect(callbackUriFor('/cb?next=x')).toBe(expected);
   });
 });
 

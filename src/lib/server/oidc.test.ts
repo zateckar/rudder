@@ -2,10 +2,12 @@ import { describe, expect, test } from 'bun:test';
 import {
   OIDC_CALLBACK_PATH,
   generateOidcSecret,
+  isValidCallbackPath,
   isValidOidcSecret,
   normalizeOidcSecret,
   oidcCallbackHost,
   oidcCallbackUrl,
+  resolveCallbackPath,
 } from './oidc';
 
 describe('generateOidcSecret', () => {
@@ -86,5 +88,36 @@ describe('callback addressing', () => {
     // The old lukaszraczylo plugin used /oauth2/callback; changing this silently
     // would break every registered redirect URI.
     expect(OIDC_CALLBACK_PATH).toBe('/oidc/callback');
+  });
+
+  test('a worker s own path wins, so the URL matches what the IdP registered', () => {
+    expect(oidcCallbackUrl('apps.example.com', '/oauth2/callback')).toBe(
+      'https://auth.apps.example.com/oauth2/callback',
+    );
+  });
+});
+
+describe('callback path validation', () => {
+  test('accepts ordinary absolute paths', () => {
+    for (const path of ['/oidc/callback', '/oauth2/callback', '/', '/a-b_c.d~e/f%20g']) {
+      expect(isValidCallbackPath(path)).toBe(true);
+    }
+  });
+
+  test('rejects what would not survive as a redirect URI path', () => {
+    // A query or fragment is dropped from the comparison the IdP makes, and a
+    // relative path makes the plugin overlay the wrapped service instead of
+    // using the shared auth host.
+    for (const path of ['oidc/callback', '', '/cb?next=/', '/cb#frag', '/cb with space', 'https://elsewhere/cb']) {
+      expect(isValidCallbackPath(path)).toBe(false);
+    }
+  });
+
+  test('resolving falls back rather than propagating an unusable path', () => {
+    // Reached by rows written before validation existed, or edited by hand.
+    for (const input of [null, undefined, '', 'oidc/callback', '/cb?x=1']) {
+      expect(resolveCallbackPath(input)).toBe(OIDC_CALLBACK_PATH);
+    }
+    expect(resolveCallbackPath('/oauth2/callback')).toBe('/oauth2/callback');
   });
 });

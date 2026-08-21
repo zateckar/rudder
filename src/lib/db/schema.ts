@@ -60,6 +60,15 @@ export const workers = sqliteTable('workers', {
   /** Plugin `Secret` (32 chars), encrypted at rest. */
   oidcEncryptionKey: text('oidc_encryption_key'),
   /**
+   * Path of the shared callback URL on `auth.<baseDomain>`.
+   *
+   * Null means `OIDC_CALLBACK_PATH`. Identity providers compare redirect URIs
+   * by exact string, so a client registered against another convention —
+   * `/oauth2/callback` is the common one — needs its path named here or every
+   * login ends at "invalid redirect_uri".
+   */
+  oidcCallbackPath: text('oidc_callback_path'),
+  /**
    * When the current OIDC config was last written to the worker's Traefik.
    * Cleared whenever the config changes.  Deploys refuse to attach
    * `global-oidc@file` while this is null, because a router referencing a

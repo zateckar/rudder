@@ -20,7 +20,7 @@ http:
           # every application on this worker.  The original request URL (host and
           # path) travels in the encrypted OIDC state, so the callback host can
           # redirect the user back to the app they came from.
-          CallbackUri: "https://auth.{{BASE_DOMAIN}}/oidc/callback"
+          CallbackUri: "https://auth.{{BASE_DOMAIN}}{{OIDC_CALLBACK_PATH}}"
           SessionCookie:
             Domain: ".{{BASE_DOMAIN}}"
             Path: "/"

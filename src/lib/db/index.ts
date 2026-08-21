@@ -274,6 +274,7 @@ for (const col of [
   `ALTER TABLE workers ADD COLUMN oidc_client_secret TEXT;`,
   `ALTER TABLE workers ADD COLUMN oidc_encryption_key TEXT;`,
   `ALTER TABLE workers ADD COLUMN oidc_applied_at INTEGER;`,
+  `ALTER TABLE workers ADD COLUMN oidc_callback_path TEXT;`,
   `ALTER TABLE workers ADD COLUMN routing_mode TEXT NOT NULL DEFAULT 'labels';`,
   `ALTER TABLE workers ADD COLUMN config_token TEXT;`,
   `ALTER TABLE workers ADD COLUMN config_fetched_at INTEGER;`,

@@ -72,6 +72,9 @@
   let oidcClientSecretSet = $state(false);
   let oidcEncryptionKeySet = $state(false);
   let oidcAppliedAt = $state<string | null>(null);
+  // Path of the shared callback. Providers compare redirect URIs by exact
+  // string, so a client registered as /oauth2/callback needs that path here.
+  let oidcCallbackPath = $state('/oidc/callback');
   // Shared callback host/URL, resolved server-side so the UI and the generated
   // Traefik config can never disagree about what to register with the IdP.
   let oidcCallbackHost = $state('');
@@ -554,6 +557,7 @@
       oidcClientSecretSet = body.oidcClientSecretSet ?? false;
       oidcEncryptionKeySet = body.oidcEncryptionKeySet ?? false;
       oidcAppliedAt = body.oidcAppliedAt ?? null;
+      oidcCallbackPath = body.oidcCallbackPath ?? '/oidc/callback';
       oidcCallbackHost = body.callbackHost ?? '';
       oidcCallbackUrl = body.callbackUrl ?? '';
       oidcLoaded = true;
@@ -564,7 +568,12 @@
     oidcSaving = true;
     oidcSaveMsg = '';
     try {
-      const payload: Record<string, any> = { oidcEnabled, oidcProviderUrl, oidcClientId };
+      const payload: Record<string, any> = {
+        oidcEnabled,
+        oidcProviderUrl,
+        oidcClientId,
+        oidcCallbackPath,
+      };
       if (oidcClientSecret) payload.oidcClientSecret = oidcClientSecret;
       const res = await fetch(`/api/workers/${workerId}/oidc`, {
         method: 'PUT',
@@ -576,6 +585,7 @@
       oidcClientSecretSet = data.oidcClientSecretSet;
       oidcEncryptionKeySet = data.oidcEncryptionKeySet;
       oidcAppliedAt = data.oidcAppliedAt ?? null;
+      oidcCallbackPath = data.oidcCallbackPath ?? oidcCallbackPath;
       oidcCallbackHost = data.callbackHost ?? oidcCallbackHost;
       oidcCallbackUrl = data.callbackUrl ?? oidcCallbackUrl;
       oidcClientSecret = '';
@@ -2033,6 +2043,19 @@
                   <p class="field-hint">A secret is saved. Leave blank to keep it.</p>
                 {/if}
               </div>
+            </div>
+
+            <div class="form-field">
+              <label for="oidcCallbackPath">Callback Path</label>
+              <input type="text" id="oidcCallbackPath"
+                placeholder="/oidc/callback"
+                bind:value={oidcCallbackPath} />
+              <p class="field-hint">
+                Path of the shared callback on <code class="mono-inline">{oidcCallbackHost || 'auth.<base domain>'}</code>.
+                Change it only to match what your identity provider already has registered — providers compare
+                redirect URIs by exact string, and <code class="mono-inline">/oauth2/callback</code> is the other
+                common convention. Leave blank for the default.
+              </p>
             </div>
 
             <div class="form-field">

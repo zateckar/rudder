@@ -54,6 +54,7 @@ export const POST: RequestHandler = async ({ params, request, cookies, locals })
     clientID: worker.oidcClientId,
     clientSecret,
     secret,
+    callbackPath: worker.oidcCallbackPath,
   });
 
   // Write via stdin → sudo tee (avoids shell quoting issues with YAML content)
@@ -76,15 +77,17 @@ export const POST: RequestHandler = async ({ params, request, cookies, locals })
       .set({ oidcAppliedAt: new Date() })
       .where(eq(workers.id, worker.id));
 
+    const callbackUrl = oidcCallbackUrl(worker.baseDomain, worker.oidcCallbackPath);
+
     return json({
       success: true,
       rotatedSecret: rotated,
-      callbackUrl: oidcCallbackUrl(worker.baseDomain),
+      callbackUrl,
       callbackHost: oidcCallbackHost(worker.baseDomain),
       message:
         `OIDC configuration applied to Traefik; it takes effect within seconds. ` +
         `Make sure ${oidcCallbackHost(worker.baseDomain)} has a DNS A record pointing at this worker, ` +
-        `and that ${oidcCallbackUrl(worker.baseDomain)} is registered as a redirect URI with your identity provider.` +
+        `and that ${callbackUrl} is registered as a redirect URI with your identity provider.` +
         (rotated
           ? ' The session encryption key was rotated to the 32-character format the Traefik plugin requires — existing sessions were signed out.'
           : ''),

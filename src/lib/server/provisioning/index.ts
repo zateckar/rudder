@@ -1,5 +1,5 @@
 import { routerName } from '../domains';
-import { OIDC_CALLBACK_PATH } from '../oidc';
+import { OIDC_CALLBACK_PATH, resolveCallbackPath } from '../oidc';
 
 // Shell assets imported as raw strings (Vite inlines at build time)
 import provisionShTemplate from './shell/provision.sh?raw';
@@ -83,6 +83,12 @@ export interface GlobalOidcConfig {
   clientSecret: string;
   /** The plugin's `Secret` — must be exactly 32 characters. */
   secret: string;
+  /**
+   * Path of the shared callback URL. Defaults to `OIDC_CALLBACK_PATH`; set it
+   * to whatever the worker's IdP client has registered, since providers match
+   * redirect URIs by exact string.
+   */
+  callbackPath?: string | null;
 }
 
 /**
@@ -102,6 +108,7 @@ export function renderGlobalOidcConfig(
     OIDC_CLIENT_ID: oidcConfig.clientID,
     OIDC_CLIENT_SECRET: oidcConfig.clientSecret,
     OIDC_SECRET: oidcConfig.secret,
+    OIDC_CALLBACK_PATH: resolveCallbackPath(oidcConfig.callbackPath),
   });
 }
 
@@ -387,9 +394,23 @@ export function generateTraefikLabelsForApp(
     labels[`traefik.http.routers.${safeName}-secure-ws.tls`] = 'true';
     labels[`traefik.http.routers.${safeName}-secure-ws.tls.certresolver`] = 'letsencrypt';
     labels[`traefik.http.routers.${safeName}-secure-ws.service`] = safeName;
-    // WebSocket routes get crowdsec + rate limit but NOT oidc (websocket doesn't do OAuth redirects)
-    const wsMiddlewares = middlewares.filter(m => !m.includes('-oidc'));
-    labels[`traefik.http.routers.${safeName}-secure-ws.middlewares`] = wsMiddlewares.join(',');
+    // The same chain as the main router, authentication included.
+    //
+    // This router used to drop every middleware whose name contained `-oidc` —
+    // both `global-oidc@file` and the per-app one — on the grounds that a
+    // WebSocket client cannot follow an OAuth redirect.  But Traefik picks a
+    // router by matching its rule, and this rule matches on two request headers
+    // that any HTTP client can send: `Connection: Upgrade` and
+    // `Upgrade: websocket` on an ordinary GET reached the application with no
+    // session at all, on any method.  Authentication that two headers turn off
+    // is not authentication.
+    //
+    // The redirect concern was real but is the plugin's to make: it answers an
+    // unauthenticated non-HTML request with 401 rather than a redirect, which is
+    // what a WebSocket client should see.  A browser opening a socket carries
+    // the session cookie the page's own login established, so real WebSocket
+    // traffic from a signed-in user still passes.
+    labels[`traefik.http.routers.${safeName}-secure-ws.middlewares`] = middlewareChain;
   }
 
   return labels;

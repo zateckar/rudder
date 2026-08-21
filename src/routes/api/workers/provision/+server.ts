@@ -149,6 +149,7 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
                 clientID: worker.oidcClientId!,
                 clientSecret: oidcClientSecret,
                 secret: oidcSecret.secret,
+                callbackPath: worker.oidcCallbackPath,
               }
             : undefined;
 

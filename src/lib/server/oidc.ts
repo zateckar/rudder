@@ -20,8 +20,37 @@ export const ALLOWED_DOMAINS_UNSUPPORTED =
   'Allowed user domains are not supported: the Traefik OIDC plugin matches claims by exact value, not by ' +
   'domain suffix. List individual addresses under "Allowed users", or restrict access at the identity provider.';
 
-/** Path component of the shared callback URL. */
+/** Path component of the shared callback URL, when a worker names no other. */
 export const OIDC_CALLBACK_PATH = '/oidc/callback';
+
+/**
+ * Rejected with this wherever a callback path is saved.
+ *
+ * The path is interpolated straight into the plugin's `CallbackUri` and has to
+ * survive as a path: a query or fragment would be dropped from the redirect URI
+ * the IdP compares against, and a relative path would make the plugin overlay
+ * the wrapped service instead of using the shared auth host.
+ */
+export const CALLBACK_PATH_INVALID =
+  'Callback path must start with "/" and contain no query string or fragment — for example /oidc/callback.';
+
+/** True when `path` can be interpolated into the plugin's `CallbackUri`. */
+export function isValidCallbackPath(path: string): boolean {
+  return /^\/[A-Za-z0-9\-._~!$&'()*+,;=:@/%]*$/.test(path);
+}
+
+/**
+ * The callback path to use for a worker: its own, or the default.
+ *
+ * Identity providers compare redirect URIs by exact string, so a worker whose
+ * IdP registration follows a different convention — `/oauth2/callback` is the
+ * common one — needs the plugin to send that exact path or every login ends at
+ * "invalid redirect_uri".  Stored per worker rather than per fleet because the
+ * registration belongs to the worker's IdP client.
+ */
+export function resolveCallbackPath(path: string | null | undefined): string {
+  return path && isValidCallbackPath(path) ? path : OIDC_CALLBACK_PATH;
+}
 
 /** Hostname that terminates the shared OIDC callback for a worker. */
 export function oidcCallbackHost(baseDomain: string): string {
@@ -29,8 +58,8 @@ export function oidcCallbackHost(baseDomain: string): string {
 }
 
 /** The single redirect URI to register with the identity provider. */
-export function oidcCallbackUrl(baseDomain: string): string {
-  return `https://${oidcCallbackHost(baseDomain)}${OIDC_CALLBACK_PATH}`;
+export function oidcCallbackUrl(baseDomain: string, callbackPath?: string | null): string {
+  return `https://${oidcCallbackHost(baseDomain)}${resolveCallbackPath(callbackPath)}`;
 }
 
 /**

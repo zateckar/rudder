@@ -4,7 +4,15 @@ import { db } from '$lib/db';
 import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { encryptField } from '$lib/server/encryption';
-import { generateOidcSecret, isValidOidcSecret, oidcCallbackUrl, oidcCallbackHost } from '$lib/server/oidc';
+import {
+  CALLBACK_PATH_INVALID,
+  generateOidcSecret,
+  isValidCallbackPath,
+  isValidOidcSecret,
+  oidcCallbackHost,
+  oidcCallbackUrl,
+  resolveCallbackPath,
+} from '$lib/server/oidc';
 
 /** Shape returned to the settings UI. Never includes secret material. */
 function publicOidcState(worker: typeof workers.$inferSelect) {
@@ -15,9 +23,14 @@ function publicOidcState(worker: typeof workers.$inferSelect) {
     oidcClientSecretSet: !!worker.oidcClientSecret,
     oidcEncryptionKeySet: !!worker.oidcEncryptionKey,
     oidcAppliedAt: worker.oidcAppliedAt,
+    // Resolved rather than raw, so the form shows the path actually in force
+    // instead of an empty box meaning "the default, whatever that is".
+    oidcCallbackPath: resolveCallbackPath(worker.oidcCallbackPath),
     // The single redirect URI to register with the identity provider, and the
     // hostname that needs a DNS A record pointing at this worker.
-    callbackUrl: worker.baseDomain ? oidcCallbackUrl(worker.baseDomain) : null,
+    callbackUrl: worker.baseDomain
+      ? oidcCallbackUrl(worker.baseDomain, worker.oidcCallbackPath)
+      : null,
     callbackHost: worker.baseDomain ? oidcCallbackHost(worker.baseDomain) : null,
   };
 }
@@ -48,7 +61,14 @@ export const PUT: RequestHandler = async ({ params, request, cookies, locals }) 
   if (!worker) return json({ error: 'Worker not found' }, { status: 404 });
 
   const body = await request.json();
-  const { oidcEnabled, oidcProviderUrl, oidcClientId, oidcClientSecret, oidcEncryptionKey } = body;
+  const {
+    oidcEnabled,
+    oidcProviderUrl,
+    oidcClientId,
+    oidcClientSecret,
+    oidcEncryptionKey,
+    oidcCallbackPath,
+  } = body;
 
   if (oidcEnabled && (!oidcProviderUrl || !oidcClientId)) {
     return json({ error: 'Provider URL and Client ID are required when OIDC is enabled' }, { status: 400 });
@@ -60,10 +80,21 @@ export const PUT: RequestHandler = async ({ params, request, cookies, locals }) 
     }, { status: 400 });
   }
 
+  // Silently storing an unusable path would be worse than refusing it: the
+  // config applies cleanly and only fails at the identity provider, one
+  // redirect into a user's login.
+  if (oidcCallbackPath !== undefined && oidcCallbackPath !== null && oidcCallbackPath !== '') {
+    if (typeof oidcCallbackPath !== 'string' || !isValidCallbackPath(oidcCallbackPath)) {
+      return json({ error: CALLBACK_PATH_INVALID }, { status: 400 });
+    }
+  }
+
   const updates: Record<string, any> = {
     oidcEnabled: !!oidcEnabled,
     oidcProviderUrl: oidcProviderUrl || null,
     oidcClientId: oidcClientId || null,
+    // Blank clears it back to the default rather than storing an empty path.
+    oidcCallbackPath: oidcCallbackPath || null,
     // Any change invalidates what is currently deployed on the worker, so the
     // operator has to push it again before deploys will attach the middleware.
     oidcAppliedAt: null,
@@ -111,6 +142,7 @@ export const DELETE: RequestHandler = async ({ params, cookies, locals }) => {
     oidcClientId: null,
     oidcClientSecret: null,
     oidcEncryptionKey: null,
+    oidcCallbackPath: null,
     oidcAppliedAt: null,
   }).where(eq(workers.id, params.id));
 

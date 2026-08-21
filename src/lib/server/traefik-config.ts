@@ -378,6 +378,7 @@ export async function buildWorkerDynamicConfig(workerId: string): Promise<Served
           clientID: worker.oidcClientId!,
           clientSecret,
           secret,
+          callbackPath: worker.oidcCallbackPath,
         }),
       ) as DynamicConfig;
     }
