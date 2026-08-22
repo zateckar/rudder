@@ -205,18 +205,38 @@ export async function GET({ url, cookies }: { url: URL; cookies: any }) {
   // means "ask again later" and must change nothing.
   let teamClaimResolved = false;
   if (cfg.teamClaimName) {
-    // Try access token first
-    let claimValue = tokenData[cfg.teamClaimName];
+    // Where a group claim can actually live, in decreasing order of how
+    // specifically the provider meant it for us.
+    //
+    // The first two are the point: this used to read `tokenData` — the token
+    // endpoint's JSON envelope, whose keys are `access_token`, `id_token`,
+    // `expires_in` — and call that "the access token". A provider that puts
+    // groups in the token's *claims*, which is where Keycloak's group mapper
+    // puts them by default, therefore never matched, and unless the same claim
+    // had also been mapped into userinfo the sync silently never ran.
+    // `decodeJwtPayload` was written for this and was never called.
+    const claimSources: Array<Record<string, any> | null> = [
+      decodeJwtPayload(accessToken),
+      typeof tokenData.id_token === 'string' ? decodeJwtPayload(tokenData.id_token) : null,
+      userInfo,
+      // Last, and only for a provider that hangs the claim off the envelope
+      // itself. Kept so any deployment that happened to work before still does.
+      tokenData,
+    ];
 
-    // Fallback to userinfo endpoint
-    if (claimValue === undefined || claimValue === null) {
-      claimValue = userInfo[cfg.teamClaimName];
+    let claimValue: unknown;
+    for (const source of claimSources) {
+      const found = source?.[cfg.teamClaimName];
+      if (found !== undefined && found !== null) {
+        claimValue = found;
+        break;
+      }
     }
 
     if (claimValue !== undefined && claimValue !== null) {
       // If claim is an object with a key, extract the array
       if (typeof claimValue === 'object' && !Array.isArray(claimValue) && cfg.teamClaimKey) {
-        claimValue = claimValue[cfg.teamClaimKey];
+        claimValue = (claimValue as Record<string, unknown>)[cfg.teamClaimKey];
       }
 
       if (Array.isArray(claimValue)) {
@@ -242,9 +262,10 @@ export async function GET({ url, cookies }: { url: URL; cookies: any }) {
     throw redirect(302, '/login?error=oidc_missing_userinfo');
   }
 
-  // Find or create user
-  const PROVIDER = 'google' as const; // reuse existing enum; generic maps to 'google' slot
-  // Better: check if OIDC link exists by provider_id in user_oidc (using a text search)
+  // Find or create user.
+  // The link is stored under provider='auth0' with a `generic:` prefix on the
+  // provider id — the enum predates generic OIDC and this reuses one of its
+  // slots rather than migrating it.
   let userId: string;
 
   // Check existing OIDC link (we store generic provider as provider='auth0' with a unique providerId)
