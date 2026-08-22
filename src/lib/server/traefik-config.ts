@@ -345,9 +345,15 @@ export async function buildWorkerDynamicConfig(workerId: string): Promise<Served
       routerBase: container.routerName,
       domain: container.domain,
       ports: [container.exposedPort],
-      // Compose services get no per-app middleware in the deploy path either;
-      // rate limits and per-app OIDC are single-container features today.
-      middlewareOpts: app.type === 'compose' ? undefined : buildMiddlewareOpts(app),
+      // Every type, with no exception for compose. The deploy path calls
+      // `buildMiddlewareOpts(app)` unconditionally, and the two must agree:
+      // excluding compose here published a compose application with per-app
+      // OIDC as unauthenticated in http mode while the same application on a
+      // labels-mode worker got its middleware, and dropped its rate limit
+      // besides. The reverse was just as wrong — `authType: 'none'` reached
+      // `generateTraefikLabelsForApp` as `undefined`, which is not the same
+      // statement, so a public compose app had global OIDC attached anyway.
+      middlewareOpts: buildMiddlewareOpts(app),
     });
   }
 
