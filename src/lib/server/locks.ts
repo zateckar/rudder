@@ -7,15 +7,29 @@ interface LockEntry {
   acquiredAt: Date;
   operation: string;
   holder: string;
+  /**
+   * How long this holder is allowed to run before the lock is considered
+   * abandoned. Recorded per entry because it is a property of the operation
+   * being protected, not of whoever asks next: a deploy legitimately runs for
+   * longer than the default, and judging its staleness by the default — or by
+   * the ttl of the caller that happens to be contending — releases the lock out
+   * from under it and lets a second one run concurrently, which is the whole
+   * thing the lock exists to prevent.
+   */
+  ttlMs: number;
 }
 
 const locks = new Map<string, LockEntry>();
 const DEFAULT_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
+function isStale(entry: LockEntry, now: number): boolean {
+  return now - entry.acquiredAt.getTime() > entry.ttlMs;
+}
+
 function cleanupExpiredLocks(): void {
   const now = Date.now();
   for (const [key, entry] of locks.entries()) {
-    if (now - entry.acquiredAt.getTime() > DEFAULT_TTL_MS) {
+    if (isStale(entry, now)) {
       console.warn(`Lock ${key} expired, releasing (held by ${entry.holder} for ${entry.operation})`);
       locks.delete(key);
     }
@@ -47,8 +61,10 @@ export async function withLock<T>(
 
   const existing = locks.get(key);
   if (existing) {
-    const age = Date.now() - existing.acquiredAt.getTime();
-    if (age < ttl) {
+    const now = Date.now();
+    // Judged against the *holder's* ttl, not this caller's.
+    if (!isStale(existing, now)) {
+      const age = now - existing.acquiredAt.getTime();
       throw new LockError(
         `Resource "${key}" is locked by ${existing.holder} for ${existing.operation} (${Math.round(age / 1000)}s ago)`
       );
@@ -60,6 +76,7 @@ export async function withLock<T>(
     acquiredAt: new Date(),
     operation: options.operation,
     holder,
+    ttlMs: ttl,
   });
 
   try {
@@ -75,8 +92,7 @@ export async function withLock<T>(
 export function isLocked(key: string): boolean {
   const entry = locks.get(key);
   if (!entry) return false;
-  const age = Date.now() - entry.acquiredAt.getTime();
-  return age < DEFAULT_TTL_MS;
+  return !isStale(entry, Date.now());
 }
 
 export function releaseLock(key: string, holder?: string): boolean {

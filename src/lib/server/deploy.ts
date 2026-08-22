@@ -21,6 +21,8 @@ import { decrypt } from '$lib/server/encryption';
 import { ALIAS_LABEL, ensureAppNetwork, teardownAppNetwork } from '$lib/server/networks';
 import { env } from '$lib/server/env';
 import { MountPolicyError, realizeMounts, type MountIntent } from '$lib/server/mounts';
+// Deploys are serialized per worker; see `workerDeployLock`.
+import { LockError, withLock } from '$lib/server/locks';
 import {
   parseDigestRecord,
   pinnedImageFor,
@@ -503,19 +505,39 @@ async function waitForConfigConvergence(workerId: string, since: Date): Promise<
   return false;
 }
 
-/** Stop and remove containers, and delete their rows. Releases their ports. */
+/**
+ * Stop and remove containers, and delete their rows. Releases their ports.
+ *
+ * The row is deleted only once Podman confirms the container is gone. Deleting
+ * it regardless meant a removal that failed — an unreachable worker mid-cutover
+ * — took the port out of Rudder's ledger while the container was still bound to
+ * it on the host. `reservedPortsForWorker` reads those rows, so the next deploy
+ * would be handed the same port and fail to bind, naming a port no tracked
+ * container held. Keeping the row is the safe direction to be wrong in: the
+ * reconciler reports it, and the next sweep tries the removal again.
+ *
+ * Returns how many were actually reaped.
+ */
 async function reapContainers(
   client: PodmanRestClient,
   rows: Array<typeof containers.$inferSelect>,
-): Promise<void> {
+): Promise<number> {
+  let reaped = 0;
   for (const row of rows) {
     try {
       await client.removeContainer(row.containerId, true);
     } catch (e: any) {
-      console.warn(`[deploy] Could not remove superseded container ${row.name}:`, e.message);
+      console.warn(
+        `[deploy] Could not remove superseded container ${row.name}:`,
+        e.message,
+        '— keeping its row so the host port stays reserved.',
+      );
+      continue;
     }
     await db.delete(containers).where(eq(containers.id, row.id));
+    reaped += 1;
   }
+  return reaped;
 }
 
 /**
@@ -545,11 +567,16 @@ export async function sweepExpiredGenerations(): Promise<number> {
   }
 
   for (const { worker, rows } of byWorker.values()) {
+    let client: PodmanRestClient | null = null;
     try {
-      await reapContainers(getRestPodmanClient(worker), rows);
-      reaped += rows.length;
+      client = getRestPodmanClient(worker);
+      // Count what was actually removed, not what was attempted: a container
+      // whose removal failed keeps its row and will be retried next sweep.
+      reaped += await reapContainers(client, rows);
     } catch (e: any) {
       console.warn(`[deploy] Sweep failed for worker ${worker.name}:`, e.message);
+    } finally {
+      client?.destroy();
     }
   }
   return reaped;
@@ -598,12 +625,96 @@ export interface DeployOptions {
 }
 
 /**
+ * Serialize everything that mutates one worker's containers.
+ *
+ * Keyed on the worker, not the application, because the contended resource is
+ * the worker's host ports: `reservedPortsForWorker` reads the `containers`
+ * rows, and a deploy does not write one until well after it has allocated. Two
+ * deploys of *different* applications that overlap on one worker can therefore
+ * be handed the same port, and the second container fails to bind. Two deploys
+ * of the *same* application additionally compute the same `nextGeneration` from
+ * the same snapshot and collide on the container name.
+ *
+ * Not hypothetical: `/api/applications/[id]/webhook/trigger` runs a full deploy
+ * synchronously and has no rate limit, so an ordinary CI retry is enough.
+ */
+function workerDeployLock(workerId: string): string {
+  return `deploy:worker:${workerId}`;
+}
+
+/**
+ * Long enough to cover the slowest legitimate deploy, which is a pull plus the
+ * application's health timeout, the drain grace and the cutover convergence
+ * wait. `withLock` treats a lock older than this as abandoned, so it has to
+ * exceed the real worst case or a slow deploy would be overrun by the next one.
+ */
+function deployLockTtlMs(app: { healthTimeoutSeconds?: number | null }): number {
+  return (
+    healthTimeoutMs(app) +
+    DRAIN_GRACE_MS +
+    CUTOVER_CONVERGENCE_TIMEOUT_MS +
+    // Headroom for image pulls, which are unbounded and not otherwise counted.
+    15 * 60_000
+  );
+}
+
+/** The refusal a caller sees when another deploy already holds the worker. */
+function busyResult(workerName: string): DeployResult {
+  return {
+    success: false,
+    message:
+      `Another deploy is already running on worker "${workerName}". Host ports and container ` +
+      `names are allocated per worker, so deploys are run one at a time. Try again once it finishes.`,
+    statusCode: 409,
+  };
+}
+
+/**
  * Execute a deploy for the given application.
+ *
+ * Serialized per worker — see `workerDeployLock`. The application and worker
+ * are resolved here so the lock can be keyed before any allocation happens;
+ * `deployApplication` looks them up again, which costs two indexed reads and
+ * keeps the locking separable from the deploy itself.
+ *
  * @param applicationId - the application to deploy
  * @param deployedByUserId - the user who triggered the deploy (null for webhook triggers)
  * @param options - see DeployOptions; rollback supplies the recorded digests
  */
 export async function executeApplicationDeploy(
+  applicationId: string,
+  deployedByUserId: string | null = null,
+  options: DeployOptions = {},
+): Promise<DeployResult> {
+  const target = await db
+    .select({ app: applications, worker: workers })
+    .from(applications)
+    .innerJoin(workers, eq(applications.workerId, workers.id))
+    .where(eq(applications.id, applicationId))
+    .get();
+
+  // Fall through unlocked when there is nothing to lock on: `deployApplication`
+  // owns the "no application" / "no worker" messages and there is no shared
+  // resource to contend for in either case.
+  if (!target) return deployApplication(applicationId, deployedByUserId, options);
+
+  try {
+    return await withLock(
+      workerDeployLock(target.worker.id),
+      {
+        operation: `deploy ${target.app.name}`,
+        holder: `${process.pid}:${crypto.randomUUID()}`,
+        ttlMs: deployLockTtlMs(target.app),
+      },
+      () => deployApplication(applicationId, deployedByUserId, options),
+    );
+  } catch (e) {
+    if (e instanceof LockError) return busyResult(target.worker.name);
+    throw e;
+  }
+}
+
+async function deployApplication(
   applicationId: string,
   deployedByUserId: string | null = null,
   options: DeployOptions = {},
@@ -791,8 +902,14 @@ export async function executeApplicationDeploy(
     createdAt: new Date(),
   });
 
+  // Built once and destroyed in the `finally` below. The agent keeps its TLS
+  // sockets alive, so abandoning one leaks them for the life of the process —
+  // and the failure path used to build a *second* client to discard the failed
+  // generation with, leaking that one too.
+  let podmanClient: PodmanRestClient | null = null;
+
   try {
-    const podmanClient = getRestPodmanClient(worker);
+    podmanClient = getRestPodmanClient(worker);
 
     // Resolve SSH config once; used for post-teardown Netavark cleanup
     const workerSSHConfig = await resolveWorkerSSHConfig(worker);
@@ -1051,7 +1168,11 @@ export async function executeApplicationDeploy(
     // where leaving the partial deploy in place at least keeps some of it up.
     if (blueGreen && createdContainers.length > 0) {
       try {
-        await discardGeneration(getRestPodmanClient(worker), createdContainers);
+        // Reuse the client this deploy already has. Only build one if the
+        // failure was `getRestPodmanClient` itself, in which case there is
+        // nothing to discard with anyway and this throws into the catch below.
+        podmanClient ??= getRestPodmanClient(worker);
+        await discardGeneration(podmanClient, createdContainers);
       } catch (e: any) {
         console.warn('[deploy] Could not fully discard the failed generation:', e.message);
       }
@@ -1071,6 +1192,8 @@ export async function executeApplicationDeploy(
     }
 
     throw error;
+  } finally {
+    podmanClient?.destroy();
   }
 }
 
@@ -1104,6 +1227,10 @@ export async function fastRollbackTargets(applicationId: string): Promise<string
  *
  * Returns a failure result rather than throwing when the retained generation is
  * not usable, so the caller can fall back to a full redeploy.
+ *
+ * Takes the same per-worker lock as a deploy: it flips the same `state` column
+ * on the same rows, so a rollback racing a deploy would have each reading the
+ * other's half-finished cutover.
  */
 export async function executeFastRollback(
   applicationId: string,
@@ -1118,6 +1245,28 @@ export async function executeFastRollback(
     return { success: false, message: 'Worker does not use control-plane routing', statusCode: 409 };
   }
 
+  try {
+    return await withLock(
+      workerDeployLock(worker.id),
+      {
+        operation: `rollback ${app.name}`,
+        holder: `${process.pid}:${crypto.randomUUID()}`,
+        ttlMs: deployLockTtlMs(app),
+      },
+      () => rollbackWithinLock(app, worker, applicationId, targetDeploymentId),
+    );
+  } catch (e) {
+    if (e instanceof LockError) return busyResult(worker.name);
+    throw e;
+  }
+}
+
+async function rollbackWithinLock(
+  app: typeof applications.$inferSelect,
+  worker: typeof workers.$inferSelect,
+  applicationId: string,
+  targetDeploymentId: string,
+): Promise<DeployResult> {
   const retained = await db
     .select()
     .from(containers)
@@ -1140,6 +1289,25 @@ export async function executeFastRollback(
     .all();
 
   const podmanClient = getRestPodmanClient(worker);
+
+  // Split so the client is destroyed on every path: the body returns from
+  // several places, and a keep-alive agent that is merely dropped holds its
+  // sockets open for the life of the process.
+  try {
+    return await rollbackWithClient(app, worker, applicationId, retained, current, podmanClient);
+  } finally {
+    podmanClient.destroy();
+  }
+}
+
+async function rollbackWithClient(
+  app: typeof applications.$inferSelect,
+  worker: typeof workers.$inferSelect,
+  applicationId: string,
+  retained: Array<typeof containers.$inferSelect>,
+  current: Array<typeof containers.$inferSelect>,
+  podmanClient: PodmanRestClient,
+): Promise<DeployResult> {
   const restarted: CreatedContainer[] = [];
 
   try {

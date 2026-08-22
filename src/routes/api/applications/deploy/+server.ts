@@ -30,6 +30,12 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
   const worker = await db.select().from(workers).where(eq(workers.id, app.workerId)).get();
   if (!worker) return json({ error: 'Worker not found' }, { status: 404 });
 
+  // One client for whichever branch runs, destroyed in the `finally`. Each one
+  // carries a keep-alive HTTPS agent, so a client that is dropped rather than
+  // destroyed leaks its sockets to the worker for the life of the process.
+  // `deploy` builds its own inside executeApplicationDeploy and needs none here.
+  let podmanClient: ReturnType<typeof getRestPodmanClient> | null = null;
+
   try {
     // ──────────────────────── DEPLOY ────────────────────────
     if (action === 'deploy') {
@@ -63,7 +69,7 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
 
     // ──────────────────────── START ────────────────────────
     } else if (action === 'start') {
-      const podmanClient = getRestPodmanClient(worker);
+      podmanClient = getRestPodmanClient(worker);
       // Only the generation that is serving. A superseded generation retained
       // for a fast rollback is deliberately stopped, and starting or restarting
       // it here would resurrect the old version's processes without routing any
@@ -88,7 +94,7 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
 
     // ──────────────────────── STOP ─────────────────────────
     } else if (action === 'stop') {
-      const podmanClient = getRestPodmanClient(worker);
+      podmanClient = getRestPodmanClient(worker);
       // Only the generation that is serving. A superseded generation retained
       // for a fast rollback is deliberately stopped, and starting or restarting
       // it here would resurrect the old version's processes without routing any
@@ -113,7 +119,7 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
 
     // ──────────────────────── RESTART ──────────────────────
     } else if (action === 'restart') {
-      const podmanClient = getRestPodmanClient(worker);
+      podmanClient = getRestPodmanClient(worker);
       // Only the generation that is serving. A superseded generation retained
       // for a fast rollback is deliberately stopped, and starting or restarting
       // it here would resurrect the old version's processes without routing any
@@ -138,7 +144,7 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
 
     // ──────────────────────── DELETE ───────────────────────
     } else if (action === 'delete') {
-      const podmanClient = getRestPodmanClient(worker);
+      podmanClient = getRestPodmanClient(worker);
       // Every generation, unlike the lifecycle actions above: deleting the
       // application must not leave a retained generation behind on the worker.
       const appContainers = await db
@@ -193,5 +199,7 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
   } catch (error: any) {
     console.error('Deployment error:', error);
     return json({ error: error.message }, { status: 500 });
+  } finally {
+    podmanClient?.destroy();
   }
 }
