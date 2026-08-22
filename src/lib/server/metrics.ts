@@ -7,12 +7,10 @@ import { db, sqlite } from '$lib/db';
 import { containers, workers, containerMetrics, workerMetrics, workerPings, systemSettings, applications } from '$lib/db/schema';
 import { eq, lt } from 'drizzle-orm';
 import { getRestPodmanClient } from './podman-client';
-import { createPodmanClient } from './podman';
 import { getHostStats } from './host-metrics';
 import { getHostStatsHttp } from './host-metrics-http';
 import { evaluateAlerts } from './alerts';
 import { reconcileAllWorkers } from './reconcile';
-import { decryptField } from './encryption';
 
 // Track which provisioning events have already been processed to avoid redundant discovery runs
 
@@ -201,30 +199,32 @@ async function collectWorkerMetrics(): Promise<void> {
       let systemDf: any = null;
       let pingStatus: 'online' | 'offline' | 'error' = 'offline';
 
-      if (worker.podmanApiUrl && worker.podmanCaCert && worker.podmanClientCert && worker.podmanClientKey) {
-        const client = createPodmanClient({
-          apiUrl: worker.podmanApiUrl,
-          caCert: worker.podmanCaCert,
-          clientCert: worker.podmanClientCert,
-          clientKey: decryptField(worker.podmanClientKey),
-        });
-        const ok = await client.ping();
-        if (ok) {
-          pingStatus = 'online';
-          try { sysInfo = await client.info(); } catch (e) { console.error(`[metrics] info() failed for ${worker.name}:`, (e as any).message || e); }
-          try { systemDf = await client.systemDf(); } catch (e) { console.error(`[metrics] systemDf() failed for ${worker.name}:`, (e as any).message || e); }
+      // Through `getRestPodmanClient`, like every other caller. This used to
+      // build its own client, and its no-mTLS branch connected over plain HTTP
+      // unconditionally — the exact thing that factory fails closed on, since
+      // the Podman API is root-equivalent on the worker and an unauthenticated
+      // one lets anything on the path answer for it. Going around it also meant
+      // a credential-less worker was pinged successfully and marked `online`
+      // while every real operation against it threw.
+      if (worker.podmanApiUrl) {
+        let client: ReturnType<typeof getRestPodmanClient> | null = null;
+        try {
+          client = getRestPodmanClient(worker);
+          const ok = await client.ping();
+          if (ok) {
+            pingStatus = 'online';
+            try { sysInfo = await client.info(); } catch (e) { console.error(`[metrics] info() failed for ${worker.name}:`, (e as any).message || e); }
+            try { systemDf = await client.systemDf(); } catch (e) { console.error(`[metrics] systemDf() failed for ${worker.name}:`, (e as any).message || e); }
+          }
+        } catch (e) {
+          // No usable credentials, or the client could not be built. `error`
+          // rather than `offline`: the machine may well be up: what is missing
+          // is a way to reach it that this deployment is willing to use.
+          pingStatus = 'error';
+          console.error(`[metrics] Cannot reach ${worker.name}:`, (e as any).message || e);
+        } finally {
+          client?.destroy();
         }
-        client.destroy();
-      } else if (worker.podmanApiUrl) {
-        // Dev/local mode — no mTLS
-        const client = createPodmanClient({ apiUrl: worker.podmanApiUrl });
-        const ok = await client.ping();
-        if (ok) {
-          pingStatus = 'online';
-          try { sysInfo = await client.info(); } catch (e) { console.error(`[metrics] info() failed for ${worker.name}:`, (e as any).message || e); }
-          try { systemDf = await client.systemDf(); } catch (e) { console.error(`[metrics] systemDf() failed for ${worker.name}:`, (e as any).message || e); }
-        }
-        client.destroy();
       }
 
       const latencyMs = Date.now() - start;
@@ -503,18 +503,45 @@ async function runLoop(): Promise<void> {
   }
   running = true;
   const start = Date.now();
+
+  // `Promise.race` abandons the loser, it does not cancel it, so a timed-out
+  // collection is still running when the race rejects. Clearing `running` at
+  // that point defeats the guard above and lets the next cycle start alongside
+  // it — two concurrent sweeps selecting the same draining rows, two reconcile
+  // passes racing the same upsert. So the flag is released by the collection
+  // itself, whenever it actually finishes, and the timeout only reports.
+  const collection = collectAll();
+  let timedOut = false;
+
+  collection
+    .catch(() => { /* reported below, or by the race */ })
+    .finally(() => {
+      running = false;
+      if (timedOut) {
+        console.warn(
+          `[metrics] The collection that timed out finished after ${Date.now() - start}ms; ` +
+            `cycles were skipped until it did.`,
+        );
+      }
+    });
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
-      collectAll(),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('Collection timed out — possible hung HTTP request')), COLLECTION_TIMEOUT_MS)
-      ),
+      collection,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(new Error('Collection timed out — possible hung HTTP request'));
+        }, COLLECTION_TIMEOUT_MS);
+      }),
     ]);
     console.log(`[metrics] Collection done in ${Date.now() - start}ms`);
   } catch (e) {
     console.error('[metrics] Collection failed:', (e as any).message || e);
   } finally {
-    running = false;
+    // Otherwise every fast cycle leaves a four-minute timer pending.
+    clearTimeout(timer);
   }
   scheduleNext();
 }
