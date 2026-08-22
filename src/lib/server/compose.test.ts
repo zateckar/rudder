@@ -29,6 +29,99 @@ function notesOf(manifest: string, options: Partial<PlanContext> = {}) {
   return plan(manifest, options).notes.join('\n');
 }
 
+describe('environment', () => {
+  test('keeps everything after the first = in a list-form value', () => {
+    const [c] = parse(`
+services:
+  web:
+    image: nginx
+    environment:
+      - JAVA_OPTS=-Dfoo=bar
+      - SECRET_KEY=abc123==
+      - DATABASE_URL=postgres://u:p@h/db?sslmode=require
+`);
+    expect(c.env).toContain('JAVA_OPTS=-Dfoo=bar');
+    expect(c.env).toContain('SECRET_KEY=abc123==');
+    expect(c.env).toContain('DATABASE_URL=postgres://u:p@h/db?sslmode=require');
+  });
+
+  test('a list entry with no value is an empty string, not a dropped key', () => {
+    const [c] = parse(`
+services:
+  web:
+    image: nginx
+    environment:
+      - EMPTY=
+      - BARE
+`);
+    expect(c.env).toContain('EMPTY=');
+    expect(c.env).toContain('BARE=');
+  });
+
+  test('the map form is unchanged', () => {
+    const [c] = parse(`
+services:
+  web:
+    image: nginx
+    environment:
+      APP_ENV: production
+`);
+    expect(c.env).toEqual(['APP_ENV=production']);
+  });
+});
+
+describe('resource limits', () => {
+  test('honours the v3 deploy.resources.limits spelling', () => {
+    const [c] = parse(`
+services:
+  web:
+    image: nginx
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+`);
+    expect(c.memory).toBe(512 * 1024 * 1024);
+    expect(c.cpuQuota).toBe(100000);
+    expect(c.cpuPeriod).toBe(100000);
+  });
+
+  test('honours the v2 mem_limit spelling', () => {
+    const [c] = parse(`
+services:
+  web:
+    image: nginx
+    mem_limit: 256m
+    cpus: 0.5
+`);
+    expect(c.memory).toBe(256 * 1024 * 1024);
+    expect(c.cpuQuota).toBe(50000);
+  });
+
+  test('a service that sets no limits gets none', () => {
+    const [c] = parse(`
+services:
+  web:
+    image: nginx
+`);
+    expect(c.memory).toBeUndefined();
+    expect(c.cpuQuota).toBeUndefined();
+  });
+
+  test('says compose secrets were not mounted', () => {
+    const notes = notesOf(`
+services:
+  web:
+    image: nginx
+    secrets:
+      - db_password
+`);
+    expect(notes).toContain('compose secret');
+    expect(notes).toContain('/run/secrets');
+  });
+});
+
 describe('deployment notes', () => {
   test('says how multi-service containers address each other', () => {
     // The Kubernetes path has always recorded this; compose returned [].

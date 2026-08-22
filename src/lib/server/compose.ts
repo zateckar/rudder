@@ -27,8 +27,26 @@ export interface ComposeService {
   networks?: string[];
   labels?: Record<string, string>;
   mem_limit?: string | number;
-  cpus?: number;
+  /** Fraction of a core, the v2 spelling of `deploy.resources.limits.cpus`. */
+  cpus?: number | string;
   cpu_shares?: number;
+  /**
+   * The v3 spelling of the resource limits. Read because it is what people
+   * actually write — and what this application's own example manifest shows —
+   * while only `mem_limit`/`cpu_shares` used to be honoured, so a compose file
+   * asking for 1 CPU and 512M got a container with neither and no note saying so.
+   */
+  deploy?: {
+    resources?: {
+      limits?: { cpus?: number | string; memory?: string | number };
+    };
+  };
+  /**
+   * Compose's own secrets, which are files on the machine running compose.
+   * Rudder has no such machine and injects from its secrets store instead, so
+   * this cannot be honoured — it is reported in the notes rather than ignored.
+   */
+  secrets?: unknown[];
   healthcheck?: {
     test?: string | string[];
     interval?: string;
@@ -112,9 +130,16 @@ export function parseCompose(manifest: string, ctx: PlanContext): DeploymentPlan
     if (service.environment) {
       if (Array.isArray(service.environment)) {
         for (const envEntry of service.environment) {
-          const [key, value] = envEntry.split('=');
+          // Split on the *first* `=` only. Destructuring `split('=')` kept the
+          // second field and discarded the rest, so every value containing an
+          // equals sign was silently truncated: `JAVA_OPTS=-Dfoo=bar` became
+          // `-Dfoo`, base64 padding was stripped, and a connection string lost
+          // its query parameters. The failure surfaced at runtime, in the
+          // container, as a malformed credential.
+          const separator = envEntry.indexOf('=');
+          const key = separator === -1 ? envEntry : envEntry.slice(0, separator);
           if (key) {
-            env[key] = value || '';
+            env[key] = separator === -1 ? '' : envEntry.slice(separator + 1);
           }
         }
       } else {
@@ -270,18 +295,44 @@ export function parseCompose(manifest: string, ctx: PlanContext): DeploymentPlan
       ? assignRoute(serviceName, parseInt(firstHostPort))
       : undefined;
 
+    const limits = service.deploy?.resources?.limits;
+
+    // `mem_limit` (v2) and `deploy.resources.limits.memory` (v3) say the same
+    // thing; whichever the file used is honoured.
     let memory: number | undefined;
-    if (service.mem_limit) {
-      if (typeof service.mem_limit === 'number') {
-        memory = service.mem_limit;
-      } else {
-        memory = parseMemory(service.mem_limit);
-      }
+    const memoryLimit = service.mem_limit ?? limits?.memory;
+    if (memoryLimit !== undefined && memoryLimit !== null && memoryLimit !== '') {
+      memory =
+        typeof memoryLimit === 'number' ? memoryLimit : parseMemory(memoryLimit) || undefined;
     }
 
-    let cpuShares: number | undefined;
-    if (service.cpu_shares) {
-      cpuShares = service.cpu_shares;
+    // A CPU limit is a fraction of a core, expressed over a 100ms period.
+    // `cpu_shares` is a different thing — a relative weight under contention,
+    // not a ceiling — so it is only consulted when no real limit was given, and
+    // keeps the mapping it has always had rather than changing what running
+    // applications get.
+    let cpu: { cpuQuota: number; cpuPeriod: number } | undefined;
+    const cpuLimit = limits?.cpus ?? service.cpus;
+    if (cpuLimit !== undefined && cpuLimit !== null && cpuLimit !== '') {
+      const cores = typeof cpuLimit === 'number' ? cpuLimit : parseFloat(cpuLimit);
+      if (Number.isFinite(cores) && cores > 0) {
+        cpu = { cpuQuota: Math.floor(cores * 100000), cpuPeriod: 100000 };
+      }
+    } else if (service.cpu_shares) {
+      cpu = { cpuQuota: service.cpu_shares * 100, cpuPeriod: 100000 };
+    }
+
+    // Compose secrets name files on the host running compose. There is no such
+    // host here, and guessing that a compose secret means the Rudder secret of
+    // the same name would inject something the file did not ask for.
+    if (Array.isArray(service.secrets) && service.secrets.length > 0) {
+      notes.push(
+        `Service "${serviceName}" declares ${service.secrets.length} compose secret` +
+          `${service.secrets.length === 1 ? '' : 's'}, which were not mounted. Compose reads those ` +
+          `from files on the machine running it; Rudder injects from its own secrets store instead, ` +
+          `so add them under Secrets and they will reach the container as environment variables or ` +
+          `as files in /run/secrets.`,
+      );
     }
 
     // Parse healthcheck
@@ -320,8 +371,8 @@ export function parseCompose(manifest: string, ctx: PlanContext): DeploymentPlan
       entrypoint: service.entrypoint ? (Array.isArray(service.entrypoint) ? service.entrypoint : [service.entrypoint]) : undefined,
       workingDir: service.working_dir,
       memory,
-      cpuQuota: cpuShares ? cpuShares * 100 : undefined,
-      cpuPeriod: cpuShares ? 100000 : undefined,
+      cpuQuota: cpu?.cpuQuota,
+      cpuPeriod: cpu?.cpuPeriod,
       healthcheck,
       route,
     });

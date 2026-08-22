@@ -115,8 +115,6 @@
     environment:
       APP_ENV: production
       DATABASE_URL: \${DATABASE_URL}
-    secrets:
-      - db_password
     volumes:
       - app-data:/var/www/html
       - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
@@ -140,10 +138,6 @@ volumes:
 networks:
   frontend:
     driver: bridge
-
-secrets:
-  db_password:
-    file: ./secrets/db_password.txt
 `;
 
   const k8sExample = `apiVersion: apps/v1
