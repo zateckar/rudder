@@ -1,5 +1,5 @@
 import { redirect } from '@sveltejs/kit';
-import type { PageServerLoad, Actions } from './$types';
+import type { PageServerLoad } from './$types';
 import { db, safeWorkerColumns, safeUserColumns } from '$lib/db';
 import { users, volumes, teams, workers, teamMembers } from '$lib/db/schema';
 import { eq, inArray } from 'drizzle-orm';
@@ -62,48 +62,15 @@ export const load: PageServerLoad = async ({ cookies, url }) => {
   };
 };
 
-export const actions: Actions = {
-  create: async ({ request, cookies }) => {
-    const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-    const sessionId = getSessionIdFromCookies(cookies);
-    const userId = await validateSession(sessionId!);
-    if (!userId) throw redirect(303, '/login');
-
-    const formData = await request.formData();
-    const name = formData.get('name')?.toString();
-    const containerPath = formData.get('containerPath')?.toString();
-    const sizeLimit = parseInt(formData.get('sizeLimit')?.toString() || '0');
-    const teamId = formData.get('teamId')?.toString();
-    const workerId = formData.get('workerId')?.toString();
-
-    if (!name || !containerPath || !teamId || !workerId) {
-      return { error: 'Missing required fields' };
-    }
-
-    await db.insert(volumes).values({
-      id: crypto.randomUUID(),
-      name,
-      containerPath,
-      sizeLimit: sizeLimit || null,
-      teamId,
-      workerId,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
-
-    return { success: true };
-  },
-  delete: async ({ request, cookies }) => {
-    const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-    const sessionId = getSessionIdFromCookies(cookies);
-    const userId = await validateSession(sessionId!);
-    if (!userId) throw redirect(303, '/login');
-
-    const formData = await request.formData();
-    const id = formData.get('id')?.toString();
-    if (!id) return { error: 'Missing ID' };
-
-    await db.delete(volumes).where(eq(volumes.id, id));
-    return { success: true };
-  }
-};
+// No form actions here on purpose.
+//
+// The page writes through `/api/volumes` and `/api/volumes/[id]`, which is where
+// the tenancy rules live: the POST requires an owning team and membership in it,
+// and the per-volume routes resolve the volume through `requireVolumeAccess`.
+//
+// This file used to carry `create` and `delete` actions as well — a second,
+// unauthorized write path that nothing in the UI called. They checked only that
+// a session existed, so `create` trusted whatever `teamId` was posted (a volume
+// planted in another team is mountable into that team's containers) and `delete`
+// removed any volume by raw id. Adding the checks here would have meant
+// maintaining the same rules in two places; the endpoints already have them.

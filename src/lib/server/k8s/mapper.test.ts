@@ -1,5 +1,38 @@
 import { describe, expect, test } from 'bun:test';
-import { containerPortOf, containerToPod, imageReferenceOrBlank, podNameOf } from './mapper';
+import {
+  DEFAULT_TAIL_LINES,
+  MAX_TAIL_LINES,
+  containerPortOf,
+  containerToPod,
+  imageReferenceOrBlank,
+  parseTailLines,
+  podNameOf,
+} from './mapper';
+
+describe('parseTailLines', () => {
+  test('clamps a count that would otherwise be buffered whole', () => {
+    // The reason this exists: the non-follow log path holds the entire response
+    // in memory, so `kubectl logs --tail=100000000` was a memory-exhaustion DoS
+    // available to any API key holder.
+    expect(parseTailLines('100000000')).toBe(MAX_TAIL_LINES);
+    expect(parseTailLines(String(MAX_TAIL_LINES + 1))).toBe(MAX_TAIL_LINES);
+  });
+
+  test('honours a reasonable count unchanged', () => {
+    expect(parseTailLines('10')).toBe(10);
+    expect(parseTailLines(String(MAX_TAIL_LINES))).toBe(MAX_TAIL_LINES);
+  });
+
+  test('falls back to the default rather than passing NaN to Podman', () => {
+    // `tail=NaN` reads as an empty log, which looks like a container that
+    // printed nothing — the one outcome worse than an error.
+    expect(parseTailLines(null)).toBe(DEFAULT_TAIL_LINES);
+    expect(parseTailLines('abc')).toBe(DEFAULT_TAIL_LINES);
+    expect(parseTailLines('')).toBe(DEFAULT_TAIL_LINES);
+    expect(parseTailLines('0')).toBe(DEFAULT_TAIL_LINES);
+    expect(parseTailLines('-5')).toBe(DEFAULT_TAIL_LINES);
+  });
+});
 
 describe('imageReferenceOrBlank', () => {
   test('accepts a bare image reference', () => {

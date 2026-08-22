@@ -136,7 +136,7 @@
   async function deleteTeam() {
     const ok = await confirmAction({
       title: `Delete the team "${data.team.name}"?`,
-      body: 'This cannot be undone. Applications, secrets and volumes belonging to it lose their team.',
+      body: 'This cannot be undone. Its secrets, volumes, API keys, templates, alert rules and quotas are deleted with it. Applications and stacks are not — the team cannot be deleted while it still owns any.',
       confirmLabel: 'Delete team',
       danger: true,
     });

@@ -31,6 +31,34 @@ export function matchPath(
   return params;
 }
 
+/**
+ * Ceiling on `?tailLines=` for pod logs.
+ *
+ * The non-follow log path buffers the whole response in memory before it
+ * answers, so an unclamped count is a request for as much of the control plane's
+ * heap as the caller cares to name — `kubectl logs --tail=100000000` needs no
+ * privilege beyond a working API key. kubectl's own default when `--tail` is
+ * omitted is 10; this is the highest number worth honouring, not a target.
+ */
+export const MAX_TAIL_LINES = 5000;
+
+/** What Rudder returns when `?tailLines=` is absent or unreadable. */
+export const DEFAULT_TAIL_LINES = 1000;
+
+/**
+ * Parse `?tailLines=`, clamped to `MAX_TAIL_LINES`.
+ *
+ * Absent, non-numeric and non-positive all mean the default: `parseInt('abc')`
+ * is `NaN`, which Podman turns into an empty log rather than an error, so a
+ * typo would silently look like a container that had printed nothing.
+ */
+export function parseTailLines(raw: string | null): number {
+  if (raw === null) return DEFAULT_TAIL_LINES;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_TAIL_LINES;
+  return Math.min(parsed, MAX_TAIL_LINES);
+}
+
 // ── Team → Namespace ───────────────────────────────────────────
 
 export function teamToNamespace(team: {

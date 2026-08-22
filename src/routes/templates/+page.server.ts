@@ -1,7 +1,7 @@
 import { redirect, fail } from '@sveltejs/kit';
 import { db, safeWorkerColumns, safeUserColumns } from '$lib/db';
 import { applicationTemplates, applications, users, teams, teamMembers, workers } from '$lib/db/schema';
-import { eq, inArray, or } from 'drizzle-orm';
+import { and, eq, inArray, or } from 'drizzle-orm';
 import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
 
 async function canModifyTemplate(userId: string, template: any): Promise<boolean> {
@@ -19,6 +19,19 @@ async function canModifyTemplate(userId: string, template: any): Promise<boolean
     .where(eq(teamMembers.userId, userId))
     .all();
   return membership.some((m) => m.teamId === template.teamId);
+}
+
+/** Whether `userId` may act on `teamId`'s behalf. Admins always may. */
+async function canActForTeam(userId: string, teamId: string): Promise<boolean> {
+  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
+  if (currentUser?.role === 'admin') return true;
+
+  const membership = await db
+    .select()
+    .from(teamMembers)
+    .where(and(eq(teamMembers.userId, userId), eq(teamMembers.teamId, teamId)))
+    .get();
+  return !!membership;
 }
 
 export const load = async ({ cookies, url }: { cookies: any; url: URL }) => {
@@ -118,6 +131,15 @@ export const actions = {
 
     if (!app.teamId) {
       return fail(400, { error: 'Application must belong to a team' });
+    }
+
+    // The application was fetched by id alone, so this action would copy any
+    // application in the installation — manifest and environment block included
+    // — into a template owned by that application's team. 404 rather than 403:
+    // the caller cannot see this application, so it should not be able to tell
+    // an inaccessible id from a nonexistent one.
+    if (!userId || !(await canActForTeam(userId, app.teamId))) {
+      return fail(404, { error: 'Application not found' });
     }
 
     // Check for duplicate template name within the team

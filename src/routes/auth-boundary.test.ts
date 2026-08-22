@@ -16,11 +16,18 @@ import { beforeAll, describe, expect, test } from 'bun:test';
 import type { Cookies } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import {
+  alertEvents,
+  alertRules,
+  apiKeys,
+  applicationTemplates,
   applications,
   auditLogs,
   deployments,
+  notificationChannels,
+  secrets,
   stacks,
   teamMembers,
+  teamQuotas,
   teams,
   users,
   volumes,
@@ -718,5 +725,241 @@ describe('password policy', () => {
   test('an acceptable password is taken', async () => {
     const response = await createUser({ ...base, password: 'long-enough-to-pass' });
     expect(response.status).toBe(201);
+  });
+});
+
+/**
+ * Second write paths.
+ *
+ * Both of these pages had a form action that duplicated an endpoint's job and
+ * not its authorization: the action checked that a session existed and then
+ * trusted the posted ids. `/settings/volumes` no longer has actions at all —
+ * the page writes through `/api/volumes`, which is covered above — and
+ * `/templates` keeps its actions, so its own membership check is asserted here.
+ */
+describe('page form actions', () => {
+  test('/settings/volumes exposes no form actions of its own', async () => {
+    // A `create` action here trusted the posted teamId, so a member could plant
+    // a volume in another team — mountable into that team's containers. If
+    // actions come back, they need the tenancy rules `/api/volumes` has.
+    const mod: any = await import('./settings/volumes/+page.server.ts');
+    expect(mod.actions).toBeUndefined();
+  });
+
+  test('/templates save refuses another team\'s application', async () => {
+    // Mirrors the `/api/templates/save` case above. The application was fetched
+    // by id alone, so this copied any application in the installation —
+    // environment block included — into a template owned by its team.
+    const { actions } = await import('./templates/+page.server.ts');
+    const form = new FormData();
+    form.set('appId', otherAppId);
+    form.set('name', 'page-action-stolen-template');
+
+    const result: any = await (actions as any).save({
+      request: new Request('http://localhost/templates', { method: 'POST', body: form }),
+      cookies: member.cookies,
+    });
+
+    expect(result.status).toBe(404);
+    const planted = await db
+      .select()
+      .from(applicationTemplates)
+      .where(eq(applicationTemplates.name, 'page-action-stolen-template'))
+      .get();
+    expect(planted).toBeUndefined();
+  });
+
+  test('/templates save still snapshots an application the caller can reach', async () => {
+    // Guards the refusal above: without this it would pass just as well if the
+    // action were broken for everyone.
+    const { actions } = await import('./templates/+page.server.ts');
+    const ownAppId = crypto.randomUUID();
+    const now = new Date();
+    await db.insert(applications).values({
+      id: ownAppId,
+      name: 'own-team-app-for-template',
+      teamId,
+      type: 'single',
+      deploymentFormat: 'compose',
+      manifest: 'image: nginx:1.27',
+      restartPolicy: 'always',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const form = new FormData();
+    form.set('appId', ownAppId);
+    form.set('name', 'own-team-template');
+
+    const result: any = await (actions as any).save({
+      request: new Request('http://localhost/templates', { method: 'POST', body: form }),
+      cookies: member.cookies,
+    });
+
+    expect(result.success).toBe(true);
+  });
+});
+
+/**
+ * Deleting a team.
+ *
+ * Eleven tables reference `teams.id` and none of them cascades, with
+ * `PRAGMA foreign_keys = ON`. The two-statement version dropped the memberships
+ * and then failed on the foreign key, so a team that owned anything could not be
+ * deleted — and was left with nobody in it.
+ */
+describe('team deletion', () => {
+  async function del(id: string, actor: Actor) {
+    const { DELETE } = await import('./api/teams/[id]/+server.ts');
+    return DELETE({ params: { id }, cookies: actor.cookies } as any);
+  }
+
+  /** A team `owner` owns outright. */
+  async function ownedTeam(slug: string, owner: Actor | null): Promise<string> {
+    const id = crypto.randomUUID();
+    const now = new Date();
+    await db.insert(teams).values({ id, name: slug, slug, createdAt: now, updatedAt: now });
+    if (owner) {
+      await db.insert(teamMembers).values({ teamId: id, userId: owner.id, role: 'owner', joinedAt: now });
+    }
+    return id;
+  }
+
+  test('refuses a team that still owns an application, and leaves it whole', async () => {
+    const id = await ownedTeam('doomed-with-app', member);
+    const now = new Date();
+    await db.insert(applications).values({
+      id: crypto.randomUUID(),
+      name: 'app-blocking-team-delete',
+      teamId: id,
+      type: 'single',
+      deploymentFormat: 'compose',
+      restartPolicy: 'always',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const response = await del(id, member);
+    expect(response.status).toBe(409);
+    expect((await response.json()).error).toContain('app-blocking-team-delete');
+
+    // Both halves of the old failure: the team survives *and* so do its members.
+    expect(await db.select().from(teams).where(eq(teams.id, id)).get()).toBeTruthy();
+    expect((await db.select().from(teamMembers).where(eq(teamMembers.teamId, id)).all()).length).toBe(1);
+  });
+
+  test('refuses a team that still owns a stack', async () => {
+    const id = await ownedTeam('doomed-with-stack', member);
+    const now = new Date();
+    await db.insert(stacks).values({
+      id: crypto.randomUUID(),
+      name: 'stack-blocking-team-delete',
+      teamId: id,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    expect((await del(id, member)).status).toBe(409);
+  });
+
+  test('removes a team together with everything that only existed because of it', async () => {
+    const id = await ownedTeam('doomed-clean', member);
+    const now = new Date();
+
+    const keyId = crypto.randomUUID();
+    const volumeId = crypto.randomUUID();
+    const secretId = crypto.randomUUID();
+    const quotaId = crypto.randomUUID();
+    const channelId = crypto.randomUUID();
+    const ruleId = crypto.randomUUID();
+    const eventId = crypto.randomUUID();
+    const templateId = crypto.randomUUID();
+    const auditId = crypto.randomUUID();
+    /** A rule in *another* team pointing at the doomed team's channel. */
+    const foreignRuleId = crypto.randomUUID();
+
+    await db.insert(apiKeys).values({ id: keyId, name: 'doomed-key', keyHash: 'hash', teamId: id, createdAt: now });
+    await db.insert(volumes).values({
+      id: volumeId, name: 'doomed-volume', teamId: id, containerPath: '/data', createdAt: now, updatedAt: now,
+    });
+    await db.insert(secrets).values({
+      id: secretId, name: 'DOOMED', value: 'enc', scope: 'team', deliveryMode: 'env',
+      teamId: id, createdBy: member.id, createdAt: now, updatedAt: now,
+    });
+    await db.insert(teamQuotas).values({ id: quotaId, teamId: id, createdAt: now, updatedAt: now });
+    await db.insert(notificationChannels).values({
+      id: channelId, name: 'doomed-channel', type: 'webhook',
+      config: JSON.stringify({ url: 'https://example.test' }), teamId: id, createdAt: now, updatedAt: now,
+    });
+    await db.insert(alertRules).values([
+      {
+        id: ruleId, name: 'doomed-rule', resourceType: 'container', metric: 'cpu_percent',
+        operator: 'gt', threshold: 90, channelId, teamId: id, createdAt: now, updatedAt: now,
+      },
+      {
+        id: foreignRuleId, name: 'foreign-rule', resourceType: 'container', metric: 'cpu_percent',
+        operator: 'gt', threshold: 90, channelId, teamId: otherTeamId, createdAt: now, updatedAt: now,
+      },
+    ]);
+    await db.insert(alertEvents).values({
+      id: eventId, ruleId, resourceType: 'container', metric: 'cpu_percent',
+      value: 95, threshold: 90, message: 'over', createdAt: now,
+    });
+    await db.insert(applicationTemplates).values({
+      id: templateId, name: 'doomed-template', teamId: id, type: 'single',
+      deploymentFormat: 'compose', restartPolicy: 'always', createdAt: now, updatedAt: now,
+    });
+    await db.insert(auditLogs).values({
+      id: auditId, userId: member.id, teamId: id, action: 'CREATE',
+      resourceType: 'team', resourceId: id, details: '{}', createdAt: now,
+    });
+
+    const response = await del(id, member);
+    expect(response.status).toBe(200);
+
+    expect(await db.select().from(teams).where(eq(teams.id, id)).get()).toBeUndefined();
+    expect(await db.select().from(apiKeys).where(eq(apiKeys.id, keyId)).get()).toBeUndefined();
+    expect(await db.select().from(volumes).where(eq(volumes.id, volumeId)).get()).toBeUndefined();
+    expect(await db.select().from(secrets).where(eq(secrets.id, secretId)).get()).toBeUndefined();
+    expect(await db.select().from(teamQuotas).where(eq(teamQuotas.id, quotaId)).get()).toBeUndefined();
+    expect(await db.select().from(notificationChannels).where(eq(notificationChannels.id, channelId)).get()).toBeUndefined();
+    expect(await db.select().from(alertRules).where(eq(alertRules.id, ruleId)).get()).toBeUndefined();
+    expect(await db.select().from(alertEvents).where(eq(alertEvents.id, eventId)).get()).toBeUndefined();
+    expect(await db.select().from(applicationTemplates).where(eq(applicationTemplates.id, templateId)).get()).toBeUndefined();
+    expect((await db.select().from(teamMembers).where(eq(teamMembers.teamId, id)).all()).length).toBe(0);
+
+    // The audit row is the record of what was done to the team, so it outlives
+    // it — unlinked, not deleted.
+    const audit = await db.select().from(auditLogs).where(eq(auditLogs.id, auditId)).get();
+    expect(audit).toBeTruthy();
+    expect(audit?.teamId).toBeNull();
+
+    // Another team's rule kept its threshold and lost only the channel it can no
+    // longer reach. Deleting the channel without this fails on the foreign key.
+    const foreign = await db.select().from(alertRules).where(eq(alertRules.id, foreignRuleId)).get();
+    expect(foreign).toBeTruthy();
+    expect(foreign?.channelId).toBeNull();
+  });
+
+  test('a plain member cannot delete their own team', async () => {
+    const id = await ownedTeam('not-yours-to-delete', null);
+    const now = new Date();
+    await db.insert(teamMembers).values({ teamId: id, userId: member.id, role: 'member', joinedAt: now });
+
+    expect((await del(id, member)).status).toBe(403);
+    expect(await db.select().from(teams).where(eq(teams.id, id)).get()).toBeTruthy();
+  });
+
+  test('an admin can delete an ownerless team', async () => {
+    // Every team created by OIDC group sync has no owner row, so an
+    // owner-only check made them permanently unmanageable.
+    const id = await ownedTeam('ownerless-team', null);
+    expect((await del(id, admin)).status).toBe(200);
+    expect(await db.select().from(teams).where(eq(teams.id, id)).get()).toBeUndefined();
+  });
+
+  test('a stranger is told nothing about a team they are not in', async () => {
+    const id = await ownedTeam('stranger-cannot-see', member);
+    expect((await del(id, loner)).status).toBe(403);
   });
 });

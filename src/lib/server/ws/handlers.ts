@@ -331,10 +331,22 @@ registerWsRoute('k8s-exec', {
       // The exit code is what kubectl turns into its own exit status, so it is
       // read back rather than assumed — `kubectl exec … && something` depends
       // on it being right.
-      const { exitCode } = await exec.inspect();
-      try { ws.send(statusFrame(exitCode, cmd)); } catch { /* closing */ }
-      ws.close(1000, 'exec finished');
-      client.destroy();
+      //
+      // A worker that blips between the command ending and the inspect landing
+      // used to reject here, which skipped both the close and the destroy: the
+      // Podman client leaked its keep-alive sockets and kubectl waited on a
+      // socket nobody was ever going to close. An unreadable exit code is worth
+      // reporting as a failure; it is not worth hanging the client over.
+      let exitCode = 1;
+      try {
+        exitCode = (await exec.inspect()).exitCode;
+      } catch (e: any) {
+        console.warn('[ws/exec] Could not read the exit code:', e?.message || e);
+      } finally {
+        try { ws.send(statusFrame(exitCode, cmd)); } catch { /* closing */ }
+        ws.close(1000, 'exec finished');
+        client.destroy();
+      }
     });
 
     ws.on('message', (raw) => {

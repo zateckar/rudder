@@ -27,6 +27,7 @@ import {
   containerToPod,
   k8sList,
   matchPath,
+  parseTailLines,
   podNameOf,
 } from '$lib/server/k8s/mapper';
 import { db } from '$lib/db';
@@ -105,7 +106,7 @@ export async function GET({
     if (!result) return k8sError(404, `pods "${m.pod}" not found`);
 
     const url = new URL(request.url);
-    const tailLines = parseInt(url.searchParams.get('tailLines') || '1000');
+    const tailLines = parseTailLines(url.searchParams.get('tailLines'));
     const timestamps = url.searchParams.get('timestamps') === 'true';
     const follow = url.searchParams.get('follow') === 'true';
     return await fetchPodLogs(result.container, tailLines, timestamps, follow);
