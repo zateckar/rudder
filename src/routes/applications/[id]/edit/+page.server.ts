@@ -1,11 +1,10 @@
 import { redirect, fail } from '@sveltejs/kit';
 import { db, safeWorkerColumns, safeUserColumns } from '$lib/db';
-import { applications, users, workers, teams, teamMembers, volumes, stacks } from '$lib/db/schema';
+import { applications, users, workers, teams, teamMembers, volumes } from '$lib/db/schema';
 import { eq, inArray, or, isNull } from 'drizzle-orm';
 import {
   canAccessApplication,
   requirePageUser,
-  stackAcceptsTeam,
   userTeams as allUserTeams,
 } from '$lib/server/auth';
 import { assertDomainAvailable } from '$lib/server/domains';
@@ -95,12 +94,6 @@ export const load = async (event: { params: { id: string }; locals: App.Locals; 
     }
   }
 
-  // Load available stacks for the user's teams
-  const teamIds = userTeams.map((t: { id: string }) => t.id);
-  const availableStacks = teamIds.length > 0
-    ? await db.select().from(stacks).where(inArray(stacks.teamId, teamIds)).all()
-    : [];
-
   return {
     user: currentUser,
     // `authConfig` is encrypted at rest and decrypted here, because this form
@@ -113,7 +106,6 @@ export const load = async (event: { params: { id: string }; locals: App.Locals; 
     workers: allWorkers,
     teams: userTeams,
     volumes: availableVolumes,
-    stacks: availableStacks,
   };
 };
 
@@ -302,8 +294,6 @@ export const actions = {
       }
     }
 
-    const stackId = formData.get('stackId')?.toString() || null;
-
     // Moving an application between teams is an admin action: it transfers
     // every permission on it, so a member being able to do it would be a way to
     // pull another team's workload into their own. The form still submits the
@@ -316,18 +306,6 @@ export const actions = {
       const target = await db.select().from(teams).where(eq(teams.id, teamId)).get();
       if (!target) return fail(400, { error: 'Target team not found' });
       nextTeamId = teamId;
-    }
-
-    // The stack is submitted too, and it scopes bulk deploy/stop/restart in
-    // /api/stacks/[id] — so an application parked in another team's stack is one
-    // that team can act on. Only a stack owned by the same team is accepted.
-    //
-    // Checked only when the value is actually changing. A row that already points
-    // at a stack from before this rule — or one whose application has no team at
-    // all, which the schema permits — must stay editable, or the form that could
-    // fix it is the form that refuses to save.
-    if (stackId && stackId !== app.stackId && !(await stackAcceptsTeam(stackId, nextTeamId))) {
-      return fail(400, { error: 'That stack does not belong to this application\'s team' });
     }
 
     await db
@@ -351,7 +329,6 @@ export const actions = {
         // `encryptField` is idempotent, so a re-save of a row that was written
         // before this does not double-encrypt.
         authConfig: encryptField(authConfig),
-        stackId,
         replicas,
         healthcheck,
         healthTimeoutSeconds,

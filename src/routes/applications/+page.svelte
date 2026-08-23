@@ -71,7 +71,7 @@
 
 <input type="file" accept=".json" class="hidden-file-input" bind:this={importFileInput} onchange={handleFileSelected} />
 
-<PageHeader title="Applications">
+<PageHeader title="Applications" subtitle="Everything deployed to your workers, and the state each deployment is in.">
   {#snippet actions()}
     <button class="btn-secondary" onclick={handleImportClick}>Import</button>
     <a href="/applications/new" class="btn-primary">New Application</a>

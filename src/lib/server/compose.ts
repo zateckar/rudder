@@ -262,7 +262,7 @@ export function parseCompose(manifest: string, ctx: PlanContext): DeploymentPlan
       ...identityLabels(ctx),
       service: serviceName,
       // The bare alias, recorded so a later deploy can see which names are
-      // already claimed on a shared stack network without reparsing manifests.
+      // already claimed on the application's network without reparsing manifests.
       [ALIAS_LABEL]: aliases[0],
     };
 

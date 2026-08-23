@@ -22,7 +22,7 @@
  */
 import { json, redirect, type RequestEvent } from '@sveltejs/kit';
 import { db } from '$lib/db';
-import { users, teamMembers, applications, workers, teams, containers, stacks } from '$lib/db/schema';
+import { users, teamMembers, applications, workers, teams, containers } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import type { Cookies } from '@sveltejs/kit';
 import { getSessionIdFromCookies, validateSession } from '$lib/auth';
@@ -31,7 +31,6 @@ import { PodmanApiError } from './podman';
 import { podmanErrorResponse } from './podman-client';
 
 export type UserRole = 'admin' | 'member';
-export type TeamRole = 'owner' | 'member';
 
 export interface AuthUser {
   id: string;
@@ -221,12 +220,18 @@ export async function requireContainerScoped(
   return { ctx, container };
 }
 
-export async function requireTeam(
-  event: AuthEvent,
-  teamId: string,
-): Promise<AuthContext & { teamRole: TeamRole }> {
+/**
+ * A caller who belongs to this team, or an admin.
+ *
+ * Teams are flat: there is no second tier inside one. This used to return a
+ * `teamRole` and have a `requireTeamOwnership` sibling, and the difference
+ * between them decided who could rename a team, delete a volume or mint an API
+ * key. Those splits are gone — team *lifecycle* and *membership* are admin work
+ * (`requireAdminUser`), and everything a team owns is open to every member of it.
+ */
+export async function requireTeam(event: AuthEvent, teamId: string): Promise<AuthContext> {
   const ctx = requireUser(event);
-  if (ctx.user.role === 'admin') return { ...ctx, teamRole: 'owner' };
+  if (ctx.user.role === 'admin') return ctx;
 
   const membership = await db
     .select()
@@ -235,15 +240,7 @@ export async function requireTeam(
     .get();
   if (!membership) throw new AuthorizationError('Access denied to this team', 403);
 
-  return { ...ctx, teamRole: membership.role as TeamRole };
-}
-
-export async function requireTeamOwnership(event: AuthEvent, teamId: string): Promise<AuthContext> {
-  const found = await requireTeam(event, teamId);
-  if (found.teamRole !== 'owner') {
-    throw new AuthorizationError('Team owner access required', 403);
-  }
-  return { user: found.user, sessionUserId: found.sessionUserId };
+  return ctx;
 }
 
 /** Every team the caller can see. Admins see all of them. */
@@ -281,25 +278,6 @@ export async function userTeams(event: AuthEvent): Promise<typeof teams.$inferSe
 export async function canWriteToTeam(ctx: AuthContext, teamId: string): Promise<boolean> {
   if (ctx.user.role === 'admin') return true;
   return isTeamMember(ctx.user.id, teamId);
-}
-
-/**
- * Whether `stackId` is a stack that may hold an application owned by `teamId`.
- *
- * A stack is scoped to its own team everywhere else — `/api/stacks/[id]` lists
- * every application in it and deploys, stops and restarts them in bulk. So an
- * application sitting in another team's stack hands that team control of it,
- * which is why this is required of admins too and not only of members: it is a
- * coherence rule about the data, not a permission check on the caller.
- */
-export async function stackAcceptsTeam(stackId: string, teamId: string | null): Promise<boolean> {
-  if (!teamId) return false;
-  const stack = await db
-    .select({ teamId: stacks.teamId })
-    .from(stacks)
-    .where(eq(stacks.id, stackId))
-    .get();
-  return !!stack && stack.teamId === teamId;
 }
 
 export async function isTeamMember(userId: string, teamId: string): Promise<boolean> {

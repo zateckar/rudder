@@ -38,7 +38,7 @@
   }
 </script>
 
-<PageHeader title="Workers">
+<PageHeader title="Workers" subtitle="The hosts Rudder deploys to over SSH, and the domain each one serves.">
   {#snippet actions()}
     <a href="/workers/new" class="btn-primary">Add Worker</a>
   {/snippet}

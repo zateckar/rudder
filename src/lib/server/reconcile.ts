@@ -47,7 +47,6 @@ import {
   containers,
   notificationChannels,
   reconcileReports,
-  stacks,
   teams,
   volumes,
   workers,
@@ -239,7 +238,6 @@ export interface DesiredStateInput {
   app: typeof applications.$inferSelect;
   worker: typeof workers.$inferSelect;
   team?: Pick<typeof teams.$inferSelect, 'id' | 'name' | 'slug'> | null;
-  stack?: Pick<typeof stacks.$inferSelect, 'id' | 'name'> | null;
   /** Registered volumes the application references, keyed by volume id. */
   volumeRegistry?: Map<string, { name: string; containerPath: string }>;
   /**
@@ -300,7 +298,7 @@ const PLACEHOLDER_PORT_BASE = 1;
  * drift everywhere else.
  */
 export function desiredState(input: DesiredStateInput): DesiredApp {
-  const { app, worker, team, stack } = input;
+  const { app, worker, team } = input;
   if (!app.manifest) throw new ManifestError('No manifest found');
 
   let placeholder = PLACEHOLDER_PORT_BASE;
@@ -313,7 +311,6 @@ export function desiredState(input: DesiredStateInput): DesiredApp {
     baseDomain: process.env.TRAEFIK_BASE_DOMAIN || worker.baseDomain || worker.hostname,
     teamSlug: team?.slug,
     team: team ? { id: team.id, name: team.name } : undefined,
-    stack: stack ? { id: stack.id, name: stack.name } : undefined,
     replicas: app.replicas,
     restartPolicy: app.restartPolicy,
     environment: app.environment,
@@ -704,8 +701,6 @@ export async function reconcileWorker(
 
   const teamRows = await db.select().from(teams).all();
   const teamById = new Map(teamRows.map((t) => [t.id, t]));
-  const stackRows = await db.select().from(stacks).all();
-  const stackById = new Map(stackRows.map((s) => [s.id, s]));
   const volumeRows = await db.select().from(volumes).all();
   const volumeById = new Map(
     volumeRows.map((v) => [v.id, { name: v.name, containerPath: v.containerPath }]),
@@ -720,7 +715,6 @@ export async function reconcileWorker(
           app,
           worker,
           team: app.teamId ? teamById.get(app.teamId) : null,
-          stack: app.stackId ? stackById.get(app.stackId) : null,
           volumeRegistry: volumeById,
         }),
       );

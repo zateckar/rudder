@@ -5,7 +5,8 @@
       "name": "rudder-dev",
       "runtimeExecutable": "bun",
       "runtimeArgs": ["--bun", "vite", "dev"],
-      "port": 7244
+      "port": 7244,
+      "autoPort": true
     }
   ]
 }

@@ -43,6 +43,7 @@ export const actions = {
       allowRegistration: formData.get('allowRegistration') !== 'off',
       teamClaimName: formData.get('teamClaimName')?.toString() || null,
       teamClaimKey: formData.get('teamClaimKey')?.toString() || null,
+      teamRoleSuffix: formData.get('teamRoleSuffix')?.toString().trim() || null,
     };
 
     const now = new Date();

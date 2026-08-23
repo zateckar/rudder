@@ -3,7 +3,7 @@
  *
  * This used to be called discovery, and it ran by itself. After a
  * re-provisioning it would list a worker's containers, parse Traefik router
- * labels back into a domain, infer teams from label values, invent stacks,
+ * labels back into a domain, infer teams from label values,
  * fabricate a `succeeded` deployment record for something it had never deployed,
  * and write application rows for all of it — with no one asked. The code
  * admitted in a comment that it could not recover an OIDC `clientSecret` or
@@ -320,7 +320,6 @@ export async function adoptContainers(
           rateLimitBurst: null,
           authType: 'none',
           authConfig: null,
-          stackId: null,
           replicas: 1,
           gitRepo: null,
           gitBranch: null,

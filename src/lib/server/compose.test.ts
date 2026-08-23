@@ -420,19 +420,18 @@ describe('label sanitisation', () => {
     expect(c.labels['TRAEFIK.enable']).toBeUndefined();
   });
 
-  test('applies team and stack labels', () => {
+  test('applies team labels', () => {
     const [c] = parse(`
 services:
   web: { image: nginx }
 `, {
       teamSlug: 'platform',
       team: { name: 'Platform', id: 'team-1' },
-      stack: { name: 'Core', id: 'stack-1' },
     });
 
     expect(c.labels.team).toBe('platform');
     expect(c.labels['rudder.team.id']).toBe('team-1');
-    expect(c.labels['rudder.stack.id']).toBe('stack-1');
+    expect(c.labels['rudder.team.name']).toBe('Platform');
   });
 });
 
@@ -579,7 +578,7 @@ services:
   });
 
   test('does not let start order steal the application hostname', () => {
-    // `web` is declared first and is the public face of the stack, but it
+    // `web` is declared first and is the public face of the application, but it
     // depends on `db`, so the topological walk starts `db` first. The hostname
     // must still follow declaration order — otherwise sorting the parse loop
     // silently moves shop.example.com onto the database.

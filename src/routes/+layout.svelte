@@ -16,10 +16,6 @@
     children: any;
   } = $props();
   
-  let activePage = $derived(
-    $page.url.pathname.split('/')[1] || 'dashboard'
-  );
-  
   let showLayout = $derived(
     String($page.url.pathname) !== '/login' && 
     String($page.url.pathname) !== '/' &&
@@ -28,7 +24,7 @@
 </script>
 
 {#if showLayout}
-  <AppLayout user={data.user} teams={data.teams} {activePage} pathname={$page.url.pathname}>
+  <AppLayout user={data.user} teams={data.teams} pathname={$page.url.pathname}>
     {@render children()}
   </AppLayout>
 {:else}

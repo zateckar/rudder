@@ -145,7 +145,6 @@ export interface PlanContext {
   baseDomain?: string | null;
   teamSlug?: string;
   team?: { id: string; name: string };
-  stack?: { id: string; name: string };
   /** Draws a free host port on the target worker. Collision-checked by the caller. */
   allocatePort: PortAllocator;
   /** `applications.replicas`, honoured by the single-container format. */
@@ -194,10 +193,6 @@ export function identityLabels(ctx: PlanContext): Record<string, string> {
   if (ctx.team) {
     labels['rudder.team.name'] = ctx.team.name;
     labels['rudder.team.id'] = ctx.team.id;
-  }
-  if (ctx.stack) {
-    labels['rudder.stack.name'] = ctx.stack.name;
-    labels['rudder.stack.id'] = ctx.stack.id;
   }
   return labels;
 }

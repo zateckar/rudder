@@ -38,6 +38,7 @@ sqlite.run(`
     password_hash TEXT,
     full_name TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'member',
+    last_seen_at INTEGER,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   );
@@ -65,7 +66,6 @@ sqlite.run(`
   CREATE TABLE IF NOT EXISTS team_members (
     team_id TEXT NOT NULL REFERENCES teams(id),
     user_id TEXT NOT NULL REFERENCES users(id),
-    role TEXT NOT NULL DEFAULT 'member',
     joined_at INTEGER NOT NULL
   );
 
@@ -105,7 +105,6 @@ sqlite.run(`
     rate_limit_burst INTEGER,
     auth_type TEXT NOT NULL DEFAULT 'global',
     auth_config TEXT,
-    stack_id TEXT,
     replicas INTEGER NOT NULL DEFAULT 1,
     git_repo TEXT,
     git_branch TEXT,
@@ -295,6 +294,11 @@ try {
 } catch {
   // Column already exists
 }
+try {
+  sqlite.run(`ALTER TABLE oidc_config ADD COLUMN team_role_suffix TEXT;`);
+} catch {
+  // Column already exists
+}
 
 // Add per-application rate limiting and auth columns
 try {
@@ -318,9 +322,8 @@ try {
   // Column already exists
 }
 
-// Add stack, replicas, git, and healthcheck columns to applications
+// Add replicas, git, and healthcheck columns to applications
 for (const col of [
-  `ALTER TABLE applications ADD COLUMN stack_id TEXT;`,
   `ALTER TABLE applications ADD COLUMN replicas INTEGER NOT NULL DEFAULT 1;`,
   `ALTER TABLE applications ADD COLUMN git_repo TEXT;`,
   `ALTER TABLE applications ADD COLUMN git_branch TEXT;`,
@@ -412,16 +415,6 @@ sqlite.run(`
     team_id TEXT NOT NULL REFERENCES teams(id),
     max_cpu_cores REAL, max_memory_bytes INTEGER,
     max_containers INTEGER, max_applications INTEGER,
-    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-  );
-`);
-
-sqlite.run(`
-  CREATE TABLE IF NOT EXISTS stacks (
-    id TEXT PRIMARY KEY NOT NULL,
-    name TEXT NOT NULL, description TEXT,
-    team_id TEXT REFERENCES teams(id),
-    created_by TEXT REFERENCES users(id),
     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
   );
 `);
@@ -539,6 +532,42 @@ for (const col of [
   try { sqlite.run(col); } catch { /* Column already exists */ }
 }
 
+// ── Team owners, removed ─────────────────────────────────────────────────────
+//
+// `team_members.role` was `owner` or `member`: a second, weaker administrator
+// tier that could rename and delete its own team, manage its membership and mint
+// its API keys. An installation admin could already do all of that, so what the
+// role actually bought was a branch in every team-scoped handler and an exemption
+// in the OIDC claim sync. Teams are flat now — see the schema comment.
+//
+// Dropped rather than left in place: a column nothing reads is a column the next
+// person has to work out the status of.
+for (const stmt of [
+  `ALTER TABLE team_members DROP COLUMN role;`,
+  `ALTER TABLE users ADD COLUMN last_seen_at INTEGER;`,
+]) {
+  try { sqlite.run(stmt); } catch { /* Already applied */ }
+}
+
+// ── Stacks, removed ──────────────────────────────────────────────────────────
+//
+// A stack was a group of applications with bulk deploy/stop/restart over it.
+// An application is now the multi-container unit — a compose manifest with
+// several services is deployed, stopped and restarted as one thing from its own
+// page — so the grouping layer above it bought nothing and had its own team
+// scoping to get wrong.
+//
+// Ordered: the index has to go before the column it covers, or SQLite refuses
+// the drop. Each statement is guarded because a database created after this
+// landed never had any of it.
+for (const stmt of [
+  `DROP INDEX IF EXISTS applications_stack_idx;`,
+  `ALTER TABLE applications DROP COLUMN stack_id;`,
+  `DROP TABLE IF EXISTS stacks;`,
+]) {
+  try { sqlite.run(stmt); } catch { /* Already gone */ }
+}
+
 // ── Indexes on the operational tables ────────────────────────────────────────
 //
 // Last, because several of these cover columns the ALTER block above adds
@@ -564,7 +593,6 @@ for (const idx of [
   `CREATE INDEX IF NOT EXISTS containers_worker_state_idx ON containers (worker_id, state, status);`,
   `CREATE INDEX IF NOT EXISTS applications_worker_idx ON applications (worker_id);`,
   `CREATE INDEX IF NOT EXISTS applications_team_idx ON applications (team_id);`,
-  `CREATE INDEX IF NOT EXISTS applications_stack_idx ON applications (stack_id);`,
   // DESC to match `ORDER BY version DESC LIMIT 1`, which is how the next
   // deployment version is computed on every deploy.
   `CREATE INDEX IF NOT EXISTS deployments_app_version_idx ON deployments (application_id, version DESC);`,

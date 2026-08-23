@@ -1,5 +1,4 @@
 <script lang="ts">
-  import PageHeader from '$lib/components/PageHeader.svelte';
   import { formatBytes, formatDateTime as formatDate } from '$lib/format';
   import { browser } from '$app/environment';
 
@@ -135,11 +134,6 @@
   }
 
 </script>
-
-<PageHeader
-  title="Azure Blob Storage Backups"
-  subtitle="Configure automated daily backups of your database to Azure Blob Storage"
-/>
 
 {#if configError}
   <div class="alert alert-error">{configError}</div>

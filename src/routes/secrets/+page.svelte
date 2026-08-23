@@ -130,7 +130,7 @@
   const MASK = '••••••••••••';
 </script>
 
-<PageHeader title="Secrets">
+<PageHeader title="Secrets" subtitle="Values delivered to containers at deploy time, as an environment variable or a file.">
   {#snippet actions()}
     <button class="btn-primary" onclick={() => { resetForm(); showForm = true; fScope = isAdmin ? 'global' : 'team'; }}>
       + New Secret
@@ -139,11 +139,10 @@
 </PageHeader>
 
 <p class="page-desc">
-  Values delivered to containers at deploy time, as an environment variable or as a file in
-  <code>/run/secrets</code>. <b>Global</b> secrets are injected into every
-  application; their values are readable by admins only. <b>Team</b> secrets are injected into that
-  team's applications and readable by its members. Values are fetched individually and each read is
-  recorded in the audit log.
+  File-mode secrets are written to <code>/run/secrets</code>. <b>Global</b> secrets are injected into
+  every application; their values are readable by admins only. <b>Team</b> secrets are injected into
+  that team's applications and readable by its members. Values are fetched individually and each read
+  is recorded in the audit log.
 </p>
 
 {#if showForm}

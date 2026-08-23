@@ -1,5 +1,4 @@
 <script lang="ts">
-  import PageHeader from '$lib/components/PageHeader.svelte';
   import { formatDateTime as formatDate } from '$lib/format';
   import { showToast } from '$lib/client/toast.svelte';
   import { confirmAction } from '$lib/client/dialog.svelte';
@@ -318,11 +317,6 @@
   const urlLabel = $derived(channelType === 'slack' ? 'Slack Webhook URL' : channelType === 'email' ? 'Recipient Email' : 'Webhook URL');
   const urlPlaceholder = $derived(channelType === 'slack' ? 'https://hooks.slack.com/services/...' : channelType === 'email' ? 'alerts@example.com' : 'https://example.com/webhook');
 </script>
-
-<PageHeader
-  title="Notifications & Alerts"
-  subtitle="Manage notification channels, alert rules, and view alert history"
-/>
 
 <!-- ── Notification Channels ────────────────────────────────────────── -->
 <section class="section">

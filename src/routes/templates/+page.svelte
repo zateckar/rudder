@@ -52,7 +52,7 @@
     return data.teams.find((t: any) => t.id === teamId)?.name ?? 'Unknown';
   }
 
-  function isOwner(teamId: string): boolean {
+  function isMyTeam(teamId: string): boolean {
     return data.userTeamIds.includes(teamId);
   }
 
@@ -73,13 +73,13 @@
     showApplyModal = true;
   }
 
-  let myTemplates = $derived(data.templates.filter((t: any) => isOwner(t.teamId) || t.createdBy === data.user?.id));
+  let myTemplates = $derived(data.templates.filter((t: any) => isMyTeam(t.teamId) || t.createdBy === data.user?.id));
   let sharedTemplates = $derived(
-    data.templates.filter((t: any) => !isOwner(t.teamId) && t.shared && t.createdBy !== data.user?.id)
+    data.templates.filter((t: any) => !isMyTeam(t.teamId) && t.shared && t.createdBy !== data.user?.id)
   );
 </script>
 
-<PageHeader title="Templates">
+<PageHeader title="Templates" subtitle="Saved application definitions, ready to deploy again.">
   {#snippet actions()}
     {#if data.applications.length > 0}
       <button class="btn-primary" onclick={openSaveModal} title="Save an existing application as a template">Save as Template</button>

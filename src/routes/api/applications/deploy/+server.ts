@@ -171,7 +171,7 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
       const containerIds = appContainers.map(c => c.containerId);
       const workerSSHConfig = await resolveWorkerSSHConfig(worker);
       try {
-        await teardownAppNetwork(podmanClient, applicationId, app.stackId, containerIds, workerSSHConfig);
+        await teardownAppNetwork(podmanClient, applicationId, containerIds, workerSSHConfig);
       } catch (e: any) {
         console.warn('Failed to teardown app network:', e.message);
       }

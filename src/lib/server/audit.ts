@@ -33,7 +33,7 @@ const NOT_AN_ID = new Set([
  * Whether a segment looks like something's id rather than a fixed route name.
  *
  * UUIDs cover applications, workers, teams, users, secrets and volumes.
- * Container ids are hex, and stack/template ids are UUIDs too. Anything else is
+ * Container ids are hex, and template ids are UUIDs too. Anything else is
  * treated as a route name, which is the safe direction to be wrong in: a
  * mislabelled id is noise in one column, an id mistaken for a route name only
  * costs the resourceId.
@@ -94,7 +94,6 @@ const RESOURCE_BY_API_ROOT: Record<string, string> = {
   users: 'user',
   secrets: 'secret',
   volumes: 'volume',
-  stacks: 'stack',
   templates: 'template',
   domains: 'domain',
   'api-keys': 'api_key',
@@ -118,7 +117,6 @@ const RESOURCE_BY_PAGE_ROOT: Record<string, string> = {
   admin: 'user',
   secrets: 'secret',
   volumes: 'volume',
-  stacks: 'stack',
   templates: 'template',
   settings: 'settings',
 };

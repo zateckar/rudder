@@ -1,6 +1,6 @@
 import { redirect, fail } from '@sveltejs/kit';
 import { db, safeUserColumns } from '$lib/db';
-import { applications, users, workers, teams, teamMembers, volumes, stacks } from '$lib/db/schema';
+import { applications, users, workers, teams, teamMembers, volumes } from '$lib/db/schema';
 import { eq, inArray, or, isNull, and } from 'drizzle-orm';
 import { selectWorker, getAllWorkerResources, getAllEligibleWorkers } from '$lib/server/worker-selector';
 import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
@@ -11,7 +11,6 @@ import {
   canWriteToTeam,
   currentUser as sessionUser,
   requirePageUser,
-  stackAcceptsTeam,
   userTeams as allUserTeams,
 } from '$lib/server/auth';
 import { encryptField } from '$lib/server/encryption';
@@ -37,12 +36,6 @@ export const load = async (event: { locals: App.Locals }) => {
         : await db.select().from(volumes).where(isNull(volumes.teamId)).all();
   }
 
-  // Load available stacks for the user's teams
-  const stackTeamIds = userTeams.map((t: { id: string }) => t.id);
-  const availableStacks = stackTeamIds.length > 0
-    ? await db.select().from(stacks).where(inArray(stacks.teamId, stackTeamIds)).all()
-    : [];
-
   const _stripWorker = (w: typeof workers.$inferSelect) => {
     const { podmanCaCert: _a, podmanClientCert: _b, podmanClientKey: _c, crowdsecBouncerKey: _d, oidcClientSecret: _e, oidcEncryptionKey: _f, configToken: _g, ...safe } = w;
     return safe;
@@ -51,7 +44,6 @@ export const load = async (event: { locals: App.Locals }) => {
     user: currentUser,
     teams: userTeams,
     volumes: availableVolumes,
-    stacks: availableStacks,
     selectedWorker: selection?.worker ? _stripWorker(selection.worker) : null,
     workerResources: selection?.resources ?? null,
     noWorkersAvailable: selection === null,
@@ -71,7 +63,6 @@ export const actions = {
     const name = formData.get('name')?.toString();
     const teamId = formData.get('teamId')?.toString();
     const description = formData.get('description')?.toString() || null;
-    const stackId = formData.get('stackId')?.toString() || null;
     const type = (formData.get('type')?.toString() || 'single') as 'single' | 'compose' | 'k8s';
     const restartPolicy = (formData.get('restartPolicy')?.toString() || 'always') as
       | 'no'
@@ -89,12 +80,6 @@ export const actions = {
     // team's quota, claiming a domain and deploying on their workers.
     if (!(await canWriteToTeam(ctx, teamId))) {
       return fail(403, { error: 'You are not a member of that team' });
-    }
-
-    // Same reasoning for the stack: it scopes bulk deploy/stop/restart, so an
-    // application in another team's stack is an application that team can act on.
-    if (stackId && !(await stackAcceptsTeam(stackId, teamId))) {
-      return fail(400, { error: 'That stack does not belong to this team' });
     }
 
     // Validate name format (lowercase, alphanumeric, hyphens only)
@@ -286,7 +271,6 @@ export const actions = {
       description,
       workerId: worker.id,
       teamId,
-      stackId,
       domain,
       type,
       deploymentFormat: type === 'k8s' ? 'k8s' : 'compose',

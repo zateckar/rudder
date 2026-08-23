@@ -13,7 +13,7 @@ import { db } from '$lib/db';
 import { apiKeys, teams } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import type { RequestHandler } from './$types';
-import { requireUser, requireTeamOwnership, route } from '$lib/server/auth';
+import { requireUser, requireTeam, route } from '$lib/server/auth';
 import { hashKey } from '$lib/server/encryption';
 import { randomBytes } from 'crypto';
 
@@ -41,7 +41,7 @@ export const POST: RequestHandler = route(async (event) => {
       .get();
     if (!team) return json({ error: 'Team not found' }, { status: 404 });
 
-    await requireTeamOwnership(event, teamId);
+    await requireTeam(event, teamId);
     teamSlug = team.slug;
   } else {
     // Checked inline rather than through `requireAdminUser`, only so the message

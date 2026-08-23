@@ -40,7 +40,6 @@ function appRow(over: Partial<typeof applications.$inferSelect> = {}): typeof ap
     rateLimitBurst: null,
     authType: 'global',
     authConfig: null,
-    stackId: null,
     replicas: 1,
     gitRepo: null,
     gitBranch: null,

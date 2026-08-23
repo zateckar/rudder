@@ -1,28 +1,21 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db, sqlite } from '$lib/db';
-import { teams, teamMembers, users, applications, stacks } from '$lib/db/schema';
+import { teams, teamMembers, users, applications } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { AuthorizationError, requireUser, route } from '$lib/server/auth';
+import { AuthorizationError, requireAdminUser, requireUser, route } from '$lib/server/auth';
 
-/**
- * Resolve the caller's authority over a team.
- *
- * Admins are treated as owners, the way `requireTeam` in `$lib/server/auth`
- * already does everywhere else. Without that, a team with no owner row — every
- * team created by OIDC group sync — could not be renamed or removed by anyone
- * at all, including an operator.
- */
-async function teamAuthority(
+/** A team the caller belongs to, or any team if they are an admin. */
+async function readableTeam(
   event: { locals: App.Locals },
   teamId: string,
-): Promise<{ team: typeof teams.$inferSelect; isOwner: boolean }> {
+): Promise<typeof teams.$inferSelect> {
   const ctx = requireUser(event);
 
   const team = await db.select().from(teams).where(eq(teams.id, teamId)).get();
   if (!team) throw new AuthorizationError('Team not found', 404);
 
-  if (ctx.user.role === 'admin') return { team, isOwner: true };
+  if (ctx.user.role === 'admin') return team;
 
   const membership = await db
     .select()
@@ -32,18 +25,37 @@ async function teamAuthority(
 
   if (!membership) throw new AuthorizationError('Access denied', 403);
 
-  return { team, isOwner: membership.role === 'owner' };
+  return team;
+}
+
+/**
+ * A team an admin may reshape or remove.
+ *
+ * Renaming and deleting used to be an owner's prerogative. Teams are flat now, so
+ * the tier that could do it no longer exists and both are admin work — which is
+ * also the only reading under which a team created by OIDC group sync, which
+ * never had an owner, is administrable at all.
+ */
+async function administrableTeam(
+  event: { locals: App.Locals },
+  teamId: string,
+): Promise<typeof teams.$inferSelect> {
+  requireAdminUser(event);
+
+  const team = await db.select().from(teams).where(eq(teams.id, teamId)).get();
+  if (!team) throw new AuthorizationError('Team not found', 404);
+
+  return team;
 }
 
 export const GET: RequestHandler = route(async (event) => {
-  const { team, isOwner } = await teamAuthority(event, event.params.id!);
+  const team = await readableTeam(event, event.params.id!);
 
   const members = await db.select({
     id: users.id,
     username: users.username,
     email: users.email,
     fullName: users.fullName,
-    role: teamMembers.role,
     joinedAt: teamMembers.joinedAt,
   })
     .from(teamMembers)
@@ -54,16 +66,12 @@ export const GET: RequestHandler = route(async (event) => {
   return json({
     ...team,
     members: members.filter(m => m.username),
-    userRole: isOwner ? 'owner' : 'member',
   });
 });
 
 export const PATCH: RequestHandler = route(async (event) => {
   const teamId = event.params.id!;
-  const { isOwner } = await teamAuthority(event, teamId);
-  if (!isOwner) {
-    return json({ error: 'Only owners can update team settings' }, { status: 403 });
-  }
+  await administrableTeam(event, teamId);
 
   const body = await event.request.json().catch(() => null);
   const rawName = body?.name;
@@ -126,7 +134,7 @@ export const PATCH: RequestHandler = route(async (event) => {
  * anything at all failed on the foreign key — after its members were already
  * gone, leaving a team nobody could reach or finish deleting.
  *
- * Applications and stacks are deliberately *not* removed. They are running
+ * Applications are deliberately *not* removed. They are running
  * infrastructure with containers behind them, and destroying it as a side effect
  * of tidying up a team is not this endpoint's decision to make; the caller is
  * told to move or delete them first.
@@ -135,27 +143,16 @@ export const PATCH: RequestHandler = route(async (event) => {
  * done to the team, which is precisely what you still want once it is gone.
  */
 export const DELETE: RequestHandler = route(async (event) => {
-  const { team, isOwner } = await teamAuthority(event, event.params.id!);
-  if (!isOwner) {
-    return json({ error: 'Only owners can delete team' }, { status: 403 });
-  }
+  const team = await administrableTeam(event, event.params.id!);
 
   const ownedApps = await db
     .select({ id: applications.id, name: applications.name })
     .from(applications)
     .where(eq(applications.teamId, team.id))
     .all();
-  const ownedStacks = await db
-    .select({ id: stacks.id, name: stacks.name })
-    .from(stacks)
-    .where(eq(stacks.teamId, team.id))
-    .all();
 
-  if (ownedApps.length > 0 || ownedStacks.length > 0) {
-    const blockers = [
-      ...ownedApps.map((a) => `application "${a.name}"`),
-      ...ownedStacks.map((s) => `stack "${s.name}"`),
-    ];
+  if (ownedApps.length > 0) {
+    const blockers = ownedApps.map((a) => `application "${a.name}"`);
     return json(
       {
         error:

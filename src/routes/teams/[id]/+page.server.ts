@@ -10,8 +10,8 @@ export const load = async (event: { params: { id: string }; locals: App.Locals }
   const team = await db.select().from(teams).where(eq(teams.id, event.params.id)).get();
   if (!team) throw redirect(303, '/teams');
 
-  let userRole = 'member';
-
+  // Teams are flat, so the only question is whether the caller is in this one.
+  // Renaming, deleting and membership are admin work and gated on `user.role`.
   if (currentUser.role !== 'admin') {
     const membership = await db.select()
       .from(teamMembers)
@@ -19,10 +19,6 @@ export const load = async (event: { params: { id: string }; locals: App.Locals }
       .get();
 
     if (!membership) throw redirect(303, '/teams');
-
-    userRole = membership.role;
-  } else {
-    userRole = 'owner'; // Admins have owner privileges on all teams
   }
 
   const members = await db.select({
@@ -30,7 +26,6 @@ export const load = async (event: { params: { id: string }; locals: App.Locals }
     username: users.username,
     email: users.email,
     fullName: users.fullName,
-    role: teamMembers.role,
     joinedAt: teamMembers.joinedAt,
   })
     .from(teamMembers)
@@ -48,7 +43,6 @@ export const load = async (event: { params: { id: string }; locals: App.Locals }
     user: currentUser,
     team,
     members: members.filter(m => m.username),
-    userRole,
     apiKeys: teamApiKeys,
   };
 };

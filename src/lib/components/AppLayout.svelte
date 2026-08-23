@@ -8,15 +8,14 @@
     children,
     user,
     teams = [],
-    activePage,
     pathname,
   }: {
     children?: any;
     user?: { username: string; role: string; id: string } | null;
     /** From the root layout load — see `+layout.server.ts`. */
     teams?: Array<{ id: string; name: string }>;
-    activePage: string;
-    pathname?: string;
+    /** Drives which nav entry is lit. See `isActive`. */
+    pathname: string;
   } = $props();
 
   /**
@@ -62,6 +61,14 @@
   }
 
   const isAdmin = $derived(user?.role === 'admin');
+
+  // One rule for every entry: a section stays lit while you are anywhere
+  // inside it. This used to be two — an `activePage` first-path-segment match
+  // for some links and an exact `pathname ===` for the rest — which meant the
+  // exact-match ones went dark the moment you opened a child route.
+  function isActive(href: string) {
+    return pathname === href || pathname.startsWith(`${href}/`);
+  }
 </script>
 
 <div class="layout">
@@ -86,62 +93,48 @@
 
     <nav>
       <div class="nav-label">Overview</div>
-      <a href="/dashboard?team={selectedTeam}" class:active={activePage === 'dashboard'}>
+      <a href="/dashboard?team={selectedTeam}" class:active={isActive('/dashboard')}>
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="1" y="1" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="9" y="1" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="1" y="9" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="9" y="9" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/></svg>
         Dashboard
       </a>
-      <a href="/applications?team={selectedTeam}" class:active={activePage === 'applications'}>
+      <a href="/applications?team={selectedTeam}" class:active={isActive('/applications')}>
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 5l6-3 6 3v6l-6 3-6-3V5z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M2 5l6 3m0 0l6-3M8 8v6" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
         Applications
       </a>
-      <a href="/templates?team={selectedTeam}" class:active={activePage === 'templates'}>
+      <a href="/templates?team={selectedTeam}" class:active={isActive('/templates')}>
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="2" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M5 6h6M5 8h4M5 10h5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
         Templates
       </a>
-      <a href="/stacks?team={selectedTeam}" class:active={activePage === 'stacks'}>
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="3" y="2" width="10" height="3" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="3" y="6.5" width="10" height="3" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="3" y="11" width="10" height="3" rx="1" stroke="currentColor" stroke-width="1.3"/></svg>
-        Stacks
-      </a>
-      <a href="/teams?team={selectedTeam}" class:active={activePage === 'teams'}>
+      <a href="/teams?team={selectedTeam}" class:active={isActive('/teams')}>
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="6" cy="5" r="2.5" stroke="currentColor" stroke-width="1.5"/><circle cx="11" cy="5" r="2" stroke="currentColor" stroke-width="1.3"/><path d="M1 13c0-2.5 2.2-4 5-4s5 1.5 5 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M11 9c1.8 0 3.5 1 3.5 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
         Teams
       </a>
-      <a href="/settings/volumes?team={selectedTeam}" class:active={pathname === '/settings/volumes'}>
+      <a href="/volumes?team={selectedTeam}" class:active={isActive('/volumes')}>
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><ellipse cx="8" cy="4" rx="6" ry="2" stroke="currentColor" stroke-width="1.5"/><path d="M2 4v3c0 1.1 2.7 2 6 2s6-.9 6-2V4" stroke="currentColor" stroke-width="1.5"/><path d="M2 7v3c0 1.1 2.7 2 6 2s6-.9 6-2V7" stroke="currentColor" stroke-width="1.5"/></svg>
         Volumes
       </a>
-
-      <div class="nav-label">Secrets</div>
-      <a href="/secrets?team={selectedTeam}" class:active={pathname === '/secrets' || pathname === '/settings'}>
+      <a href="/secrets?team={selectedTeam}" class:active={isActive('/secrets')}>
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="3" y="6" width="10" height="7" rx="1.5" stroke="currentColor" stroke-width="1.5"/><path d="M5 6V4a3 3 0 016 0v2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="10" r="1" fill="currentColor"/></svg>
         Secrets
       </a>
 
       {#if isAdmin}
         <div class="nav-label">Admin</div>
-        <a href="/workers?team={selectedTeam}" class:active={activePage === 'workers'}>
+        <a href="/workers?team={selectedTeam}" class:active={isActive('/workers')}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" stroke-width="1.5"/><path d="M5 7h6M5 9h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="12" cy="5" r="1" fill="currentColor"/></svg>
           Workers
         </a>
-        <a href="/admin?team={selectedTeam}" class:active={activePage === 'admin'}>
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1l1.8 3.6L14 5.3l-3 2.9.7 4.1L8 10.5l-3.7 1.8.7-4.1-3-2.9 4.2-.7L8 1z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
-          Admin
+        <a href="/users?team={selectedTeam}" class:active={isActive('/users')}>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="5" r="2.75" stroke="currentColor" stroke-width="1.5"/><path d="M2.5 13.5c0-2.8 2.5-4.5 5.5-4.5s5.5 1.7 5.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          Users
         </a>
-        <a href="/settings/audit?team={selectedTeam}" class:active={pathname === '/settings/audit'}>
+        <a href="/audit?team={selectedTeam}" class:active={isActive('/audit')}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 4h10M3 7h7M3 10h9M3 13h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
           Audit Logs
         </a>
-        <a href="/settings/oidc?team={selectedTeam}" class:active={pathname === '/settings/oidc'}>
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2L3 5v4c0 3.5 2.2 5.5 5 6.5 2.8-1 5-3 5-6.5V5L8 2z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M6 8l1.5 1.5L10.5 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          OIDC Config
-        </a>
-        <a href="/settings/notifications?team={selectedTeam}" class:active={pathname === '/settings/notifications'}>
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 6a4 4 0 018 0c0 2 1 3.5 1.5 4.5H2.5C3 9.5 4 8 4 6z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M6 11.5a2 2 0 004 0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-          Notifications
-        </a>
-        <a href="/settings/backup?team={selectedTeam}" class:active={pathname === '/settings/backup'}>
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 8a6 6 0 0112 0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M8 2v4l2 1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 10v3h8v-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M6 12h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
-          Backups
+        <a href="/settings?team={selectedTeam}" class:active={isActive('/settings')}>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="2.25" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.5l1 1.6 1.9-.4.4 1.9 1.6 1-.9 1.7.9 1.7-1.6 1-.4 1.9-1.9-.4-1 1.6-1-1.6-1.9.4-.4-1.9-1.6-1 .9-1.7-.9-1.7 1.6-1 .4-1.9 1.9.4 1-1.6z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+          Settings
         </a>
       {/if}
     </nav>

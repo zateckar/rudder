@@ -1,18 +1,11 @@
 <script lang="ts">
   import PageHeader from '$lib/components/PageHeader.svelte';
   import { formatDateTime as formatDate } from '$lib/format';
-  import { invalidateAll } from '$app/navigation';
   import { browser } from '$app/environment';
   import { showToast } from '$lib/client/toast.svelte';
   import { confirmAction } from '$lib/client/dialog.svelte';
 
   let { data } = $props();
-  
-  let showAddMemberForm = $state(false);
-  let adding = $state(false);
-  let email = $state('');
-  let role = $state('member');
-  let error = $state<string | null>(null);
 
   // Quota state
   let quota = $state<any>(null);
@@ -87,59 +80,10 @@
     return Math.min(100, Math.round((used / max) * 100));
   }
 
-  async function addMember() {
-    error = null;
-    adding = true;
-    try {
-      const response = await fetch(`/api/teams/${data.team.id}/members`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, role }),
-      });
-      
-      const result = await response.json();
-      
-      if (!response.ok) {
-        error = result.error || 'Failed to add member';
-      } else {
-        invalidateAll();
-      }
-    } catch (e: any) {
-      error = e.message;
-    } finally {
-      adding = false;
-    }
-  }
-
-  async function removeMember(memberId: string) {
-    const ok = await confirmAction({
-      title: 'Remove this member?',
-      body: 'They lose access to this team’s applications, secrets and volumes. Their account is not deleted.',
-      confirmLabel: 'Remove member',
-      danger: true,
-    });
-    if (!ok) return;
-    
-    try {
-      const response = await fetch(`/api/teams/${data.team.id}/members?memberId=${memberId}`, {
-        method: 'DELETE',
-      });
-      
-      if (response.ok) {
-        invalidateAll();
-      } else {
-        const result = await response.json();
-        showToast('error', result.error || 'Failed to remove member');
-      }
-    } catch (e: any) {
-      showToast('error', e.message);
-    }
-  }
-
   async function deleteTeam() {
     const ok = await confirmAction({
       title: `Delete the team "${data.team.name}"?`,
-      body: 'This cannot be undone. Its secrets, volumes, API keys, templates, alert rules and quotas are deleted with it. Applications and stacks are not — the team cannot be deleted while it still owns any.',
+      body: 'This cannot be undone. Its secrets, volumes, API keys, templates, alert rules and quotas are deleted with it. Applications are not — the team cannot be deleted while it still owns any.',
       confirmLabel: 'Delete team',
       danger: true,
     });
@@ -266,7 +210,7 @@
     <span class="slug">Slug: {data.team.slug}</span>
   {/snippet}
   {#snippet actions()}
-    {#if data.userRole === 'owner'}
+    {#if isAdmin}
       <button class="btn-danger" onclick={deleteTeam}>Delete Team</button>
     {/if}
   {/snippet}
@@ -276,41 +220,12 @@
   <div class="members-section">
     <div class="section-header">
       <h2>Members</h2>
-      {#if data.userRole === 'owner'}
-        <button class="btn-primary" onclick={() => showAddMemberForm = !showAddMemberForm}>
-          {showAddMemberForm ? 'Cancel' : 'Add Member'}
-        </button>
+      {#if isAdmin}
+        <!-- Membership is managed per account, not per team: it is an attribute
+             of the user, and for OIDC accounts the claim sync writes it. -->
+        <a class="btn-secondary btn-small" href="/users">Manage in Users</a>
       {/if}
     </div>
-
-    {#if showAddMemberForm}
-      <div class="add-member-form">
-        <h3>Add New Member</h3>
-        {#if error}
-          <div class="error-msg">{error}</div>
-        {/if}
-        <form onsubmit={(e) => { e.preventDefault(); addMember(); }}>
-          <div class="form-row">
-            <div class="form-group">
-              <label for="email">User Email</label>
-              <input type="email" id="email" bind:value={email} placeholder="user@example.com" required />
-            </div>
-            <div class="form-group">
-              <label for="role">Role</label>
-              <select id="role" bind:value={role}>
-                <option value="member">Member</option>
-                <option value="owner">Owner</option>
-              </select>
-            </div>
-          </div>
-          <div class="form-actions">
-            <button type="submit" class="btn-primary" disabled={adding}>
-              {adding ? 'Adding...' : 'Add to Team'}
-            </button>
-          </div>
-        </form>
-      </div>
-    {/if}
 
     <div class="members-list">
       {#each data.members as member}
@@ -325,22 +240,14 @@
             </div>
           </div>
           <div class="member-meta">
-            <span class="role-badge {member.role}">{member.role}</span>
             <span class="joined-date">Joined: {new Date(member.joinedAt).toLocaleDateString()}</span>
           </div>
-          <div class="member-actions">
-            {#if data.userRole === 'owner' && (member.role !== 'owner' || data.user?.id === member.id)}
-              <button 
-                class="btn-danger btn-small" 
-                onclick={() => member.id && removeMember(member.id)}
-                disabled={member.id === data.user?.id && data.members.filter((m: any) => m.role === 'owner').length === 1}
-                title={member.id === data.user?.id && data.members.filter((m: any) => m.role === 'owner').length === 1 ? 'Cannot remove the last owner' : ''}
-              >
-                {member.id === data.user?.id ? 'Leave Team' : 'Remove'}
-              </button>
-            {/if}
-          </div>
         </div>
+      {:else}
+        <p class="no-members">
+          Nobody is in this team yet.{#if isAdmin}
+            Add someone from <a href="/users">Users</a>.{/if}
+        </p>
       {/each}
     </div>
   </div>
@@ -449,11 +356,11 @@
     <div class="info-card api-keys-card">
       <div class="quota-header">
         <h3>API Keys</h3>
-        {#if data.userRole === 'owner'}
-          <button class="btn-small btn-ghost-sm" onclick={() => { showCreateKey = !showCreateKey; createdKeyValue = null; createKeyError = null; }}>
-            {showCreateKey ? 'Cancel' : '+ New Key'}
-          </button>
-        {/if}
+        <!-- Any member of the team: the key grants exactly what its holder can
+             already reach through these pages, and only this team's resources. -->
+        <button class="btn-small btn-ghost-sm" onclick={() => { showCreateKey = !showCreateKey; createdKeyValue = null; createKeyError = null; }}>
+          {showCreateKey ? 'Cancel' : '+ New Key'}
+        </button>
       </div>
 
       <p class="api-keys-description">
@@ -534,24 +441,11 @@
     gap: 24px;
   }
 
-  .add-member-form {
-    background: var(--bg-raised);
-    padding: 24px;
-    border-radius: var(--radius-lg);
-    margin-bottom: 24px;
-    border: 1px solid var(--border-subtle);
-  }
-
-  .add-member-form h3 {
-    font-size: 16px;
-    color: var(--text-primary);
-    margin-bottom: 16px;
-  }
-
-  .form-row {
-    display: grid;
-    grid-template-columns: 2fr 1fr;
-    gap: 16px;
+  .no-members {
+    font-size: 13px;
+    color: var(--text-muted);
+    font-style: italic;
+    margin: 0;
   }
 
   .members-list {
@@ -613,26 +507,6 @@
     flex-direction: column;
     align-items: flex-end;
     gap: 8px;
-    margin-right: 24px;
-  }
-
-  .role-badge {
-    padding: 4px 10px;
-    border-radius: 100px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-  }
-
-  .role-badge.owner {
-    background: var(--accent-subtle);
-    color: var(--accent-text);
-  }
-
-  .role-badge.member {
-    background: var(--bg-overlay);
-    color: var(--text-secondary);
   }
 
   .joined-date {

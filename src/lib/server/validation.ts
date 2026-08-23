@@ -188,7 +188,6 @@ export const schemas = {
 
   addTeamMember: z.object({
     userId: z.string().uuid(),
-    role: z.enum(['owner', 'member']).default('member'),
   }),
 
   containerAction: z.object({
@@ -241,6 +240,7 @@ export const schemas = {
     allowRegistration: z.boolean().optional(),
     teamClaimName: z.string().max(100).optional(),
     teamClaimKey: z.string().max(100).optional(),
+    teamRoleSuffix: z.string().max(100).optional(),
   }),
 
   seedAdmin: z.object({

@@ -22,7 +22,7 @@
   <div class="toast {toast.type}">{toast.message}</div>
 {/if}
 
-<PageHeader title="Teams">
+<PageHeader title="Teams" subtitle="Groups that own applications, volumes and secrets, and the people in them.">
   {#snippet actions()}
     {#if data.user?.role === 'admin'}
       <button class="btn-primary" onclick={() => (showCreateForm = !showCreateForm)}>

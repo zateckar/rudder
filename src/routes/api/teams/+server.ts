@@ -3,7 +3,7 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { teams, teamMembers, users } from '$lib/db/schema';
 import { eq, inArray } from 'drizzle-orm';
-import { requireUser, route, userTeams } from '$lib/server/auth';
+import { requireAdminUser, requireUser, route, userTeams } from '$lib/server/auth';
 import { parseJsonBody, schemas } from '$lib/server/validation';
 
 function slugify(text: string): string {
@@ -30,7 +30,6 @@ export const GET: RequestHandler = route(async (event) => {
       username: users.username,
       email: users.email,
       fullName: users.fullName,
-      role: teamMembers.role,
       joinedAt: teamMembers.joinedAt,
     })
     .from(teamMembers)
@@ -54,8 +53,17 @@ export const GET: RequestHandler = route(async (event) => {
   );
 });
 
+/**
+ * Create a team.
+ *
+ * Admin-only. Any signed-in user could do this before, and was made its `owner`
+ * — which was the only way a non-admin ever became one. With owners gone, a team
+ * a member created would be a team they had no more authority over than any
+ * other, so the capability had no meaning left; creating tenants is installation
+ * administration.
+ */
 export const POST: RequestHandler = route(async (event) => {
-  const userId = requireUser(event).user.id;
+  const userId = requireAdminUser(event).user.id;
 
   const { name } = await parseJsonBody(event.request, schemas.createTeam);
 
@@ -78,10 +86,11 @@ export const POST: RequestHandler = route(async (event) => {
     updatedAt: now,
   });
 
+  // The creating admin is put in the team so it does not start out empty and
+  // invisible to them on `/teams`; they can remove themselves from `/users`.
   await db.insert(teamMembers).values({
     teamId,
     userId,
-    role: 'owner',
     joinedAt: now,
   });
 

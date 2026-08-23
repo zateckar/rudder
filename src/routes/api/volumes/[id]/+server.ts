@@ -14,19 +14,17 @@ import { AuthorizationError, requireUser, route } from '$lib/server/auth';
  * by any authenticated user. A teamless volume is now admin-only: it belongs to
  * nobody, so nobody but an operator should reach it.
  *
- * `needOwner` distinguishes reading from writing, matching what the handlers
- * enforced before.
+ * Reading and writing are the same permission now. They were split by the team
+ * `owner` role, which no longer exists: a team is flat, so a member who can see a
+ * volume can change it — the same rule that already governed the applications
+ * those volumes are mounted into.
  *
  * 404 for a volume the caller cannot see at all — another team's, or a teamless
- * one — so the route does not double as an id oracle, which is the same rule
- * `/api/stacks/[id]` follows. 403 is kept for the one case where it says
- * something true and useful: a member of the owning team who can read the volume
- * and needs the `owner` role to change it.
+ * one — so the route does not double as an id oracle.
  */
 async function requireVolume(
   event: { locals: App.Locals },
   volumeId: string,
-  needOwner: boolean,
 ): Promise<typeof volumes.$inferSelect> {
   const ctx = requireUser(event);
 
@@ -43,21 +41,18 @@ async function requireVolume(
       .get();
 
     if (!membership) throw new AuthorizationError('Volume not found', 404);
-    if (needOwner && membership.role !== 'owner') {
-      throw new AuthorizationError('Access denied - owner role required', 403);
-    }
   }
 
   return volume;
 }
 
 export const GET: RequestHandler = route(async (event) => {
-  return json(await requireVolume(event, event.params.id!, false));
+  return json(await requireVolume(event, event.params.id!));
 });
 
 export const PATCH: RequestHandler = route(async (event) => {
   const volumeId = event.params.id!;
-  await requireVolume(event, volumeId, true);
+  await requireVolume(event, volumeId);
 
   const body = await event.request.json();
   const allowedFields = ['name', 'containerPath', 'sizeLimit', 'workerId'] as const;
@@ -75,7 +70,7 @@ export const PATCH: RequestHandler = route(async (event) => {
 
 export const DELETE: RequestHandler = route(async (event) => {
   const volumeId = event.params.id!;
-  await requireVolume(event, volumeId, true);
+  await requireVolume(event, volumeId);
 
   await db.delete(volumes).where(eq(volumes.id, volumeId));
 

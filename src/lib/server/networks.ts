@@ -1,8 +1,9 @@
 /**
- * Per-app and per-stack Podman network isolation.
+ * Per-app Podman network isolation.
  *
- * Each standalone application gets its own bridge network:  rudder-{appId[:8]}
- * Applications within a stack share a network:              rudder-s-{stackId[:8]}
+ * Every application gets its own bridge network: rudder-{appId[:8]}. One
+ * application, one network — its containers reach each other, and nothing
+ * outside it can.
  *
  * The network exists so containers can reach each other by service name.
  * Traefik is *not* on it: it runs with host networking and proxies to each
@@ -37,10 +38,9 @@ export const ALIAS_LABEL = 'rudder.alias';
  * - the **bare** name — `db`, `web`, the compose service or Kubernetes
  *   container name. This is what a manifest written for Docker Compose or for
  *   Kubernetes already uses, so it has to work.
- * - the **qualified** name — `<app>-<key>`. A stack shares one network, so two
- *   applications in it may each define a `db`. The bare name then resolves to
- *   whichever container Podman's DNS answers with; the qualified one is
- *   unambiguous.
+ * - the **qualified** name — `<app>-<key>`. The name a sibling can use without
+ *   depending on how the manifest happened to spell the service, and the one
+ *   that stays stable if the bare name is ever shadowed.
  *
  * For a container whose key is the application itself (a single-container app)
  * the two collapse into one name, which is returned alone.
@@ -148,26 +148,17 @@ while IFS= read -r iface; do
 done < <(ip -o link show 2>/dev/null | awk -F'[ :@]+' '/podman[0-9]+/{print $2}')
 `;
 
-/** Generate a deterministic, short network name for a standalone app. */
+/** Generate a deterministic, short network name for an application. */
 export function appNetworkName(appId: string): string {
   return `rudder-${appId.slice(0, 8)}`;
 }
 
-/** Generate a deterministic, short network name for a stack. */
-export function stackNetworkName(stackId: string): string {
-  return `rudder-s-${stackId.slice(0, 8)}`;
-}
-
-/**
- * Ensure the correct network exists and return its name.
- * Stack apps share a network; standalone apps get their own.
- */
+/** Ensure the application's network exists and return its name. */
 export async function ensureAppNetwork(
   client: PodmanClient,
   appId: string,
-  stackId?: string | null,
 ): Promise<string> {
-  const name = stackId ? stackNetworkName(stackId) : appNetworkName(appId);
+  const name = appNetworkName(appId);
   await client.createNetwork(name);
   return name;
 }
@@ -205,9 +196,7 @@ export async function purgeStaleNetavarkRules(
 }
 
 /**
- * Disconnect all containers from a network, then remove the network.
- * For standalone apps the network is removed entirely.
- * For stack apps the network is only removed when the last app leaves.
+ * Disconnect all containers from the application's network, then remove it.
  *
  * When `sshConfig` is provided, a Netavark iptables cleanup is performed after
  * the network is removed to purge any stale DNAT rules and orphaned bridge
@@ -217,34 +206,19 @@ export async function purgeStaleNetavarkRules(
 export async function teardownAppNetwork(
   client: PodmanClient,
   appId: string,
-  stackId: string | null | undefined,
   containerIds: string[],
   sshConfig?: SSHConnectionConfig | null,
 ): Promise<void> {
-  const name = stackId ? stackNetworkName(stackId) : appNetworkName(appId);
+  const name = appNetworkName(appId);
 
   for (const cid of containerIds) {
     await client.disconnectContainerFromNetwork(cid, name);
   }
 
-  // Only remove standalone app networks; stack networks persist while any app uses them
-  if (!stackId) {
-    await client.removeNetwork(name);
-    // After the network is gone, sweep for orphaned Netavark iptables state.
-    // This is fire-and-forget: a cleanup failure must never abort the deployment.
-    if (sshConfig) {
-      await purgeStaleNetavarkRules(sshConfig);
-    }
+  await client.removeNetwork(name);
+  // After the network is gone, sweep for orphaned Netavark iptables state.
+  // This is fire-and-forget: a cleanup failure must never abort the deployment.
+  if (sshConfig) {
+    await purgeStaleNetavarkRules(sshConfig);
   }
-}
-
-/**
- * Remove a stack network when the last app is being removed.
- * Call this after all containers have been disconnected.
- */
-export async function removeStackNetwork(
-  client: PodmanClient,
-  stackId: string,
-): Promise<void> {
-  await client.removeNetwork(stackNetworkName(stackId));
 }

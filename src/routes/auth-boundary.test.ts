@@ -25,7 +25,7 @@ import {
   deployments,
   notificationChannels,
   secrets,
-  stacks,
+  sessions,
   teamMembers,
   teamQuotas,
   teams,
@@ -112,7 +112,6 @@ let teamId: string;
 let otherTeamId: string;
 /** Resources owned by `otherTeamId` — what a cross-team caller must not reach. */
 let otherAppId: string;
-let otherStackId: string;
 let otherVolumeId: string;
 let otherDeploymentId: string;
 /** A volume with no owning team, the case the `&& volume.teamId` guard skipped. */
@@ -133,7 +132,7 @@ beforeAll(async () => {
     createdAt: now,
     updatedAt: now,
   });
-  await db.insert(teamMembers).values({ teamId, userId: member.id, role: 'member', joinedAt: now });
+  await db.insert(teamMembers).values({ teamId, userId: member.id, joinedAt: now });
 
   otherTeamId = crypto.randomUUID();
   await db.insert(teams).values({
@@ -157,16 +156,6 @@ beforeAll(async () => {
     manifest: 'image: nginx:1.27',
     environment: JSON.stringify({ DB_PASSWORD: 'not-yours' }),
     restartPolicy: 'always',
-    createdAt: now,
-    updatedAt: now,
-  });
-
-  otherStackId = crypto.randomUUID();
-  await db.insert(stacks).values({
-    id: otherStackId,
-    name: 'other-team-stack',
-    teamId: otherTeamId,
-    createdBy: admin.id,
     createdAt: now,
     updatedAt: now,
   });
@@ -264,8 +253,12 @@ async function loadRedirect(
 describe('admin-only pages', () => {
   // The page that was 200 for members while every sibling redirected.
   const PAGES = [
+    'settings',
     'settings/notifications',
-    'settings/audit',
+    'settings/oidc',
+    'settings/backup',
+    'audit',
+    'users',
   ] as const;
 
   for (const page of PAGES) {
@@ -456,9 +449,9 @@ describe('admin-only APIs', () => {
 /**
  * Reaching another team's resources.
  *
- * These five routes authenticated the caller and then looked the resource up by
+ * These routes authenticated the caller and then looked the resource up by
  * id alone, so a member of any team could read and act on every other team's
- * applications, stacks, deploy history and volumes. Each test names the route and
+ * applications, deploy history and volumes. Each test names the route and
  * the thing it used to hand over.
  */
 describe('cross-team resource access', () => {
@@ -468,57 +461,6 @@ describe('cross-team resource access', () => {
       headers: { 'Content-Type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-
-  test('a member cannot read another team\'s stack', async () => {
-    // Returned every application row in the stack, spread whole — including the
-    // plaintext `environment` column.
-    const { GET } = await import('./api/stacks/[id]/+server.ts');
-    const response = await GET({
-      params: { id: otherStackId },
-      cookies: member.cookies, locals: member.locals,
-    } as any);
-
-    expect(response.status).toBe(404);
-  });
-
-  test('a member cannot deploy, stop or restart another team\'s stack', async () => {
-    // The cross-team denial of service: this ran the action against every
-    // application in the stack.
-    const { POST } = await import('./api/stacks/[id]/+server.ts');
-    const response = await POST({
-      params: { id: otherStackId },
-      cookies: member.cookies, locals: member.locals,
-      request: jsonRequest('http://localhost/api/stacks/x', 'POST', { action: 'stop' }),
-    } as any);
-
-    expect(response.status).toBe(404);
-  });
-
-  test('a member cannot delete another team\'s stack', async () => {
-    const { DELETE } = await import('./api/stacks/[id]/+server.ts');
-    const response = await DELETE({
-      params: { id: otherStackId },
-      cookies: member.cookies, locals: member.locals,
-    } as any);
-
-    expect(response.status).toBe(404);
-    // And the stack is still there.
-    const still = await db.select().from(stacks).where(eq(stacks.id, otherStackId)).get();
-    expect(still).toBeTruthy();
-  });
-
-  test('a stack owner cannot detach an application from a different stack', async () => {
-    // `removeAppId` was keyed on the application id alone, so it reached any
-    // application in the installation regardless of which stack it was in.
-    const { PATCH } = await import('./api/stacks/[id]/+server.ts');
-    const response = await PATCH({
-      params: { id: otherStackId },
-      cookies: admin.cookies, locals: admin.locals,
-      request: jsonRequest('http://localhost/api/stacks/x', 'PATCH', { removeAppId: otherAppId }),
-    } as any);
-
-    expect(response.status).toBe(404);
-  });
 
   test('a member cannot read another team\'s deploy history', async () => {
     const { GET } = await import('./api/applications/[id]/deployments/+server.ts');
@@ -570,7 +512,7 @@ describe('cross-team resource access', () => {
 
   test('a member cannot read or delete another team\'s volume', async () => {
     // 404, not 403: a 403 would confirm the id names a real volume in some team
-    // the caller is not in. Same rule as /api/stacks/[id].
+    // the caller is not in.
     const { GET, DELETE } = await import('./api/volumes/[id]/+server.ts');
     const event = { params: { id: otherVolumeId }, cookies: member.cookies, locals: member.locals } as any;
 
@@ -578,10 +520,11 @@ describe('cross-team resource access', () => {
     expect((await DELETE(event)).status).toBe(404);
   });
 
-  test('a plain member of the owning team is told they need the owner role', async () => {
-    // The one case where 403 says something true and useful: the volume is
-    // readable, so hiding its existence would be theatre — what is missing is the
-    // role, and the message says so.
+  test('a member of the owning team may delete its volume', async () => {
+    // This used to need the team `owner` role, and answered a plain member with
+    // 403. Teams are flat now: a member who can mount the volume into one of the
+    // team's containers is not meaningfully restrained by being unable to delete
+    // it.
     const ownVolumeId = crypto.randomUUID();
     const now = new Date();
     await db.insert(volumes).values({
@@ -597,7 +540,7 @@ describe('cross-team resource access', () => {
     const event = { params: { id: ownVolumeId }, cookies: member.cookies, locals: member.locals } as any;
 
     expect((await GET(event)).status).toBe(200);
-    expect((await DELETE(event)).status).toBe(403);
+    expect((await DELETE(event)).status).toBe(200);
   });
 
   test('a teamless volume is admin-only, not everyone\'s', async () => {
@@ -663,31 +606,11 @@ describe('cross-team resource access', () => {
     expect(planted).toBeUndefined();
   });
 
-  test('a member cannot park an application in another team\'s stack', async () => {
-    // A stack scopes bulk deploy/stop/restart, so an application inside another
-    // team's stack is one that team can act on.
-    const { actions } = await import('./applications/new/+page.server.ts');
-    const form = new FormData();
-    form.set('name', 'parked');
-    form.set('teamId', teamId);
-    form.set('stackId', otherStackId);
-
-    const result: any = await (actions as any).default({
-      request: new Request('http://localhost/applications/new', { method: 'POST', body: form }),
-      cookies: member.cookies, locals: member.locals,
-    });
-
-    expect(result.status).toBe(400);
-    expect(result.data?.error).toContain('stack');
-  });
-
   test('an admin still reaches all of it', async () => {
     // Proves the fixtures are reachable, so the refusals above are the check
     // firing rather than a missing row.
-    const stackGet = (await import('./api/stacks/[id]/+server.ts')).GET;
     const depGet = (await import('./api/applications/[id]/deployments/+server.ts')).GET;
 
-    expect((await stackGet({ params: { id: otherStackId }, cookies: admin.cookies, locals: admin.locals } as any)).status).toBe(200);
     expect((await depGet({ params: { id: otherAppId }, cookies: admin.cookies, locals: admin.locals } as any)).status).toBe(200);
   });
 });
@@ -810,16 +733,16 @@ describe('password policy', () => {
  *
  * Both of these pages had a form action that duplicated an endpoint's job and
  * not its authorization: the action checked that a session existed and then
- * trusted the posted ids. `/settings/volumes` no longer has actions at all —
+ * trusted the posted ids. `/volumes` no longer has actions at all —
  * the page writes through `/api/volumes`, which is covered above — and
  * `/templates` keeps its actions, so its own membership check is asserted here.
  */
 describe('page form actions', () => {
-  test('/settings/volumes exposes no form actions of its own', async () => {
+  test('/volumes exposes no form actions of its own', async () => {
     // A `create` action here trusted the posted teamId, so a member could plant
     // a volume in another team — mountable into that team's containers. If
     // actions come back, they need the tenancy rules `/api/volumes` has.
-    const mod: any = await import('./settings/volumes/+page.server.ts');
+    const mod: any = await import('./volumes/+page.server.ts');
     expect(mod.actions).toBeUndefined();
   });
 
@@ -878,6 +801,161 @@ describe('page form actions', () => {
 });
 
 /**
+ * Managing team membership, which now lives on `/users` rather than on the team
+ * detail page.
+ *
+ * Admin-only in both directions. Adding was an owner's job and self-removal
+ * needed nothing at all; with the `owner` role gone there is no tier between
+ * member and admin to hang either on, and `/users` — where this now lives — is
+ * admin-only anyway.
+ */
+describe('team membership', () => {
+  let membershipTeamId: string;
+
+  async function post(teamId: string, actor: Actor, body: unknown) {
+    const { POST } = await import('./api/teams/[id]/members/+server.ts');
+    return POST({
+      params: { id: teamId },
+      cookies: actor.cookies,
+      locals: actor.locals,
+      request: new Request(`http://localhost/api/teams/${teamId}/members`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
+    } as any);
+  }
+
+  async function del(teamId: string, actor: Actor, memberId: string) {
+    const { DELETE } = await import('./api/teams/[id]/members/+server.ts');
+    return DELETE({
+      params: { id: teamId },
+      cookies: actor.cookies,
+      locals: actor.locals,
+      url: new URL(`http://localhost/api/teams/${teamId}/members?memberId=${memberId}`),
+    } as any);
+  }
+
+  beforeAll(async () => {
+    membershipTeamId = crypto.randomUUID();
+    const now = new Date();
+    await db.insert(teams).values({
+      id: membershipTeamId,
+      name: 'membership-moves',
+      slug: 'membership-moves',
+      createdAt: now,
+      updatedAt: now,
+    });
+  });
+
+  test('an admin adds a user to a team by id', async () => {
+    // `/users` posts a userId; the team page used to post an email.
+    const response = await post(membershipTeamId, admin, { userId: loner.id });
+    expect(response.status).toBe(200);
+  });
+
+  test('a member cannot add themselves to a team', async () => {
+    const response = await post(membershipTeamId, member, { userId: member.id });
+    expect(response.status).toBe(403);
+  });
+
+  test('a member of the team cannot add anyone either', async () => {
+    // The old rule was "owners can". There is no owner, so the answer is nobody
+    // but an admin — otherwise every member could recruit into their own tenant.
+    await post(membershipTeamId, admin, { userId: member.id });
+
+    expect((await post(membershipTeamId, member, { userId: admin.id })).status).toBe(403);
+  });
+
+  test('an admin removes a member', async () => {
+    expect((await del(membershipTeamId, admin, loner.id)).status).toBe(200);
+    expect(
+      await db.select().from(teamMembers).where(eq(teamMembers.userId, loner.id)).get(),
+    ).toBeUndefined();
+  });
+
+  test('a member cannot remove anyone, including themselves', async () => {
+    // Self-removal used to be allowed without ownership. It went with the rest:
+    // membership is written from `/users` or from the OIDC claim, and a member
+    // quietly leaving is neither.
+    expect((await del(membershipTeamId, member, member.id)).status).toBe(403);
+    expect(
+      await db.select().from(teamMembers).where(eq(teamMembers.userId, member.id)).get(),
+    ).toBeTruthy();
+  });
+});
+
+/**
+ * Promoting an account, and resetting its password.
+ *
+ * Both run through `PATCH /api/users/[id]`, whose field-by-field permissions are
+ * the whole point: `role` and `username` are admin-only, `password` revokes every
+ * session it invalidates, and a member may edit nothing but their own profile.
+ */
+describe('user administration', () => {
+  async function patch(targetId: string, actor: Actor, body: unknown) {
+    const { PATCH } = await import('./api/users/[id]/+server.ts');
+    return PATCH({
+      params: { id: targetId },
+      cookies: actor.cookies,
+      locals: actor.locals,
+      request: new Request(`http://localhost/api/users/${targetId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
+    } as any);
+  }
+
+  test('an admin promotes a member and demotes them again', async () => {
+    const target = await makeUser('promotion-target', 'member');
+
+    expect((await patch(target.id, admin, { role: 'admin' })).status).toBe(200);
+    expect((await db.select().from(users).where(eq(users.id, target.id)).get())?.role).toBe('admin');
+
+    expect((await patch(target.id, admin, { role: 'member' })).status).toBe(200);
+    expect((await db.select().from(users).where(eq(users.id, target.id)).get())?.role).toBe('member');
+  });
+
+  test('a member cannot promote themselves', async () => {
+    // `role` is in the admin-only field list, so this succeeds as a profile
+    // update and silently changes nothing — the account must still be a member.
+    await patch(member.id, member, { role: 'admin' });
+
+    expect((await db.select().from(users).where(eq(users.id, member.id)).get())?.role).toBe('member');
+  });
+
+  test('an admin sets another account’s password, and its sessions are revoked', async () => {
+    const target = await makeUser('reset-target', 'member');
+    await createSession(target.id);
+
+    expect((await patch(target.id, admin, { password: 'a-whole-new-passphrase' })).status).toBe(200);
+
+    const after = await db.select().from(users).where(eq(users.id, target.id)).get();
+    expect(after?.passwordHash).toBeTruthy();
+    expect(after?.passwordHash).not.toBe('a-whole-new-passphrase');
+    // The point of revoking: a reset is what you do when the old one leaked.
+    expect((await db.select().from(sessions).where(eq(sessions.userId, target.id)).all()).length).toBe(0);
+  });
+
+  test('a short password is refused rather than hashed', async () => {
+    const target = await makeUser('short-password-target', 'member');
+    const before = (await db.select().from(users).where(eq(users.id, target.id)).get())?.passwordHash;
+
+    expect((await patch(target.id, admin, { password: 'short' })).status).toBe(400);
+    expect((await db.select().from(users).where(eq(users.id, target.id)).get())?.passwordHash).toBe(before!);
+  });
+
+  test('a member cannot set someone else’s password', async () => {
+    const target = await makeUser('not-your-password', 'member');
+    const before = (await db.select().from(users).where(eq(users.id, target.id)).get())?.passwordHash;
+
+    expect((await patch(target.id, member, { password: 'a-whole-new-passphrase' })).status).toBe(403);
+    expect((await db.select().from(users).where(eq(users.id, target.id)).get())?.passwordHash).toBe(before!);
+  });
+});
+
+/**
  * Deleting a team.
  *
  * Eleven tables reference `teams.id` and none of them cascades, with
@@ -891,13 +969,13 @@ describe('team deletion', () => {
     return DELETE({ params: { id }, cookies: actor.cookies, locals: actor.locals } as any);
   }
 
-  /** A team `owner` owns outright. */
-  async function ownedTeam(slug: string, owner: Actor | null): Promise<string> {
+  /** A team, optionally with one member in it. */
+  async function ownedTeam(slug: string, occupant: Actor | null): Promise<string> {
     const id = crypto.randomUUID();
     const now = new Date();
     await db.insert(teams).values({ id, name: slug, slug, createdAt: now, updatedAt: now });
-    if (owner) {
-      await db.insert(teamMembers).values({ teamId: id, userId: owner.id, role: 'owner', joinedAt: now });
+    if (occupant) {
+      await db.insert(teamMembers).values({ teamId: id, userId: occupant.id, joinedAt: now });
     }
     return id;
   }
@@ -916,27 +994,13 @@ describe('team deletion', () => {
       updatedAt: now,
     });
 
-    const response = await del(id, member);
+    const response = await del(id, admin);
     expect(response.status).toBe(409);
     expect((await response.json()).error).toContain('app-blocking-team-delete');
 
     // Both halves of the old failure: the team survives *and* so do its members.
     expect(await db.select().from(teams).where(eq(teams.id, id)).get()).toBeTruthy();
     expect((await db.select().from(teamMembers).where(eq(teamMembers.teamId, id)).all()).length).toBe(1);
-  });
-
-  test('refuses a team that still owns a stack', async () => {
-    const id = await ownedTeam('doomed-with-stack', member);
-    const now = new Date();
-    await db.insert(stacks).values({
-      id: crypto.randomUUID(),
-      name: 'stack-blocking-team-delete',
-      teamId: id,
-      createdAt: now,
-      updatedAt: now,
-    });
-
-    expect((await del(id, member)).status).toBe(409);
   });
 
   test('removes a team together with everything that only existed because of it', async () => {
@@ -991,7 +1055,7 @@ describe('team deletion', () => {
       resourceType: 'team', resourceId: id, details: '{}', createdAt: now,
     });
 
-    const response = await del(id, member);
+    const response = await del(id, admin);
     expect(response.status).toBe(200);
 
     expect(await db.select().from(teams).where(eq(teams.id, id)).get()).toBeUndefined();
@@ -1018,17 +1082,17 @@ describe('team deletion', () => {
     expect(foreign?.channelId).toBeNull();
   });
 
-  test('a plain member cannot delete their own team', async () => {
-    const id = await ownedTeam('not-yours-to-delete', null);
-    const now = new Date();
-    await db.insert(teamMembers).values({ teamId: id, userId: member.id, role: 'member', joinedAt: now });
+  test('a member of the team cannot delete it', async () => {
+    // Deleting used to be an owner's prerogative and is now an admin's. Being in
+    // the team is what lets you use it, not what lets you destroy it.
+    const id = await ownedTeam('not-yours-to-delete', member);
 
     expect((await del(id, member)).status).toBe(403);
     expect(await db.select().from(teams).where(eq(teams.id, id)).get()).toBeTruthy();
   });
 
-  test('an admin can delete an ownerless team', async () => {
-    // Every team created by OIDC group sync has no owner row, so an
+  test('an admin can delete a team nobody is in', async () => {
+    // Every team created by OIDC group sync starts out like this, and an
     // owner-only check made them permanently unmanageable.
     const id = await ownedTeam('ownerless-team', null);
     expect((await del(id, admin)).status).toBe(200);

@@ -1,5 +1,4 @@
 <script lang="ts">
-  import PageHeader from '$lib/components/PageHeader.svelte';
   import { enhance } from '$app/forms';
 
   let { data, form } = $props();
@@ -20,6 +19,7 @@
   let allowRegistration = $state(true);
   let teamClaimName = $state('');
   let teamClaimKey = $state('');
+  let teamRoleSuffix = $state('');
 
   $effect(() => {
     if (cfg) {
@@ -37,6 +37,7 @@
       allowRegistration = cfg.allowRegistration ?? true;
       teamClaimName = cfg.teamClaimName ?? '';
       teamClaimKey = cfg.teamClaimKey ?? '';
+      teamRoleSuffix = cfg.teamRoleSuffix ?? '';
     }
   });
 
@@ -54,11 +55,6 @@
     }
   });
 </script>
-
-<PageHeader
-  title="OIDC Configuration"
-  subtitle="Configure a generic OpenID Connect provider for single sign-on (Auth Code + PKCE)"
-/>
 
 {#if (form as any)?.success}
   <div class="alert success">✓ Configuration saved successfully</div>
@@ -206,20 +202,48 @@
           <p class="help">The name of the claim in the access token or userinfo that contains team assignments.</p>
         </div>
 
+        <p class="section-desc">
+          If the claim is already a list of team names, leave both fields below empty. If it is an
+          object, one of them says which of its entries to read.
+        </p>
+
+        <div class="form-group">
+          <label for="teamRoleSuffix">Role Suffix</label>
+          <input type="text" id="teamRoleSuffix" name="teamRoleSuffix" bind:value={teamRoleSuffix}
+            placeholder="e.g. admin" />
+          <p class="help">
+            For a claim with one entry per application, keyed <code>&lt;app&gt;.&lt;role&gt;</code>.
+            Every key ending in this suffix contributes its teams, so a user who holds the role in
+            several applications joins all of their teams. Case-insensitive.
+          </p>
+        </div>
+
         <div class="form-group">
           <label for="teamClaimKey">Team Claim Key</label>
           <input type="text" id="teamClaimKey" name="teamClaimKey" bind:value={teamClaimKey}
             placeholder="e.g. API.DEVELOPERS" />
-          <p class="help">The key inside the claim object that contains the array of team names. Leave empty if the claim is already an array.</p>
+          <p class="help">
+            For a claim that nests one fixed list, e.g. <code>&#123;"groups": [...]&#125;</code>.
+            Reads exactly this one key. Ignored when a role suffix is set.
+          </p>
         </div>
 
         <div class="example-box">
-          <strong>Example:</strong> If your claim looks like <code>&#123;"API.DEVELOPERS": ["TEAM-A", "TEAM-B"]&#125;</code>:
+          <strong>Example:</strong> a token carrying
+          <code>"apps_with_role": &#123;"podp.admin": ["PODP"], "hmi.admin": ["HMI"]&#125;</code>:
           <ul>
             <li>Team Claim Name: <code>apps_with_role</code> (the claim name in the token)</li>
-            <li>Team Claim Key: <code>API.DEVELOPERS</code> (the key inside the claim)</li>
+            <li>Role Suffix: <code>admin</code> (the role that grants team membership)</li>
           </ul>
-          Users will be automatically added to teams TEAM-A and TEAM-B. Teams are created if they don't exist.
+          The user joins teams PODP and HMI. Teams are created if they don't exist.
+        </div>
+
+        <div class="example-box">
+          <strong>The claim is authoritative.</strong> Once a claim name is configured and the
+          provider sends it, a membership of a team the claim does not name is removed at the next
+          login — including one an admin added by hand on the Users page. For an account that signs
+          in through the provider, the provider decides: to grant lasting access, put it in the
+          claim.
         </div>
       </div>
     {/if}

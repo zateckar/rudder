@@ -20,7 +20,7 @@
   }
 </script>
 
-<PageHeader title="Audit Logs" back={{ href: '/dashboard', label: 'Back to Dashboard' }} />
+<PageHeader title="Audit Logs" subtitle="Every change made through Rudder, and who made it." />
 
 <div class="audit-container">
   <div class="filters">

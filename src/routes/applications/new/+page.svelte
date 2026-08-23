@@ -330,20 +330,6 @@ spec:
         </div>
       </div>
 
-      <div class="form-row">
-        <div class="form-group">
-          <label for="stackId">Stack (optional)</label>
-          <select id="stackId" name="stackId">
-            <option value="">No stack</option>
-            {#each data.stacks as stack}
-              <option value={stack.id}>{stack.name}</option>
-            {/each}
-          </select>
-          <p class="help-text">Group this application into a stack for bulk operations</p>
-        </div>
-        <div class="form-group"></div>
-      </div>
-
       {#if previewDomain}
         <div class="domain-preview">
           <span class="domain-label">URL:</span>

@@ -44,7 +44,6 @@ export const GET: RequestHandler = route(async (event) => {
   const userTeams = await db
     .select({
       teamId: teamMembers.teamId,
-      role: teamMembers.role,
       teamName: teams.name,
       teamSlug: teams.slug,
     })

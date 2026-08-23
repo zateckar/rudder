@@ -219,18 +219,6 @@
         </div>
       {/if}
 
-      <div class="form-row">
-        <div class="form-group">
-          <label for="stackId">Stack (optional)</label>
-          <select id="stackId" name="stackId">
-            <option value="">No stack</option>
-            {#each data.stacks as stack}
-              <option value={stack.id} selected={stack.id === app.stackId}>{stack.name}</option>
-            {/each}
-          </select>
-          <p class="help-text">Group this application into a stack for bulk operations</p>
-        </div>
-      </div>
     </div>
 
     <!-- ── Single container ──────────────────────────────────────────────── -->

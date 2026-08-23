@@ -48,6 +48,33 @@ const securityHeaders: Handle = async ({ event, resolve }) => {
   return response;
 };
 
+/**
+ * Record that an account was used, at most once every few minutes.
+ *
+ * The users list could say when an account was created and — for OIDC accounts —
+ * when the provider last synced it, and nothing at all about a local account that
+ * has been dormant for a year. That is the question an operator actually asks
+ * before deleting one.
+ *
+ * Throttled because the alternative is a write on every authenticated request,
+ * including every poll of the metrics and container endpoints. Five minutes'
+ * granularity is far finer than "when was this last used" needs, and it keeps a
+ * page load at zero extra writes.
+ */
+const LAST_SEEN_INTERVAL_MS = 5 * 60 * 1000;
+
+async function touchLastSeen(userId: string, lastSeenAt: Date | null): Promise<void> {
+  const now = new Date();
+  if (lastSeenAt && now.getTime() - lastSeenAt.getTime() < LAST_SEEN_INTERVAL_MS) return;
+
+  try {
+    await db.update(users).set({ lastSeenAt: now }).where(eq(users.id, userId));
+  } catch (e) {
+    // Bookkeeping. A failure here must not turn into a failed request.
+    console.error('[auth] Could not record last access:', e);
+  }
+}
+
 const authentication: Handle = async ({ event, resolve }) => {
   let userId: string | null = null;
 
@@ -78,6 +105,7 @@ const authentication: Handle = async ({ event, resolve }) => {
           },
           sessionUserId: userId,
         };
+        await touchLastSeen(user.id, user.lastSeenAt);
       } else {
         // A session pointing at a user that no longer exists is not a session.
         userId = null;

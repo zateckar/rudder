@@ -4,7 +4,7 @@ import { assertDistinctAliases, networkAliases } from './networks';
 describe('networkAliases', () => {
   test('gives a service its bare name and a qualified one', () => {
     // The bare name is what a compose file or a Kubernetes manifest already
-    // writes; the qualified one is the escape hatch when a stack has two.
+    // writes; the qualified one stays stable however the service is spelled.
     expect(networkAliases('shop', 'db')).toEqual(['db', 'shop-db']);
   });
 

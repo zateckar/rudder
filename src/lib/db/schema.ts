@@ -8,6 +8,8 @@ export const users = sqliteTable('users', {
   passwordHash: text('password_hash'),
   fullName: text('full_name').notNull(),
   role: text('role', { enum: ['admin', 'member'] }).notNull().default('member'),
+  /** Last authenticated request, throttled — see `touchLastSeen` in hooks.server.ts. */
+  lastSeenAt: integer('last_seen_at', { mode: 'timestamp' }),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
@@ -29,10 +31,20 @@ export const teams = sqliteTable('teams', {
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
 
+/**
+ * Who is in a team. Flat: a team has members, and that is the whole model.
+ *
+ * There used to be an `owner` role here, a second and weaker administrator tier
+ * that could rename and delete its team, manage its membership and mint its API
+ * keys. It bought little — an installation admin could already do all of it — and
+ * cost a great deal of conditional logic, including an exemption in the OIDC
+ * claim sync that existed only so hand-granted access had somewhere to hide.
+ * Team lifecycle and membership are now admin work; everything a team *owns* is
+ * open to every member of it.
+ */
 export const teamMembers = sqliteTable('team_members', {
   teamId: text('team_id').notNull().references(() => teams.id),
   userId: text('user_id').notNull().references(() => users.id),
-  role: text('role', { enum: ['owner', 'member'] }).notNull().default('member'),
   joinedAt: integer('joined_at', { mode: 'timestamp' }).notNull(),
 });
 
@@ -114,7 +126,6 @@ export const applications = sqliteTable('applications', {
   rateLimitBurst: integer('rate_limit_burst'),
   authType: text('auth_type', { enum: ['none', 'oidc', 'global'] }).notNull().default('global'),
   authConfig: text('auth_config'),
-  stackId: text('stack_id').references(() => stacks.id),
   replicas: integer('replicas').notNull().default(1),
   gitRepo: text('git_repo'),
   gitBranch: text('git_branch'),
@@ -322,6 +333,7 @@ export const oidcConfig = sqliteTable('oidc_config', {
   allowRegistration: integer('allow_registration', { mode: 'boolean' }).default(true),
   teamClaimName: text('team_claim_name'),
   teamClaimKey: text('team_claim_key'),
+  teamRoleSuffix: text('team_role_suffix'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
@@ -493,17 +505,6 @@ export const teamQuotas = sqliteTable('team_quotas', {
   maxMemoryBytes: integer('max_memory_bytes'),
   maxContainers: integer('max_containers'),
   maxApplications: integer('max_applications'),
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
-});
-
-/** Application stacks / groups */
-export const stacks = sqliteTable('stacks', {
-  id: text('id').primaryKey(),
-  name: text('name').notNull(),
-  description: text('description'),
-  teamId: text('team_id').references(() => teams.id),
-  createdBy: text('created_by').references(() => users.id),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });

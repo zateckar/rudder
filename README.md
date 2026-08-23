@@ -21,7 +21,7 @@ Container orchestration platform built with SvelteKit, Drizzle ORM, and SQLite. 
 - **Digest-pinned rollback** -- each deployment records the image digest it actually ran, and rollback recreates containers from that digest rather than re-resolving the tag
 - **Deploy webhooks** -- per-application webhook tokens for GitHub Actions, GitLab CI, etc.
 - **Application scaling** -- run multiple replicas with Traefik load balancing
-- **Application stacks** -- group applications for bulk deploy/stop/restart operations
+- **Multi-container applications** -- a compose or Kubernetes manifest with several services is one application: one network, one page, and deploy/stop/restart act on all of it
 - **Config export/import** -- export application configuration as JSON, import on any instance
 - **Drift detection** -- every collection cycle diffs what should be running against what is, and reports containers that are absent, out of date, failing their health check, or unaccounted for. Reporting only: nothing is corrected automatically, and containers Rudder does not own are never touched (see [Reconciliation](#reconciliation))
 - **Container adoption** -- containers already on a worker are offered for adoption on its Containers tab, and become applications when an operator confirms which ones and which team owns them
@@ -55,7 +55,7 @@ Container orchestration platform built with SvelteKit, Drizzle ORM, and SQLite. 
 - **Team-based RBAC** -- admin/member roles with team-scoped resource isolation
 - **Team resource quotas** -- configurable limits on CPU, memory, containers, and applications per team
 - **OIDC SSO** -- Google, GitHub, Okta, Auth0, plus generic OIDC provider
-- **API keys** -- team-scoped keys (team owners) or global keys (admins), with optional expiry
+- **API keys** -- team-scoped keys (any member of that team) or global keys (admins), with optional expiry
 - **kubectl-compatible API** -- manage deployments via standard Kubernetes tooling
 - **Audit logging** -- every mutating request, by session user or API key, plus failed logins
 - **Azure backup/restore** -- automated daily backup to Azure Blob Storage with restore
@@ -453,7 +453,7 @@ to be discovered:
 
 | Manifest asks for | What happens |
 | --- | --- |
-| Containers talking over `localhost` | **Does not work.** Each container has its own address; they reach each other by container name (`http://api:8080`), and by `<app>-<name>` when a stack has two of the same name. Every multi-container deploy records a note saying so. |
+| Containers talking over `localhost` | **Does not work.** Each container has its own address; they reach each other by container name (`http://api:8080`), and by `<app>-<name>` as a qualified alternative. Every multi-container deploy records a note saying so. |
 | `containerPort` | The port inside the container, reported as such by `kubectl get pod -o yaml`. The host port is allocated by Rudder so two applications can both listen on 80. |
 | `hostPort` | Ignored, and noted on the deployment. Traefik routes to whatever host port was allocated. |
 | `emptyDir` | A tmpfs. Ephemeral, which is the intent; `sizeLimit` is honoured. One mounted by two containers is refused — sharing it needs a shared namespace. |
@@ -471,18 +471,20 @@ will not deploy leaves the running application exactly as it was. Anything
 Rudder does differently rather than refuses is recorded on the deployment and
 shown in the application's history — nothing is dropped in silence.
 
-Grouping several applications, or several containers that need to be managed
-together, is what **stacks** are for: applications in a stack share one network
-and reach each other by name across it.
+Several containers that need to be managed together belong in **one
+application**: a compose file or a Kubernetes manifest with several services is
+deployed, stopped, restarted and rolled back as a unit, and its containers share
+one network and reach each other by name across it. There is no grouping layer
+above that — an application is the unit.
 
 ### Setup
 
 1. Generate a kubeconfig. This mints an API key, so it needs an active session
-   and the same privileges as creating one by hand: **team owner** for a
-   team-scoped config, **admin** for a global one.
+   and the same privileges as creating one by hand: **membership of the team**
+   for a team-scoped config, **admin** for a global one.
 
 ```sh
-# Team-scoped access (team owners and admins)
+# Team-scoped access (members of that team, and admins)
 curl -X POST https://your-rudder/api/kubeconfig \
   -H "Content-Type: application/json" \
   -H "Cookie: session_id=YOUR_SESSION" \

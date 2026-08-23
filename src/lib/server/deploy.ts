@@ -2,8 +2,8 @@
  * Shared deploy logic — used by both the deploy API endpoint and the webhook trigger.
  */
 import { db } from '$lib/db';
-import { applications, workers, containers, teams, stacks, volumes, secrets, deployments } from '$lib/db/schema';
-import { and, eq, inArray, ne, or, desc } from 'drizzle-orm';
+import { applications, workers, containers, teams, volumes, secrets, deployments } from '$lib/db/schema';
+import { and, eq, inArray, or, desc } from 'drizzle-orm';
 import { getRestPodmanClient } from '$lib/server/podman-client';
 import type { ContainerInspect } from '$lib/server/podman';
 import {
@@ -19,7 +19,7 @@ import { generateTraefikLabelsForApp, type AppMiddlewareOptions } from '$lib/ser
 import { buildMiddlewareOpts } from '$lib/server/traefik-config';
 import { ALLOWED_DOMAINS_UNSUPPORTED } from '$lib/server/oidc';
 import { decrypt, decryptField } from '$lib/server/encryption';
-import { ALIAS_LABEL, ensureAppNetwork, teardownAppNetwork } from '$lib/server/networks';
+import { ensureAppNetwork, teardownAppNetwork } from '$lib/server/networks';
 import { env } from '$lib/server/env';
 import { MountPolicyError, realizeMounts, type MountIntent } from '$lib/server/mounts';
 // Deploys are serialized per worker; see `workerDeployLock`.
@@ -295,62 +295,6 @@ function containerMounts(
     binds: binds.length > 0 ? binds : undefined,
     tmpfs: Object.keys(tmpfs).length > 0 ? tmpfs : undefined,
   };
-}
-
-// ── Network aliases ──────────────────────────────────────────────────────────
-
-/**
- * Warn when another application on the same stack network already answers to a
- * name this deploy is about to claim.
- *
- * Not an error. A stack is a shared network by design, the collision may have
- * existed for months, and refusing the deploy would take a running application
- * down over a name nobody is necessarily using. What it must not do is happen
- * silently: `db` resolving to the wrong container is a debugging session that
- * starts nowhere near the network layer.
- *
- * The qualified `<app>-<key>` alias is unaffected, so there is always a name
- * that resolves unambiguously — the warning says so.
- */
-async function warnOnAliasCollisions(
-  app: typeof applications.$inferSelect,
-  claimed: readonly string[],
-): Promise<void> {
-  if (!app.stackId || claimed.length === 0) return;
-
-  const wanted = new Set(claimed);
-  let neighbours: Array<{ appName: string; labels: string | null }>;
-  try {
-    neighbours = await db
-      .select({ appName: applications.name, labels: containers.labels })
-      .from(containers)
-      .innerJoin(applications, eq(containers.applicationId, applications.id))
-      .where(and(eq(applications.stackId, app.stackId), ne(applications.id, app.id)))
-      .all();
-  } catch (e: any) {
-    console.warn('[deploy] Could not check for alias collisions:', e.message);
-    return;
-  }
-
-  const reported = new Set<string>();
-  for (const row of neighbours) {
-    if (!row.labels) continue;
-    let alias: unknown;
-    try {
-      alias = JSON.parse(row.labels)?.[ALIAS_LABEL];
-    } catch {
-      continue;
-    }
-    if (typeof alias !== 'string' || !wanted.has(alias)) continue;
-    const key = `${alias}|${row.appName}`;
-    if (reported.has(key)) continue;
-    reported.add(key);
-    console.warn(
-      `[deploy] Application "${app.name}" and application "${row.appName}" both answer to ` +
-      `"${alias}" on their shared stack network. Which one that name resolves to is not ` +
-      `defined — use the qualified alias instead.`,
-    );
-  }
 }
 
 // ── Blue/green machinery ─────────────────────────────────────────────────────
@@ -831,11 +775,6 @@ async function deployApplication(
     team = await db.select().from(teams).where(eq(teams.id, app.teamId)).get();
   }
 
-  let stack: typeof stacks.$inferSelect | undefined;
-  if (app.stackId) {
-    stack = await db.select().from(stacks).where(eq(stacks.id, app.stackId)).get();
-  }
-
   // ── Plan ────────────────────────────────────────────────────────────────
   // Built before the deployment row exists and before anything is torn down,
   // so a manifest Rudder will not deploy costs the application nothing.
@@ -858,7 +797,6 @@ async function deployApplication(
       app,
       worker,
       team,
-      stack,
       volumeRegistry,
       allocatePort: () => {
         const port = pickFreePort(takenPorts);
@@ -887,8 +825,6 @@ async function deployApplication(
   // Keyed by name, not by key: the replicas of a single-container application
   // all share one key and differ only by name.
   const specHashes = new Map(desired.containers.map((c) => [c.name, c.specHash]));
-
-  await warnOnAliasCollisions(app, [...new Set(plan.containers.map((c) => c.aliases[0]))]);
 
   // ── Record deployment ──────────────────────────────────
   const lastDeployment = await db.select({ version: deployments.version })
@@ -965,7 +901,7 @@ async function deployApplication(
       // stale DNAT rules from shadowing the new container's port bindings.
       const oldContainerIds = existingContainers.map(c => c.containerId);
       try {
-        await teardownAppNetwork(podmanClient, app.id, app.stackId, oldContainerIds, workerSSHConfig);
+        await teardownAppNetwork(podmanClient, app.id, oldContainerIds, workerSSHConfig);
       } catch (e: any) {
         console.warn('Failed to teardown old network:', e.message);
       }
@@ -984,7 +920,7 @@ async function deployApplication(
     // One loop, whatever the application was written as. Everything that used
     // to be repeated per format — secrets, digests, labels, rows, start —
     // happens here and only here.
-    const networkName = await ensureAppNetwork(podmanClient, app.id, app.stackId);
+    const networkName = await ensureAppNetwork(podmanClient, app.id);
     const appSecrets = await resolveSecrets(app.teamId);
     const middlewareOpts = buildMiddlewareOpts(app);
 

@@ -341,7 +341,9 @@
   border-bottom: 1px solid var(--border-subtle);
 }
 
-.tabs :where(button) {
+/* Tabs that switch a panel in place are buttons; tabs that navigate between
+   routes are links. Both look the same. */
+.tabs :where(button, a) {
   padding: 10px 20px;
   margin-bottom: -1px;
   background: none;
@@ -354,11 +356,11 @@
   transition: all 0.15s;
 }
 
-.tabs :where(button:hover) {
+.tabs :where(button:hover, a:hover) {
   color: var(--text-primary);
 }
 
-.tabs :where(button.active) {
+.tabs :where(button.active, a.active) {
   border-bottom-color: var(--accent);
   color: var(--accent);
 }

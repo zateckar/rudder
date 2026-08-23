@@ -5,7 +5,7 @@ import { eq, and, inArray } from 'drizzle-orm';
 import { hashKey } from '$lib/server/encryption';
 import { randomBytes } from 'crypto';
 import type { RequestHandler } from './$types';
-import { requireTeamOwnership, requireUser, route } from '$lib/server/auth';
+import { requireTeam, requireUser, route } from '$lib/server/auth';
 import { parseJsonBody, schemas } from '$lib/server/validation';
 
 /** Generate a cryptographically secure API key with a recognisable prefix. */
@@ -58,8 +58,10 @@ export const POST: RequestHandler = route(async (event) => {
   );
 
   // A key with no teamId is global: it grants access to every team through the
-  // Kubernetes-compatible API, so only admins may mint one.  Team-scoped keys
-  // require ownership of that specific team.
+  // Kubernetes-compatible API, so only admins may mint one. A team-scoped key
+  // needs membership of that team — it grants exactly what its holder can already
+  // reach through the UI, so gating it above membership only pushed people
+  // towards sharing one.
   if (!teamId) {
     if (ctx.user.role !== 'admin') {
       return json(
@@ -68,7 +70,7 @@ export const POST: RequestHandler = route(async (event) => {
       );
     }
   } else {
-    await requireTeamOwnership(event, teamId);
+    await requireTeam(event, teamId);
   }
 
   const rawKey = generateApiKey();
@@ -124,8 +126,8 @@ export const DELETE: RequestHandler = route(async ({ url, locals }) => {
       .where(and(eq(teamMembers.teamId, key.teamId), eq(teamMembers.userId, ctx.user.id)))
       .get();
 
-    if (!membership || membership.role !== 'owner') {
-      return json({ error: 'Team owner access required' }, { status: 403 });
+    if (!membership) {
+      return json({ error: 'API key not found' }, { status: 404 });
     }
   }
 

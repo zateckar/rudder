@@ -15,13 +15,13 @@ import { syncUserTeams } from './+server';
 /** Team ids by name, so assertions can talk about names. */
 const teamIds = new Map<string, string>();
 
-async function makeTeam(name: string): Promise<string> {
+async function makeTeam(name: string, slug?: string): Promise<string> {
   const id = crypto.randomUUID();
   const now = new Date();
   await db.insert(teams).values({
     id,
     name,
-    slug: `${name.toLowerCase()}-${id.slice(0, 8)}`,
+    slug: slug ?? `${name.toLowerCase()}-${id.slice(0, 8)}`,
     createdAt: now,
     updatedAt: now,
   });
@@ -45,11 +45,10 @@ async function makeUser(): Promise<string> {
   return id;
 }
 
-async function join(userId: string, teamName: string, role: 'owner' | 'member') {
+async function join(userId: string, teamName: string) {
   await db.insert(teamMembers).values({
     teamId: teamIds.get(teamName)!,
     userId,
-    role,
     joinedAt: new Date(),
   });
 }
@@ -105,22 +104,14 @@ describe('syncUserTeams', () => {
     expect(await membershipsOf(userId)).toEqual([]);
   });
 
-  test('an owner row survives a claim that does not name its team', async () => {
-    // The escape hatch: the IdP must not be able to unseat a team's owner, and
-    // `owner` is therefore the only way to grant access the claim will not undo.
-    const userId = await makeUser();
-    await join(userId, 'Handmade', 'owner');
-    await syncUserTeams(userId, ['Platform']);
-
-    expect(await membershipsOf(userId)).toEqual(['Handmade', 'Platform']);
-  });
-
-  test('a hand-granted member row does not survive — the claim is authoritative', async () => {
+  test('a hand-granted row does not survive — the claim is authoritative', async () => {
     // Nothing records where a membership came from, so this is a consequence
-    // rather than a choice. Asserted so it is a known cost of configuring a team
-    // claim and not a surprise during an incident.
+    // rather than a choice. There used to be one exemption — an `owner` row was
+    // never withdrawn — and it went with the role itself: teams are flat, so for
+    // an account that signs in through the provider, the provider decides, and a
+    // hand-grant lasts until their next login.
     const userId = await makeUser();
-    await join(userId, 'Handmade', 'member');
+    await join(userId, 'Handmade');
     await syncUserTeams(userId, ['Platform']);
 
     expect(await membershipsOf(userId)).toEqual(['Platform']);
@@ -138,7 +129,26 @@ describe('syncUserTeams', () => {
       .from(teamMembers)
       .where(and(eq(teamMembers.userId, userId), eq(teamMembers.teamId, created!.id)))
       .get();
-    expect(membership?.role).toBe('member');
+    expect(membership).toBeTruthy();
+  });
+
+  test('a name the claim gives twice creates one team, not two', async () => {
+    // The lookup map is built once, before the loop, so the second spelling used
+    // to miss the team the first had just created. A role suffix makes this easy
+    // to hit: two applications, one shared team.
+    const userId = await makeUser();
+    const name = `Twice-${crypto.randomUUID().slice(0, 8)}`;
+    await syncUserTeams(userId, [name, name.toLowerCase()]);
+
+    const rows = await db.select().from(teams).all();
+    expect(rows.filter((t) => t.name.toLowerCase() === name.toLowerCase())).toHaveLength(1);
+  });
+
+  test('pads and blanks in the claim do not become teams of their own', async () => {
+    const userId = await makeUser();
+    await syncUserTeams(userId, ['  Platform  ', '', '   ']);
+
+    expect(await membershipsOf(userId)).toEqual(['Platform']);
   });
 
   test('re-running with the same claim is a no-op', async () => {
@@ -147,6 +157,60 @@ describe('syncUserTeams', () => {
     await syncUserTeams(userId, ['Platform']);
 
     expect(await membershipsOf(userId)).toEqual(['Platform']);
+  });
+});
+
+/**
+ * Matching a group against a team Rudder already has.
+ *
+ * Creating a team is the fallback, and a wrong one is expensive: the user lands
+ * in an empty namesake with none of the real team's applications, quotas or
+ * secrets, and the operator gets a duplicate to clean up. So the ways a claim can
+ * legitimately name an existing team are covered here.
+ */
+describe('syncUserTeams — matching teams that already exist', () => {
+  test('matches on the slug when the display name is not the group name', async () => {
+    // An admin created the team as "Product Portal" with slug `podp`; the IdP
+    // group is `PODP`. Name matching alone made a second, empty team called PODP.
+    await makeTeam('Product Portal', 'podp');
+    const userId = await makeUser();
+    await syncUserTeams(userId, ['PODP']);
+
+    expect(await membershipsOf(userId)).toEqual(['Product Portal']);
+    expect(await db.select().from(teams).where(eq(teams.name, 'PODP')).get()).toBeUndefined();
+  });
+
+  test('a name match wins over some other team owning the slug', async () => {
+    await makeTeam('Slug Squatter', 'contested');
+    await makeTeam('Contested');
+    const userId = await makeUser();
+    await syncUserTeams(userId, ['contested']);
+
+    expect(await membershipsOf(userId)).toEqual(['Contested']);
+  });
+
+  test('a team it creates gets a clean slug, so the next login matches it', async () => {
+    // The slug used to be suffixed unconditionally (`podp-m1k2j3`), which made
+    // every sync-created team unmatchable by slug forever after.
+    const userId = await makeUser();
+    const name = `Fresh-${crypto.randomUUID().slice(0, 8)}`;
+    await syncUserTeams(userId, [name]);
+
+    const created = await db.select().from(teams).where(eq(teams.name, name)).get();
+    expect(created?.slug).toBe(name.toLowerCase());
+  });
+
+  test('two claim names that differ only in punctuation resolve to one team', async () => {
+    // A consequence of matching on the slug: "Foo Bar" and "Foo-Bar" slugify
+    // alike, so the second finds the team the first created instead of adding a
+    // near-duplicate beside it. Asserted because it is a judgement — group names
+    // that differ by a hyphen are the same team far more often than not.
+    const userId = await makeUser();
+    const stem = `Twin-${crypto.randomUUID().slice(0, 8)}`;
+    await syncUserTeams(userId, [`${stem} One`, `${stem}-One`]);
+
+    const rows = (await db.select().from(teams).all()).filter((t) => t.name.startsWith(stem));
+    expect(rows).toHaveLength(1);
   });
 });
 
@@ -178,7 +242,7 @@ describe('syncUserTeams — a name that matches two teams', () => {
     // Fail-closed on joining must not become fail-open into revocation: "Rudder
     // cannot tell these two teams apart" is not a reason to remove access.
     const userId = await makeUser();
-    await join(userId, 'design', 'member');
+    await join(userId, 'design');
     await syncUserTeams(userId, ['Platform']);
 
     expect(await membershipsOf(userId)).toEqual(['Platform', 'design']);

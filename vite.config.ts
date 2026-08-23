@@ -59,8 +59,12 @@ function devTls() {
 export default defineConfig({
 	plugins: [sveltekit(), websocketPlugin()],
 	server: {
-		port: 7244,
-		strictPort: true,
+		// 7244 unless PORT says otherwise. `strictPort` is what makes an occupied
+		// port an error rather than a silent move to 7245 — worth keeping when the
+		// port is the one everything else is configured against, but not when a
+		// caller has explicitly asked for a different one.
+		port: Number(process.env.PORT) || 7244,
+		strictPort: !process.env.PORT,
 		host: '0.0.0.0',
 		https: devTls()
 	}
