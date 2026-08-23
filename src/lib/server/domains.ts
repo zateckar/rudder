@@ -60,6 +60,58 @@ export function routerName(appName: string, serviceName?: string): string {
   return !service || service === app ? app : `${app}-${service}`;
 }
 
+/**
+ * A hostname label: alphanumeric, inner hyphens, at most 63 characters.
+ *
+ * Exported so `schemas.domain` can be built from the same pattern rather than
+ * its own copy — two regexes for one rule is how one of them ends up unused.
+ */
+export const DOMAIN_LABEL = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/;
+
+/**
+ * Why this hostname must not be stored, or null when it is a plain hostname.
+ *
+ * This is a security check, not a politeness one. The value reaches Traefik as
+ * the interior of a router rule — ``Host(`<domain>`)`` in
+ * `generateTraefikLabelsForApp`, in both routing modes — and Traefik parses that
+ * rule as an expression. A backtick therefore closes the matcher and everything
+ * after it is rule *logic*, not a hostname: `` a.example.com`) || Host(`victim.example.com ``
+ * yields a second, longer router rule for a host the caller does not own.
+ * Traefik orders routers by rule length, so the injected rule wins over the
+ * victim's own, ACME issues a valid certificate for it (TLS-ALPN-01 is answered
+ * by Traefik itself), and the request arrives carrying the *attacker's*
+ * middleware chain — dropping whatever OIDC the victim had in front of it.
+ *
+ * The compose importer already strips caller-supplied `traefik.*` labels for
+ * exactly this reason. This is the same rule applied to the other way in.
+ */
+export function domainFormatError(domain: string): string | null {
+  // Deliberately validates the value as given rather than a trimmed copy. The
+  // callers store what they were sent, so trimming here would accept
+  // " app.example.com " and then write the spaces — passing validation and still
+  // producing a router rule that matches nothing.
+  if (!domain.trim()) return 'Domain is required';
+  if (domain.length > 253) return 'Domain is too long (maximum 253 characters)';
+
+  // Named separately from the label check below so the message says which
+  // character is the problem — these are the ones that carry meaning inside a
+  // Traefik rule, and "invalid hostname" would not explain the rejection.
+  const injectable = domain.match(/[`'"()|&\s]/);
+  if (injectable) {
+    return `Domain "${domain}" contains an illegal character (${JSON.stringify(injectable[0])}). ` +
+      `A domain must be a plain hostname such as app.example.com.`;
+  }
+
+  for (const label of domain.split('.')) {
+    if (!label) return `Domain "${domain}" has an empty label`;
+    if (!DOMAIN_LABEL.test(label)) {
+      return `"${label}" is not a valid hostname label in "${domain}"`;
+    }
+  }
+
+  return null;
+}
+
 /** The id of the application already holding `domain`, or null. */
 export async function findAppIdByDomain(
   domain: string,
@@ -85,19 +137,31 @@ export async function findAppIdByDomain(
 }
 
 /**
- * Reject a hostname that another application already owns.  Returns an error
- * message, or null when the domain is free.
+ * Reject a hostname Rudder must not route: malformed, or already owned by
+ * another application.  Returns an error message, or null when it is usable.
  *
- * The check is intentionally global (not scoped to a team): Traefik routes by
- * Host, so two applications sharing a hostname would produce two routers with
- * the same rule and non-deterministic routing between them.  Only the hostname
- * — which is public DNS either way — is revealed, never the owning team.
+ * The conflict check is intentionally global (not scoped to a team): Traefik
+ * routes by Host, so two applications sharing a hostname would produce two
+ * routers with the same rule and non-deterministic routing between them.  Only
+ * the hostname — which is public DNS either way — is revealed, never the owning
+ * team.
+ *
+ * Format is checked *here*, ahead of the conflict, rather than at each caller.
+ * Every write site already funnels through this function, so this is the one
+ * place that cannot be forgotten by the next one — and being forgotten at three
+ * separate sites (the edit form, the k8s `rudder.dev/domain` annotation, and the
+ * create API) is exactly how an unvalidated hostname reached a Traefik rule. See
+ * `domainFormatError` for what that allowed.
  */
 export async function assertDomainAvailable(
   domain: string | null,
   excludeApplicationId?: string,
 ): Promise<string | null> {
   if (!domain) return null;
+
+  const malformed = domainFormatError(domain);
+  if (malformed) return malformed;
+
   const owner = await findAppIdByDomain(domain, excludeApplicationId);
   if (!owner) return null;
   return `The domain "${domain}" is already in use by another application. Choose a different application name, or set an explicit domain.`;

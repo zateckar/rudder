@@ -50,7 +50,37 @@ function cookiesFor(sessionId: string | null): Cookies {
 interface Actor {
   id: string;
   cookies: Cookies;
+  /**
+   * What `hooks.server.ts` would have put on the request.
+   *
+   * Identity is resolved once per request in the hook and read from `locals`
+   * by the handlers, so a test that only supplies `cookies` is testing a
+   * request that never went through the hook — every handler would see an
+   * anonymous caller and the 403 assertions would pass for the wrong reason.
+   * Built here exactly as the hook builds it.
+   */
+  locals: App.Locals;
 }
+
+function localsFor(user: { id: string; username: string; role: 'admin' | 'member' }): App.Locals {
+  return {
+    userId: user.id,
+    userRole: user.role,
+    auth: {
+      user: {
+        id: user.id,
+        username: user.username,
+        email: `${user.username}@example.test`,
+        role: user.role,
+        fullName: user.username,
+      },
+      sessionUserId: user.id,
+    },
+  };
+}
+
+/** No session, and no API key — what an unauthenticated request looks like. */
+const ANONYMOUS_LOCALS: App.Locals = { auth: null };
 
 async function makeUser(username: string, role: 'admin' | 'member'): Promise<Actor> {
   const id = crypto.randomUUID();
@@ -65,7 +95,11 @@ async function makeUser(username: string, role: 'admin' | 'member'): Promise<Act
     createdAt: now,
     updatedAt: now,
   });
-  return { id, cookies: cookiesFor(await createSession(id)) };
+  return {
+    id,
+    cookies: cookiesFor(await createSession(id)),
+    locals: localsFor({ id, username, role }),
+  };
 }
 
 let admin: Actor;
@@ -237,19 +271,19 @@ describe('admin-only pages', () => {
   for (const page of PAGES) {
     test(`/${page} redirects a member`, async () => {
       const { load } = await import(`./${page}/+page.server.ts`);
-      const event = { cookies: member.cookies, url: new URL('http://localhost/') };
+      const event = { cookies: member.cookies, locals: member.locals, url: new URL('http://localhost/') };
       expect(await loadRedirect(load, event)).toBe('/dashboard');
     });
 
     test(`/${page} redirects an anonymous caller to the login page`, async () => {
       const { load } = await import(`./${page}/+page.server.ts`);
-      const event = { cookies: anonymous, url: new URL('http://localhost/') };
+      const event = { cookies: anonymous, locals: ANONYMOUS_LOCALS, url: new URL('http://localhost/') };
       expect(await loadRedirect(load, event)).toBe('/login');
     });
 
     test(`/${page} lets an admin through`, async () => {
       const { load } = await import(`./${page}/+page.server.ts`);
-      const event = { cookies: admin.cookies, url: new URL('http://localhost/') };
+      const event = { cookies: admin.cookies, locals: admin.locals, url: new URL('http://localhost/') };
       expect(await loadRedirect(load, event)).toBeNull();
     });
   }
@@ -258,7 +292,10 @@ describe('admin-only pages', () => {
 describe('dashboard scoping', () => {
   async function dashboard(actor: Actor) {
     const { load } = await import('./dashboard/+page.server.ts');
-    return (await load({ cookies: actor.cookies, url: new URL('http://localhost/dashboard') })) as any;
+    return (await load({
+      locals: actor.locals,
+      url: new URL('http://localhost/dashboard'),
+    })) as any;
   }
 
   test('a member with no teams is shown nothing at all', async () => {
@@ -318,6 +355,7 @@ describe('admin-only APIs', () => {
       const handlers = await import(path);
       const response = await handlers[method]({
         cookies: member.cookies,
+        locals: member.locals,
         url: new URL('http://localhost/'),
         request: new Request('http://localhost/'),
       } as any);
@@ -328,6 +366,7 @@ describe('admin-only APIs', () => {
       const handlers = await import(path);
       const response = await handlers[method]({
         cookies: anonymous,
+        locals: ANONYMOUS_LOCALS,
         url: new URL('http://localhost/'),
         request: new Request('http://localhost/'),
       } as any);
@@ -338,6 +377,7 @@ describe('admin-only APIs', () => {
       const handlers = await import(path);
       const response = await handlers[method]({
         cookies: admin.cookies,
+        locals: admin.locals,
         url: new URL('http://localhost/'),
         request: new Request('http://localhost/'),
       } as any);
@@ -351,6 +391,7 @@ describe('admin-only APIs', () => {
     const { POST } = await import('./api/notifications/+server.ts');
     const response = await POST({
       cookies: member.cookies,
+      locals: member.locals,
       request: new Request('http://localhost/api/notifications', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -365,6 +406,7 @@ describe('admin-only APIs', () => {
     const { POST } = await import('./api/alerts/+server.ts');
     const response = await POST({
       cookies: member.cookies,
+      locals: member.locals,
       request: new Request('http://localhost/api/alerts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -372,6 +414,41 @@ describe('admin-only APIs', () => {
       }),
     } as any);
 
+    expect(response.status).toBe(403);
+  });
+
+  // ── The regression the `locals` migration could have introduced ────────────
+  //
+  // Every handler above now reads identity from `locals` instead of resolving
+  // it from the cookie itself. A handler that was converted but whose caller
+  // was not — or one that silently fell back to "no session" — would answer 401
+  // to a legitimate admin, or, far worse, read `locals.auth` from a request the
+  // hook never touched. These pin both directions.
+
+  test('a converted handler ignores a cookie the hook did not resolve', async () => {
+    // Admin cookie, but no `locals`: this is a request that never went through
+    // hooks.server.ts. It must be refused, not trusted.
+    const { GET } = await import('./api/alerts/+server.ts');
+    const response = await GET({
+      cookies: admin.cookies,
+      locals: {},
+      url: new URL('http://localhost/'),
+      request: new Request('http://localhost/'),
+    } as any);
+    expect(response.status).toBe(401);
+  });
+
+  test('locals cannot be forged into an admin by a member request', async () => {
+    // `locals.auth` is only ever written by the hook from a validated session.
+    // A member's own locals must not satisfy an admin check no matter how the
+    // rest of the event is shaped.
+    const { GET } = await import('./api/alerts/events/+server.ts');
+    const response = await GET({
+      cookies: admin.cookies,
+      locals: member.locals,
+      url: new URL('http://localhost/'),
+      request: new Request('http://localhost/'),
+    } as any);
     expect(response.status).toBe(403);
   });
 });
@@ -398,7 +475,7 @@ describe('cross-team resource access', () => {
     const { GET } = await import('./api/stacks/[id]/+server.ts');
     const response = await GET({
       params: { id: otherStackId },
-      cookies: member.cookies,
+      cookies: member.cookies, locals: member.locals,
     } as any);
 
     expect(response.status).toBe(404);
@@ -410,7 +487,7 @@ describe('cross-team resource access', () => {
     const { POST } = await import('./api/stacks/[id]/+server.ts');
     const response = await POST({
       params: { id: otherStackId },
-      cookies: member.cookies,
+      cookies: member.cookies, locals: member.locals,
       request: jsonRequest('http://localhost/api/stacks/x', 'POST', { action: 'stop' }),
     } as any);
 
@@ -421,7 +498,7 @@ describe('cross-team resource access', () => {
     const { DELETE } = await import('./api/stacks/[id]/+server.ts');
     const response = await DELETE({
       params: { id: otherStackId },
-      cookies: member.cookies,
+      cookies: member.cookies, locals: member.locals,
     } as any);
 
     expect(response.status).toBe(404);
@@ -436,7 +513,7 @@ describe('cross-team resource access', () => {
     const { PATCH } = await import('./api/stacks/[id]/+server.ts');
     const response = await PATCH({
       params: { id: otherStackId },
-      cookies: admin.cookies,
+      cookies: admin.cookies, locals: admin.locals,
       request: jsonRequest('http://localhost/api/stacks/x', 'PATCH', { removeAppId: otherAppId }),
     } as any);
 
@@ -447,7 +524,7 @@ describe('cross-team resource access', () => {
     const { GET } = await import('./api/applications/[id]/deployments/+server.ts');
     const response = await GET({
       params: { id: otherAppId },
-      cookies: member.cookies,
+      cookies: member.cookies, locals: member.locals,
     } as any);
 
     expect(response.status).toBe(404);
@@ -459,7 +536,7 @@ describe('cross-team resource access', () => {
     const { POST } = await import('./api/applications/[id]/deployments/+server.ts');
     const response = await POST({
       params: { id: otherAppId },
-      cookies: member.cookies,
+      cookies: member.cookies, locals: member.locals,
       request: jsonRequest('http://localhost/api/applications/x/deployments', 'POST', {
         deploymentId: otherDeploymentId,
       }),
@@ -477,7 +554,7 @@ describe('cross-team resource access', () => {
     form.set('appId', otherAppId);
     form.set('name', 'stolen-template');
     const response = await POST({
-      cookies: member.cookies,
+      cookies: member.cookies, locals: member.locals,
       request: new Request('http://localhost/api/templates/save', { method: 'POST', body: form }),
     } as any);
 
@@ -487,7 +564,7 @@ describe('cross-team resource access', () => {
   test('a member cannot open another team\'s application for editing', async () => {
     const { load } = await import('./applications/[id]/edit/+page.server.ts');
     expect(
-      await loadRedirect(load, { params: { id: otherAppId }, cookies: member.cookies }),
+      await loadRedirect(load, { params: { id: otherAppId }, cookies: member.cookies, locals: member.locals }),
     ).toBe('/applications');
   });
 
@@ -495,7 +572,7 @@ describe('cross-team resource access', () => {
     // 404, not 403: a 403 would confirm the id names a real volume in some team
     // the caller is not in. Same rule as /api/stacks/[id].
     const { GET, DELETE } = await import('./api/volumes/[id]/+server.ts');
-    const event = { params: { id: otherVolumeId }, cookies: member.cookies } as any;
+    const event = { params: { id: otherVolumeId }, cookies: member.cookies, locals: member.locals } as any;
 
     expect((await GET(event)).status).toBe(404);
     expect((await DELETE(event)).status).toBe(404);
@@ -517,7 +594,7 @@ describe('cross-team resource access', () => {
     });
 
     const { GET, DELETE } = await import('./api/volumes/[id]/+server.ts');
-    const event = { params: { id: ownVolumeId }, cookies: member.cookies } as any;
+    const event = { params: { id: ownVolumeId }, cookies: member.cookies, locals: member.locals } as any;
 
     expect((await GET(event)).status).toBe(200);
     expect((await DELETE(event)).status).toBe(403);
@@ -527,18 +604,18 @@ describe('cross-team resource access', () => {
     // `role !== 'admin' && volume.teamId` skipped the membership check entirely
     // when there was no team to check against.
     const { GET, DELETE } = await import('./api/volumes/[id]/+server.ts');
-    const event = { params: { id: orphanVolumeId }, cookies: member.cookies } as any;
+    const event = { params: { id: orphanVolumeId }, cookies: member.cookies, locals: member.locals } as any;
 
     expect((await GET(event)).status).toBe(404);
     expect((await DELETE(event)).status).toBe(404);
     // Still there, and an admin can still reach it.
-    expect((await GET({ params: { id: orphanVolumeId }, cookies: admin.cookies } as any)).status).toBe(200);
+    expect((await GET({ params: { id: orphanVolumeId }, cookies: admin.cookies, locals: admin.locals } as any)).status).toBe(200);
   });
 
   test('a volume cannot be created without an owning team', async () => {
     const { POST } = await import('./api/volumes/+server.ts');
     const response = await POST({
-      cookies: member.cookies,
+      cookies: member.cookies, locals: member.locals,
       request: jsonRequest('http://localhost/api/volumes', 'POST', {
         name: 'no-team',
         containerPath: '/data',
@@ -551,7 +628,7 @@ describe('cross-team resource access', () => {
   test('a member cannot create a volume for a team they are not in', async () => {
     const { POST } = await import('./api/volumes/+server.ts');
     const response = await POST({
-      cookies: member.cookies,
+      cookies: member.cookies, locals: member.locals,
       request: jsonRequest('http://localhost/api/volumes', 'POST', {
         name: 'not-mine',
         containerPath: '/data',
@@ -574,7 +651,7 @@ describe('cross-team resource access', () => {
 
     const result: any = await (actions as any).default({
       request: new Request('http://localhost/applications/new', { method: 'POST', body: form }),
-      cookies: member.cookies,
+      cookies: member.cookies, locals: member.locals,
     });
 
     expect(result.status).toBe(403);
@@ -597,7 +674,7 @@ describe('cross-team resource access', () => {
 
     const result: any = await (actions as any).default({
       request: new Request('http://localhost/applications/new', { method: 'POST', body: form }),
-      cookies: member.cookies,
+      cookies: member.cookies, locals: member.locals,
     });
 
     expect(result.status).toBe(400);
@@ -610,8 +687,8 @@ describe('cross-team resource access', () => {
     const stackGet = (await import('./api/stacks/[id]/+server.ts')).GET;
     const depGet = (await import('./api/applications/[id]/deployments/+server.ts')).GET;
 
-    expect((await stackGet({ params: { id: otherStackId }, cookies: admin.cookies } as any)).status).toBe(200);
-    expect((await depGet({ params: { id: otherAppId }, cookies: admin.cookies } as any)).status).toBe(200);
+    expect((await stackGet({ params: { id: otherStackId }, cookies: admin.cookies, locals: admin.locals } as any)).status).toBe(200);
+    expect((await depGet({ params: { id: otherAppId }, cookies: admin.cookies, locals: admin.locals } as any)).status).toBe(200);
   });
 });
 
@@ -698,7 +775,7 @@ describe('password policy', () => {
   async function createUser(body: Record<string, unknown>) {
     const { POST } = await import('./api/users/+server.ts');
     return POST({
-      cookies: admin.cookies,
+      cookies: admin.cookies, locals: admin.locals,
       request: new Request('http://localhost/api/users', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -757,7 +834,7 @@ describe('page form actions', () => {
 
     const result: any = await (actions as any).save({
       request: new Request('http://localhost/templates', { method: 'POST', body: form }),
-      cookies: member.cookies,
+      cookies: member.cookies, locals: member.locals,
     });
 
     expect(result.status).toBe(404);
@@ -793,7 +870,7 @@ describe('page form actions', () => {
 
     const result: any = await (actions as any).save({
       request: new Request('http://localhost/templates', { method: 'POST', body: form }),
-      cookies: member.cookies,
+      cookies: member.cookies, locals: member.locals,
     });
 
     expect(result.success).toBe(true);
@@ -811,7 +888,7 @@ describe('page form actions', () => {
 describe('team deletion', () => {
   async function del(id: string, actor: Actor) {
     const { DELETE } = await import('./api/teams/[id]/+server.ts');
-    return DELETE({ params: { id }, cookies: actor.cookies } as any);
+    return DELETE({ params: { id }, cookies: actor.cookies, locals: actor.locals } as any);
   }
 
   /** A team `owner` owns outright. */

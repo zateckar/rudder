@@ -2,11 +2,17 @@ import { redirect, fail } from '@sveltejs/kit';
 import { db, safeWorkerColumns, safeUserColumns } from '$lib/db';
 import { applications, users, workers, teams, teamMembers, volumes, stacks } from '$lib/db/schema';
 import { eq, inArray, or, isNull } from 'drizzle-orm';
-import { canAccessApplication, stackAcceptsTeam } from '$lib/server/auth';
+import {
+  canAccessApplication,
+  requirePageUser,
+  stackAcceptsTeam,
+  userTeams as allUserTeams,
+} from '$lib/server/auth';
 import { assertDomainAvailable } from '$lib/server/domains';
 import { ALLOWED_DOMAINS_UNSUPPORTED } from '$lib/server/oidc';
 import { DEFAULT_HEALTH_TIMEOUT_S } from '$lib/server/generations';
 import { imageReferenceError } from '$lib/server/image-reference';
+import { decryptField, encryptField } from '$lib/server/encryption';
 
 /**
  * Volume-registry ids this application's `volumes` column already names.
@@ -29,39 +35,18 @@ function referencedVolumeIds(raw: string | null | undefined): Set<string> {
   return ids;
 }
 
-export const load = async ({ params, cookies }: { params: { id: string }; cookies: any }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId) throw redirect(303, '/login');
-
-  const userId = await validateSession(sessionId);
-  if (!userId) throw redirect(303, '/login');
-
-  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
+export const load = async (event: { params: { id: string }; locals: App.Locals; cookies: any }) => {
+  const currentUser = requirePageUser(event).user;
+  const userId = currentUser.id;
 
   // Membership decides this, not existence. Loading the row on an id alone put
   // another team's manifest, plaintext environment and domain into the SSR
   // payload for anyone who could guess an application id.
-  const access = await canAccessApplication(cookies, params.id);
+  const access = await canAccessApplication(event.cookies, event.params.id);
   if (!access) throw redirect(303, '/applications');
   const app = access.application;
 
-  let userTeams;
-  if (currentUser?.role === 'admin') {
-    userTeams = await db.select().from(teams).all();
-  } else {
-    const memberships = await db
-      .select()
-      .from(teamMembers)
-      .where(eq(teamMembers.userId, userId))
-      .all();
-    const teamIds = memberships.map((m) => m.teamId);
-    userTeams =
-      teamIds.length > 0
-        ? await db.select().from(teams).where(inArray(teams.id, teamIds)).all()
-        : [];
-  }
+  const userTeams = await allUserTeams(event);
 
   const allWorkers = await db.select(safeWorkerColumns).from(workers).all();
 
@@ -118,7 +103,12 @@ export const load = async ({ params, cookies }: { params: { id: string }; cookie
 
   return {
     user: currentUser,
-    application: app,
+    // `authConfig` is encrypted at rest and decrypted here, because this form
+    // prefills itself from it — the OIDC client secret and session key have to
+    // reach the browser for "edit without retyping them" to work at all. This
+    // is the one page that legitimately needs them; the list and the dashboard
+    // use `safeApplicationColumns`, which drops the column entirely.
+    application: { ...app, authConfig: decryptField(app.authConfig) },
     parsedManifest,
     workers: allWorkers,
     teams: userTeams,
@@ -355,7 +345,12 @@ export const actions = {
         rateLimitAvg,
         rateLimitBurst,
         authType,
-        authConfig,
+        // Encrypted at rest: it carries the per-app OIDC client secret and the
+        // 32-character session key the Traefik plugin uses as an AES key, which
+        // makes it the same class of material as `workers.oidcClientSecret`.
+        // `encryptField` is idempotent, so a re-save of a row that was written
+        // before this does not double-encrypt.
+        authConfig: encryptField(authConfig),
         stackId,
         replicas,
         healthcheck,

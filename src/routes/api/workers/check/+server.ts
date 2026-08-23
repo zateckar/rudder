@@ -1,71 +1,35 @@
 import { json } from '@sveltejs/kit';
+import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { getRestPodmanClient } from '$lib/server/podman-client';
+import { withPodman } from '$lib/server/podman-client';
+import { requireWorker, route } from '$lib/server/auth';
 
-export async function POST({ request, cookies, locals }: { request: Request; cookies: any; locals: any }) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  // Require admin role
-  if (locals.userRole !== 'admin') {
-    return json({ error: 'Forbidden - admin access required' }, { status: 403 });
-  }
-
-  const body = await request.json();
-  const { workerId } = body;
-
+/** POST /api/workers/check — ping one worker now and record what came back. */
+export const POST: RequestHandler = route(async (event) => {
+  const { workerId } = await event.request.json();
   if (!workerId) {
     return json({ error: 'Worker ID required' }, { status: 400 });
   }
 
-  const worker = await db.select().from(workers).where(eq(workers.id, workerId)).get();
-  
-  if (!worker) {
-    return json({ error: 'Worker not found' }, { status: 404 });
+  const { worker } = await requireWorker(event, workerId);
+
+  let isOnline = false;
+  if (worker.podmanApiUrl) {
+    try {
+      isOnline = await withPodman(worker, (c) => c.ping());
+    } catch (e) {
+      // A worker with no usable credentials, or one that is simply down. Both
+      // are `offline` as far as this check is concerned.
+      console.warn('[workers/check] Podman API check failed:', e);
+    }
   }
 
-  try {
-    let isOnline = false;
+  await db
+    .update(workers)
+    .set(isOnline ? { status: 'online', lastSeenAt: new Date() } : { status: 'offline' })
+    .where(eq(workers.id, workerId));
 
-    // Try REST API first if credentials are available
-    if (worker.podmanApiUrl) {
-      try {
-        const podmanClient = getRestPodmanClient(worker);
-        isOnline = await podmanClient.ping();
-        podmanClient.destroy();
-      } catch (e) {
-        console.warn('REST API check failed:', e);
-      }
-    }
-    
-    if (isOnline) {
-      await db.update(workers)
-        .set({ 
-          status: 'online',
-          lastSeenAt: new Date(),
-        })
-        .where(eq(workers.id, workerId));
-    } else {
-      await db.update(workers)
-        .set({ status: 'offline' })
-        .where(eq(workers.id, workerId));
-    }
-    
-    return json({ online: isOnline });
-  } catch (error: any) {
-    console.error('Worker check error:', error);
-    await db.update(workers)
-      .set({ status: 'error' })
-      .where(eq(workers.id, workerId));
-    
-    return json({ online: false, error: error.message }, { status: 500 });
-  }
-}
+  return json({ online: isOnline });
+});

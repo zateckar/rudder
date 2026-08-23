@@ -1,54 +1,8 @@
-import { redirect } from '@sveltejs/kit';
-import { db, safeWorkerColumns, safeUserColumns } from '$lib/db';
-import { applications, users, workers, teams, teamMembers, containers } from '$lib/db/schema';
+import { db, safeWorkerColumns, safeApplicationColumns } from '$lib/db';
+import { applications, workers, teams, teamMembers, containers } from '$lib/db/schema';
 import { eq, inArray } from 'drizzle-orm';
-
-/** Extract the primary app URL: first traefik router rule from any container. */
-function extractAppUrl(appName: string, appDomain: string | null | undefined, appContainers: (typeof containers.$inferSelect)[]): string | null {
-  if (appDomain) return `https://${appDomain}`;
-
-  for (const c of appContainers) {
-    if (!c.labels) continue;
-    try {
-      const labels: Record<string, string> = JSON.parse(c.labels);
-      for (const [key, value] of Object.entries(labels)) {
-        if (key.startsWith('traefik.http.routers.') && key.endsWith('.rule')) {
-          const match = (value as string).match(/Host\(`([^`]+)`\)/);
-          if (match) return `https://${match[1]}`;
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }
-  return null;
-}
-
-/** Extract per-service URLs from container labels (deduplicated by URL). */
-function extractServiceUrls(appContainers: (typeof containers.$inferSelect)[]): Array<{ name: string; url: string }> {
-  const urlMap = new Map<string, { name: string; url: string }>();
-  for (const c of appContainers) {
-    if (!c.labels) continue;
-    try {
-      const labels: Record<string, string> = JSON.parse(c.labels);
-      for (const [key, value] of Object.entries(labels)) {
-        if (key.startsWith('traefik.http.routers.') && key.endsWith('.rule')) {
-          const match = (value as string).match(/Host\(`([^`]+)`\)/);
-          if (match) {
-            const url = `https://${match[1]}`;
-            if (!urlMap.has(url)) {
-              const routerName = key.replace('traefik.http.routers.', '').replace('.rule', '');
-              urlMap.set(url, { name: routerName, url });
-            }
-          }
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }
-  return Array.from(urlMap.values());
-}
+import { primaryUrl, serviceUrls } from '$lib/server/app-urls';
+import { requirePageUser } from '$lib/server/auth';
 
 function getAppStatus(appContainers: (typeof containers.$inferSelect)[]): { label: string; color: string } {
   if (appContainers.length === 0) return { label: 'not deployed', color: 'gray' };
@@ -59,22 +13,15 @@ function getAppStatus(appContainers: (typeof containers.$inferSelect)[]): { labe
   return { label: 'partial', color: 'orange' };
 }
 
-export const load = async ({ url, cookies }: { url: URL; cookies: any }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId) throw redirect(303, '/login');
-  
-  const userId = await validateSession(sessionId);
-  if (!userId) throw redirect(303, '/login');
+export const load = async (event: { url: URL; locals: App.Locals }) => {
+  const currentUser = requirePageUser(event).user;
+  const userId = currentUser.id;
 
-  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
-  
   let userApps: any[] = [];
-  const urlTeam = url.searchParams.get('team');
+  const urlTeam = event.url.searchParams.get('team');
 
-  if (currentUser?.role === 'admin' && (!urlTeam || urlTeam === 'all')) {
-    userApps = await db.select().from(applications).all();
+  if (currentUser.role === 'admin' && (!urlTeam || urlTeam === 'all')) {
+    userApps = await db.select(safeApplicationColumns).from(applications).all();
   } else {
     const memberships = await db.select().from(teamMembers).where(eq(teamMembers.userId, userId)).all();
     const teamIds = memberships.map(m => m.teamId);
@@ -85,7 +32,11 @@ export const load = async ({ url, cookies }: { url: URL; cookies: any }) => {
     }
     
     if (targetTeamIds.length > 0) {
-      userApps = await db.select().from(applications).where(inArray(applications.teamId, targetTeamIds)).all();
+      userApps = await db
+        .select(safeApplicationColumns)
+        .from(applications)
+        .where(inArray(applications.teamId, targetTeamIds))
+        .all();
     } else {
       userApps = [];
     }
@@ -103,10 +54,12 @@ export const load = async ({ url, cookies }: { url: URL; cookies: any }) => {
   // Enrich each application with URL and status
   const enrichedApps = userApps.map(app => {
     const appContainers = allContainers.filter(c => c.applicationId === app.id);
-    const appUrl = extractAppUrl(app.name, app.domain, appContainers);
-    const serviceUrls = app.type === 'compose' ? extractServiceUrls(appContainers) : [];
-    const status = getAppStatus(appContainers);
-    return { ...app, appUrl, serviceUrls, status };
+    return {
+      ...app,
+      appUrl: primaryUrl(app.domain, appContainers),
+      serviceUrls: app.type === 'compose' ? serviceUrls(appContainers) : [],
+      status: getAppStatus(appContainers),
+    };
   });
 
   return {

@@ -4,13 +4,9 @@ import { apiKeys, teamMembers } from '$lib/db/schema';
 import { eq, and, inArray } from 'drizzle-orm';
 import { hashKey } from '$lib/server/encryption';
 import { randomBytes } from 'crypto';
-import {
-  authErrorResponse,
-  requireAuth,
-  requireTeamOwner,
-  type AuthContext,
-} from '$lib/server/auth';
-import { parseJsonBody, ValidationError, schemas } from '$lib/server/validation';
+import type { RequestHandler } from './$types';
+import { requireTeamOwnership, requireUser, route } from '$lib/server/auth';
+import { parseJsonBody, schemas } from '$lib/server/validation';
 
 /** Generate a cryptographically secure API key with a recognisable prefix. */
 function generateApiKey(): string {
@@ -23,13 +19,8 @@ function publicKey(row: typeof apiKeys.$inferSelect) {
   return { ...rest, scope: row.teamId ? 'team' : 'global' };
 }
 
-export async function GET({ cookies }: { cookies: any }) {
-  let ctx: AuthContext;
-  try {
-    ctx = await requireAuth(cookies);
-  } catch (error) {
-    return authErrorResponse(error);
-  }
+export const GET: RequestHandler = route(async (event) => {
+  const ctx = requireUser(event);
 
   // Admins see every key.  Everyone else sees only keys scoped to a team they
   // belong to — global keys carry cross-team access and are admin-only.
@@ -54,27 +45,17 @@ export async function GET({ cookies }: { cookies: any }) {
     .all();
 
   return json(keys.map(publicKey));
-}
+});
 
-export async function POST({ request, cookies }: { request: Request; cookies: any }) {
-  let ctx: AuthContext;
-  try {
-    ctx = await requireAuth(cookies);
-  } catch (error) {
-    return authErrorResponse(error);
-  }
+export const POST: RequestHandler = route(async (event) => {
+  const ctx = requireUser(event);
 
-  let body;
-  try {
-    body = await parseJsonBody(request, schemas.createApiKey);
-  } catch (error) {
-    if (error instanceof ValidationError) {
-      return json({ error: error.message }, { status: 400 });
-    }
-    throw error;
-  }
-
-  const { name, teamId, expiresInDays } = body;
+  // `route()` turns a ValidationError into a 400, so the try/catch that used to
+  // do it by hand in every one of these handlers is gone.
+  const { name, teamId, expiresInDays } = await parseJsonBody(
+    event.request,
+    schemas.createApiKey,
+  );
 
   // A key with no teamId is global: it grants access to every team through the
   // Kubernetes-compatible API, so only admins may mint one.  Team-scoped keys
@@ -87,11 +68,7 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
       );
     }
   } else {
-    try {
-      await requireTeamOwner(cookies, teamId);
-    } catch (error) {
-      return authErrorResponse(error);
-    }
+    await requireTeamOwnership(event, teamId);
   }
 
   const rawKey = generateApiKey();
@@ -121,15 +98,10 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
     key: rawKey,
     expiresAt,
   });
-}
+});
 
-export async function DELETE({ url, cookies }: { url: URL; cookies: any }) {
-  let ctx: AuthContext;
-  try {
-    ctx = await requireAuth(cookies);
-  } catch (error) {
-    return authErrorResponse(error);
-  }
+export const DELETE: RequestHandler = route(async ({ url, locals }) => {
+  const ctx = requireUser({ locals });
 
   const keyId = url.searchParams.get('id');
   if (!keyId) {
@@ -159,4 +131,4 @@ export async function DELETE({ url, cookies }: { url: URL; cookies: any }) {
 
   await db.delete(apiKeys).where(eq(apiKeys.id, keyId));
   return json({ success: true });
-}
+});

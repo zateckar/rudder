@@ -1,24 +1,11 @@
 import { json } from '@sveltejs/kit';
-import {
-  authErrorResponse,
-  canManageWorker,
-  requireContainerAccess,
-} from '$lib/server/auth';
+import type { RequestHandler } from './$types';
+import { requireContainer, requireWorker, route } from '$lib/server/auth';
 import { storeTerminalToken } from '$lib/server/terminal-tokens';
-import { parseJsonBody, ValidationError, schemas } from '$lib/server/validation';
+import { parseJsonBody, schemas } from '$lib/server/validation';
 
-export async function POST({ request, cookies }: { request: Request; cookies: any }) {
-  let body;
-  try {
-    body = await parseJsonBody(request, schemas.terminalToken);
-  } catch (error) {
-    if (error instanceof ValidationError) {
-      return json({ error: error.message }, { status: 400 });
-    }
-    throw error;
-  }
-
-  const { containerId, workerId } = body;
+export const POST: RequestHandler = route(async (event) => {
+  const { containerId, workerId } = await parseJsonBody(event.request, schemas.terminalToken);
 
   if (!containerId && !workerId) {
     return json({ error: 'Container ID or Worker ID required' }, { status: 400 });
@@ -30,19 +17,11 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
   // Authorize against the specific resource the token will be bound to.  The
   // WebSocket handler trusts the token alone, so this is the only place the
   // caller's permission to reach this container/host is ever checked.
-  let userId: string;
-  try {
-    if (containerId) {
-      const { ctx } = await requireContainerAccess(cookies, containerId);
-      userId = ctx.user.id;
-    } else {
-      // A host shell is unrestricted root on the worker — admins only.
-      const { ctx } = await canManageWorker(cookies, workerId!);
-      userId = ctx.user.id;
-    }
-  } catch (error) {
-    return authErrorResponse(error);
-  }
+  const { ctx } = containerId
+    ? await requireContainer(event, containerId)
+    // A host shell is unrestricted root on the worker — admins only.
+    : await requireWorker(event, workerId!);
+  const userId = ctx.user.id;
 
   // Generate a short-lived token (5 minutes) for terminal WebSocket handshake.
   // The WebSocket server validates and immediately consumes the token (single-use).
@@ -61,4 +40,4 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
     token: tokenId,
     expiresIn: 300, // seconds
   });
-}
+});

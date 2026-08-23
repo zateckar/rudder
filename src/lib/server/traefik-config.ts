@@ -16,6 +16,8 @@
  */
 import { generateTraefikLabelsForApp, renderGlobalOidcConfig, type AppMiddlewareOptions } from './provisioning';
 import { normalizeOidcSecret } from './oidc';
+import { domainFormatError } from './domains';
+import { decryptField } from './encryption';
 
 export interface DynamicConfig {
   http: {
@@ -199,7 +201,10 @@ export function buildMiddlewareOpts(app: any): AppMiddlewareOptions | undefined 
   if (app.authType === 'oidc' && app.authConfig) {
     try {
       opts.authType = 'oidc';
-      opts.authConfig = JSON.parse(app.authConfig);
+      // Encrypted at rest since it holds the client secret and session key.
+      // `decryptField` passes plaintext through untouched, so rows written
+      // before the column was encrypted keep working until their next save.
+      opts.authConfig = JSON.parse(decryptField(app.authConfig) ?? '');
       hasOpts = true;
     } catch {
       // Invalid auth config, skip
@@ -250,6 +255,21 @@ export function configForRouteGroups(groups: RouteGroup[], globalOidcEnabled: bo
 
   for (const group of groups) {
     if (!group.ports.length || !group.domain) continue;
+
+    // Skipped, not serialised. This path reads `applications.domain` straight
+    // out of the database, so it reaches rows written before the domain was
+    // validated at the write sites — and the value becomes the interior of a
+    // ``Host(`…`)`` rule, which Traefik parses as an expression. Dropping the
+    // one route is the fail-closed option: throwing would make
+    // `buildWorkerDynamicConfig` fail and cost every *other* application on the
+    // worker its routing too.
+    const malformed = domainFormatError(group.domain);
+    if (malformed) {
+      console.error(
+        `[traefik-config] Refusing to route "${group.routerBase}": ${malformed}`,
+      );
+      continue;
+    }
 
     const labels = generateTraefikLabelsForApp(
       group.routerBase,

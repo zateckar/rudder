@@ -1,35 +1,20 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
-import { workers, users } from '$lib/db/schema';
+import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { SSHPodmanClient } from '$lib/server/podman';
+import { executeSSHCommand } from '$lib/server/ssh';
+import { getRestPodmanClient } from '$lib/server/podman-client';
+import { requireWorker, route } from '$lib/server/auth';
 
-export const POST: RequestHandler = async ({ params, request, cookies }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  // Check admin role
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (!user || user.role !== 'admin') {
-    return json({ error: 'Admin access required' }, { status: 403 });
-  }
-
-  const worker = await db.select().from(workers).where(eq(workers.id, params.id)).get();
-  if (!worker) {
-    return json({ error: 'Worker not found' }, { status: 404 });
-  }
+export const POST: RequestHandler = route(async (event) => {
+  const workerId = event.params.id!;
+  const { worker } = await requireWorker(event, workerId);
 
   // Parse optional ad-hoc SSH key from request body (never stored server-side)
   let sshPrivateKey: string | undefined;
   try {
-    const body = await request.json();
+    const body = await event.request.json();
     sshPrivateKey = body?.sshPrivateKey;
   } catch {
     // No body or invalid JSON — will fall back to REST API if configured
@@ -40,24 +25,34 @@ export const POST: RequestHandler = async ({ params, request, cookies }) => {
 
   try {
     if (sshPrivateKey) {
-      // Use ad-hoc SSH key for reconnect (key is never stored)
-      const client = new SSHPodmanClient({
-        host: worker.hostname,
-        port: worker.sshPort,
-        username: worker.sshUser,
-        privateKey: sshPrivateKey,
-      });
-
-      // List containers as a connectivity test
-      await client.listContainers();
+      // Ad-hoc key, never stored. `podman ps` is the probe: it proves both that
+      // SSH works and that podman is installed and answering, which is what
+      // "reconnect" is being asked. Its output is discarded — a non-zero exit
+      // is the whole signal.
+      const probe = await executeSSHCommand(
+        {
+          host: worker.hostname,
+          port: worker.sshPort,
+          username: worker.sshUser,
+          privateKey: sshPrivateKey,
+        },
+        'podman ps -a --format json',
+      );
+      if (probe.exitCode !== 0) {
+        throw new Error(probe.stderr.trim() || `podman ps exited ${probe.exitCode}`);
+      }
       status = 'online';
     } else if (worker.podmanApiUrl && worker.podmanCaCert && worker.podmanClientCert && worker.podmanClientKey) {
-      // Fall back to Podman REST API with mTLS if credentials are configured
-      const { getRestPodmanClient } = await import('$lib/server/podman-client');
+      // Fall back to the Podman REST API over mTLS when credentials exist.
       const client = getRestPodmanClient(worker);
-
-      await client.listContainers();
-      status = 'online';
+      try {
+        await client.listContainers();
+        status = 'online';
+      } finally {
+        // The keep-alive agent holds its TLS sockets open for the life of the
+        // process otherwise; this client used to be dropped, not destroyed.
+        client.destroy();
+      }
     } else {
       errorMessage = 'No SSH key provided and no Podman API credentials configured. Provide an SSH key to reconnect via SSH.';
       status = 'error';
@@ -71,7 +66,7 @@ export const POST: RequestHandler = async ({ params, request, cookies }) => {
   await db.update(workers).set({
     status,
     lastSeenAt: status === 'online' ? new Date() : worker.lastSeenAt,
-  }).where(eq(workers.id, params.id));
+  }).where(eq(workers.id, workerId));
 
   return json({
     success: status === 'online',
@@ -79,4 +74,4 @@ export const POST: RequestHandler = async ({ params, request, cookies }) => {
     error: errorMessage,
     lastSeenAt: status === 'online' ? new Date().toISOString() : worker.lastSeenAt?.toISOString(),
   });
-};
+});

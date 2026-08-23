@@ -9,14 +9,10 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { alertRules, notificationChannels } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { authErrorResponse, requireAdmin } from '$lib/server/auth';
+import { requireAdminUser, route } from '$lib/server/auth';
 
-export const GET: RequestHandler = async ({ cookies }) => {
-  try {
-    await requireAdmin(cookies);
-  } catch (error) {
-    return authErrorResponse(error);
-  }
+export const GET: RequestHandler = route(async (event) => {
+  requireAdminUser(event);
 
   const rows = await db.select().from(alertRules).all();
 
@@ -28,16 +24,12 @@ export const GET: RequestHandler = async ({ cookies }) => {
   }));
 
   return json(result);
-};
+});
 
-export const POST: RequestHandler = async ({ request, cookies }) => {
-  try {
-    await requireAdmin(cookies);
-  } catch (error) {
-    return authErrorResponse(error);
-  }
+export const POST: RequestHandler = route(async (event) => {
+  requireAdminUser(event);
 
-  const body = await request.json();
+  const body = await event.request.json();
   const { name, resourceType, resourceId, metric, operator, threshold, duration, channelId, teamId } = body;
 
   if (!name || !resourceType || !metric || threshold === undefined) {
@@ -84,4 +76,4 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
   });
 
   return json({ id, name }, { status: 201 });
-};
+});

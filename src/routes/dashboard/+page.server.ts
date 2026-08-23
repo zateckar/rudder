@@ -1,26 +1,14 @@
-import { redirect } from '@sveltejs/kit';
-import { db, safeWorkerColumns, safeUserColumns } from '$lib/db';
+import { db, safeWorkerColumns, safeApplicationColumns } from '$lib/db';
 import { workers, applications, containers, teams, users, auditLogs, deployments, teamMembers } from '$lib/db/schema';
 import { eq, desc, inArray } from 'drizzle-orm';
 import { getAllWorkerResources } from '$lib/server/worker-selector';
+import { requirePageUser } from '$lib/server/auth';
 
-export const load = async ({ url, cookies }: { url: URL; cookies: any }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
-  const sessionId = getSessionIdFromCookies(cookies);
-  
-  if (!sessionId) {
-    throw redirect(303, '/login');
-  }
-  
-  const userId = await validateSession(sessionId);
-  
-  if (!userId) {
-    throw redirect(303, '/login');
-  }
+export const load = async (event: { url: URL; locals: App.Locals }) => {
+  const currentUser = requirePageUser(event).user;
+  const userId = currentUser.id;
+  const { url } = event;
 
-  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
-  
   // Filter by team if requested
   const urlTeam = url.searchParams.get('team');
   let targetTeamIds: string[] = [];
@@ -56,11 +44,15 @@ export const load = async ({ url, cookies }: { url: URL; cookies: any }) => {
   let allTeams: any[] = [];
 
   if (scopeIsGlobal) {
-    allApplications = await db.select().from(applications).all();
+    allApplications = await db.select(safeApplicationColumns).from(applications).all();
     allContainers = await db.select().from(containers).all();
     allTeams = await db.select().from(teams).all();
   } else if (targetTeamIds.length > 0) {
-    allApplications = await db.select().from(applications).where(inArray(applications.teamId, targetTeamIds)).all();
+    allApplications = await db
+      .select(safeApplicationColumns)
+      .from(applications)
+      .where(inArray(applications.teamId, targetTeamIds))
+      .all();
     allTeams = await db.select().from(teams).where(inArray(teams.id, targetTeamIds)).all();
     const appIds = allApplications.map((a) => a.id);
     allContainers = appIds.length > 0

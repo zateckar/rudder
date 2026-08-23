@@ -1,56 +1,25 @@
-import { redirect } from '@sveltejs/kit';
-import { db, safeUserColumns } from '$lib/db';
-import { teams, teamMembers, users } from '$lib/db/schema';
-import { eq, sql } from 'drizzle-orm';
+import { db } from '$lib/db';
+import { teamMembers } from '$lib/db/schema';
+import { inArray, count } from 'drizzle-orm';
+import { requirePageUser, userTeams } from '$lib/server/auth';
 
-export const load = async ({ cookies }: { cookies: any }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
+export const load = async (event: { locals: App.Locals }) => {
+  const user = requirePageUser(event).user;
+  const teamList = await userTeams(event);
 
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId) throw redirect(303, '/login');
+  if (teamList.length === 0) return { user, teams: [] };
 
-  const userId = await validateSession(sessionId);
-  if (!userId) throw redirect(303, '/login');
-
-  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
-
-  let teamList;
-
-  if (currentUser?.role === 'admin') {
-    // Admins see all teams
-    teamList = await db.select().from(teams).all();
-  } else {
-    // Members see only their teams
-    const memberships = await db
-      .select({ teamId: teamMembers.teamId })
-      .from(teamMembers)
-      .where(eq(teamMembers.userId, userId))
-      .all();
-    const teamIds = memberships.map((m) => m.teamId);
-    teamList =
-      teamIds.length > 0
-        ? await db
-            .select()
-            .from(teams)
-            .where(sql`${teams.id} IN (${sql.join(teamIds.map(id => sql`${id}`), sql`, `)})`)
-            .all()
-        : [];
-  }
-
-  // Attach member counts
-  const teamsWithCounts = await Promise.all(
-    teamList.map(async (team) => {
-      const count = await db
-        .select({ count: sql<number>`count(*)` })
-        .from(teamMembers)
-        .where(eq(teamMembers.teamId, team.id))
-        .get();
-      return { ...team, memberCount: count?.count ?? 0 };
-    })
-  );
+  // One grouped count for every team, not a `SELECT count(*)` per team.
+  const counts = await db
+    .select({ teamId: teamMembers.teamId, n: count() })
+    .from(teamMembers)
+    .where(inArray(teamMembers.teamId, teamList.map((t) => t.id)))
+    .groupBy(teamMembers.teamId)
+    .all();
+  const byTeam = new Map(counts.map((c) => [c.teamId, c.n]));
 
   return {
-    user: currentUser,
-    teams: teamsWithCounts,
+    user,
+    teams: teamList.map((team) => ({ ...team, memberCount: byTeam.get(team.id) ?? 0 })),
   };
 };

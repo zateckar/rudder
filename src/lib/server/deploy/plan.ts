@@ -22,7 +22,13 @@
  */
 import type { MountIntent } from '../mounts';
 import type { PortAllocator } from '../ports';
-import { buildAppDomain, buildServiceDomain, routerName } from '../domains';
+import {
+  buildAppDomain,
+  buildServiceDomain,
+  domainFormatError,
+  routerName,
+  toDnsLabel,
+} from '../domains';
 
 /**
  * A manifest Rudder will not deploy, and why.
@@ -210,9 +216,28 @@ export function createRouteAssigner(ctx: PlanContext) {
   return function assign(key: string, hostPort: number): PlannedRoute {
     const isPrimary = !primaryTaken;
     primaryTaken = true;
+    // The last fallbacks go through `toDnsLabel` for the same reason
+    // `routerName` does: a bare application name may contain spaces and other
+    // characters that are not a hostname, and this value becomes the interior of
+    // a Traefik `Host()` rule.
     const domain = isPrimary
-      ? ctx.appDomain || buildAppDomain(ctx.appName, ctx.baseDomain) || ctx.appName
-      : buildServiceDomain(ctx.appName, key, ctx.baseDomain) || `${ctx.appName}-${key}`;
+      ? ctx.appDomain || buildAppDomain(ctx.appName, ctx.baseDomain) || toDnsLabel(ctx.appName)
+      : buildServiceDomain(ctx.appName, key, ctx.baseDomain) || routerName(ctx.appName, key);
+
+    // Enforced here, not only where the domain is written.
+    //
+    // Write-site validation cannot reach a row that was stored before it
+    // existed, and this is the last point before the value is interpolated into
+    // a router rule. A malformed hostname is refused as a manifest error, so the
+    // deploy fails before anything is created or torn down rather than
+    // installing a rule built from it. See `domainFormatError`.
+    const malformed = domainFormatError(domain);
+    if (malformed) {
+      throw new ManifestError(
+        `Cannot route "${ctx.appName}": ${malformed} Clear or correct the application's domain.`,
+      );
+    }
+
     return {
       domain,
       routerName: isPrimary ? routerName(ctx.appName) : routerName(ctx.appName, key),

@@ -1,26 +1,16 @@
-import { redirect } from '@sveltejs/kit';
-import { db, safeUserColumns } from '$lib/db';
-import { users, notificationChannels, alertRules, alertEvents, teamMembers } from '$lib/db/schema';
+import { db } from '$lib/db';
+import { notificationChannels, alertRules, alertEvents, teamMembers } from '$lib/db/schema';
 import { eq, desc, inArray } from 'drizzle-orm';
+import { requirePageAdmin } from '$lib/server/auth';
 
-export const load = async ({ cookies, url }: { cookies: any; url: URL }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId) throw redirect(303, '/login');
-
-  const userId = await validateSession(sessionId);
-  if (!userId) throw redirect(303, '/login');
-
-  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
-  if (!currentUser) throw redirect(303, '/login');
-
+export const load = async (event: { locals: App.Locals; url: URL }) => {
   // Notification channels carry webhook URLs and credentials, and alert rules
   // describe the whole fleet. Admin-only, like every other page under /settings.
   // Hiding the link in the sidebar is presentation, not access control.
-  if (currentUser.role !== 'admin') throw redirect(303, '/dashboard');
+  const currentUser = requirePageAdmin(event).user;
+  const userId = currentUser.id;
 
-  const urlTeam = url.searchParams.get('team');
+  const urlTeam = event.url.searchParams.get('team');
 
   // Load channels
   let channels: any[] = [];

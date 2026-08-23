@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { domainFormatError } from './domains';
 
 export function parseBody<T extends z.ZodTypeAny>(
   body: unknown,
@@ -32,6 +33,19 @@ export class ValidationError extends Error {
   }
 }
 
+/**
+ * A hostname Rudder will put in a Traefik router rule.
+ *
+ * Built on `domainFormatError` rather than its own regex. The two used to be
+ * separate, this one went unused, and the hostname that actually reached a
+ * router rule was never checked at all. Declared outside `schemas` so the
+ * object's own fields can reuse it.
+ */
+const domainSchema = z.string().superRefine((value, ctx) => {
+  const error = domainFormatError(value);
+  if (error) ctx.addIssue({ code: z.ZodIssueCode.custom, message: error });
+});
+
 export const schemas = {
   workerId: z.string().uuid().min(1),
   containerId: z.string().min(1).max(256),
@@ -63,12 +77,8 @@ export const schemas = {
     .min(1, 'Command is required')
     .max(10000, 'Command too long'),
   
-  domain: z.string()
-    .min(1, 'Domain is required')
-    .max(253, 'Domain too long')
-    .regex(/^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/,
-      'Invalid domain format'),
-  
+  domain: domainSchema,
+
   dockerImage: z.string()
     .min(1, 'Image is required')
     .max(500, 'Image name too long')
@@ -79,7 +89,12 @@ export const schemas = {
     hostname: z.string().min(1).max(253),
     sshPort: z.number().int().min(1).max(65535).default(22),
     sshUser: z.string().min(1).max(100),
-    baseDomain: z.string().max(253).optional(),
+    /**
+     * Every hostname on the worker is built from this, and each one becomes a
+     * Traefik `Host()` rule — so it gets the same check an application domain
+     * does, not a bare length cap.
+     */
+    baseDomain: domainSchema.optional(),
     labels: z.record(z.string(), z.string()).optional(),
   }),
 
@@ -108,7 +123,7 @@ export const schemas = {
   createApplication: z.object({
     name: z.string().min(1).max(100),
     description: z.string().max(1000).optional(),
-    domain: z.string().max(253).optional(),
+    domain: domainSchema.optional(),
     workerId: z.string().uuid(),
     teamId: z.string().uuid(),
     type: z.enum(['single', 'compose', 'k8s']).default('single'),
@@ -122,9 +137,17 @@ export const schemas = {
     applicationId: z.string().uuid(),
   }),
 
+  /**
+   * The slug is derived from the name by `/api/teams`, not supplied.
+   *
+   * This used to require one, which is why the endpoint never adopted the
+   * schema: applying it as written would have rejected every request the UI
+   * actually sends. A schema no caller can satisfy is worse than none — it
+   * looks like validation and is dead code.
+   */
   createTeam: z.object({
     name: z.string().min(1).max(100),
-    slug: z.string().min(1).max(100).regex(/^[a-z0-9-]+$/, 'Slug can only contain lowercase letters, numbers, and hyphens'),
+    description: z.string().max(1000).optional(),
   }),
 
   createSecret: z.object({
@@ -178,12 +201,21 @@ export const schemas = {
     tty: z.boolean().optional(),
   }),
 
+  /**
+   * `teamId` is required and `workerId` is not — the reverse of what this said.
+   *
+   * Every volume must have an owning team: a teamless one is invisible in the
+   * listing (which filters on membership) but was readable, editable and
+   * deletable by every authenticated user, because the per-volume checks skip
+   * membership when there is no team to check against. A volume not yet pinned
+   * to a worker is ordinary; `volumes.worker_id` is nullable.
+   */
   createVolume: z.object({
     name: z.string().min(1).max(100),
-    workerId: z.string().uuid(),
-    teamId: z.string().uuid().optional(),
+    teamId: z.string().uuid(),
+    workerId: z.string().uuid().nullable().optional(),
     containerPath: z.string().min(1).max(500),
-    sizeLimit: z.number().int().positive().optional(),
+    sizeLimit: z.number().int().positive().nullable().optional(),
   }),
 
   saveTemplate: z.object({

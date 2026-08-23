@@ -1,34 +1,42 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
-import { teamQuotas, teams, users, applications, containers } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
-import { authErrorResponse, requireTeamMember } from '$lib/server/auth';
+import { teamQuotas, teams, applications, containers } from '$lib/db/schema';
+import { eq, inArray, count } from 'drizzle-orm';
+import type { RequestHandler } from './$types';
+import { requireTeam, requireAdminUser, route } from '$lib/server/auth';
 
 /** GET: Return quota for this team + current usage */
-export async function GET({ params, cookies }: { params: { id: string }; cookies: any }) {
+export const GET: RequestHandler = route(async (event) => {
+  const teamId = event.params.id!;
   // Quota and usage describe a team's footprint — restrict to its members.
-  try {
-    await requireTeamMember(cookies, params.id);
-  } catch (error) {
-    return authErrorResponse(error);
-  }
+  await requireTeam(event, teamId);
 
-  const team = await db.select().from(teams).where(eq(teams.id, params.id)).get();
+  const team = await db.select().from(teams).where(eq(teams.id, teamId)).get();
   if (!team) return json({ error: 'Team not found' }, { status: 404 });
 
-  const quota = await db.select().from(teamQuotas).where(eq(teamQuotas.teamId, params.id)).get();
+  const quota = await db.select().from(teamQuotas).where(eq(teamQuotas.teamId, teamId)).get();
 
-  // Count current usage
-  const teamApps = await db.select().from(applications).where(eq(applications.teamId, params.id)).all();
-  const appIds = teamApps.map(a => a.id);
+  // Count current usage. One aggregate rather than a query per application:
+  // this ran `SELECT * FROM containers` once per app and counted the rows in
+  // JavaScript, which is N+1 queries to learn a number SQLite will produce in
+  // one — and it materialised every column of every container to do it.
+  const teamApps = await db
+    .select({ id: applications.id })
+    .from(applications)
+    .where(eq(applications.teamId, teamId))
+    .all();
+  const appIds = teamApps.map((a) => a.id);
 
-  let containerCount = 0;
-  if (appIds.length > 0) {
-    for (const appId of appIds) {
-      const appContainers = await db.select().from(containers).where(eq(containers.applicationId, appId)).all();
-      containerCount += appContainers.length;
-    }
-  }
+  const containerCount =
+    appIds.length > 0
+      ? (
+          await db
+            .select({ n: count() })
+            .from(containers)
+            .where(inArray(containers.applicationId, appIds))
+            .get()
+        )?.n ?? 0
+      : 0;
 
   return json({
     quota: quota || null,
@@ -37,27 +45,21 @@ export async function GET({ params, cookies }: { params: { id: string }; cookies
       containers: containerCount,
     },
   });
-}
+});
 
 /** POST: Set/update quota. Admin only. */
-export async function POST({ params, request, cookies }: { params: { id: string }; request: Request; cookies: any }) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
+export const POST: RequestHandler = route(async (event) => {
+  requireAdminUser(event);
+  const teamId = event.params.id!;
 
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
-
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (!user || user.role !== 'admin') return json({ error: 'Admin access required' }, { status: 403 });
-
-  const team = await db.select().from(teams).where(eq(teams.id, params.id)).get();
+  const team = await db.select().from(teams).where(eq(teams.id, teamId)).get();
   if (!team) return json({ error: 'Team not found' }, { status: 404 });
 
-  const body = await request.json();
+  const body = await event.request.json();
   const { maxCpuCores, maxMemoryBytes, maxContainers, maxApplications } = body;
 
   const now = new Date();
-  const existing = await db.select().from(teamQuotas).where(eq(teamQuotas.teamId, params.id)).get();
+  const existing = await db.select().from(teamQuotas).where(eq(teamQuotas.teamId, teamId)).get();
 
   if (existing) {
     await db.update(teamQuotas).set({
@@ -70,7 +72,7 @@ export async function POST({ params, request, cookies }: { params: { id: string 
   } else {
     await db.insert(teamQuotas).values({
       id: crypto.randomUUID(),
-      teamId: params.id,
+      teamId,
       maxCpuCores: maxCpuCores ?? null,
       maxMemoryBytes: maxMemoryBytes ?? null,
       maxContainers: maxContainers ?? null,
@@ -81,4 +83,4 @@ export async function POST({ params, request, cookies }: { params: { id: string 
   }
 
   return json({ success: true });
-}
+});

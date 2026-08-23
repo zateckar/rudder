@@ -1,19 +1,8 @@
 import { redirect } from '@sveltejs/kit';
+import { requirePageUser } from '$lib/server/auth';
 
-export const load = async ({ cookies }: { cookies: any }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
-  const sessionId = getSessionIdFromCookies(cookies);
-  
-  if (!sessionId) {
-    throw redirect(303, '/login');
-  }
-  
-  const userId = await validateSession(sessionId);
-  
-  if (!userId) {
-    throw redirect(303, '/login');
-  }
-  
+/** `/` is a signpost: signed in goes to the dashboard, otherwise to the login. */
+export const load = async (event: { locals: App.Locals }) => {
+  requirePageUser(event);
   throw redirect(303, '/dashboard');
 };

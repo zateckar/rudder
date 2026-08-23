@@ -2,11 +2,12 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { applications, workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { authErrorResponse, requireTeamMember } from '$lib/server/auth';
+import type { RequestHandler } from './$types';
+import { requireTeam, route } from '$lib/server/auth';
 import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
 
-export async function POST({ request, cookies }: { request: Request; cookies: any }) {
-  const body = await request.json();
+export const POST: RequestHandler = route(async (event) => {
+  const body = await event.request.json();
   const { config, name, teamId, workerId } = body;
 
   if (!config || !name || !teamId || !workerId) {
@@ -15,12 +16,7 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
 
   // Import writes an application into a team — verify the caller belongs to
   // it, otherwise any user could plant an app in someone else's team.
-  let ctx;
-  try {
-    ({ ...ctx } = await requireTeamMember(cookies, teamId));
-  } catch (error) {
-    return authErrorResponse(error);
-  }
+  const ctx = await requireTeam(event, teamId);
 
   // Validate name format
   if (!/^[a-z][a-z0-9-]*$/.test(name)) {
@@ -88,4 +84,4 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
   });
 
   return json({ success: true, applicationId: appId, message: `Application "${name}" imported successfully` });
-}
+});

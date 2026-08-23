@@ -1,128 +1,84 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
+import { db, safeWorkerColumns } from '$lib/db';
 import { workers, applications, containers, volumes, workerMetrics, workerPings } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { eq, count } from 'drizzle-orm';
+import { requireWorker, route } from '$lib/server/auth';
 
-export const GET: RequestHandler = async ({ params, cookies, locals }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
+/**
+ * A worker as the browser may see it.
+ *
+ * `safeWorkerColumns` is the list that says which columns those are, and it is
+ * the same one every page load uses. This route used to hand-roll the redaction
+ * — `podmanClientKey: undefined` plus two `'***'` placeholders — which meant it
+ * had its own opinion about which columns are secret, and that opinion had
+ * already fallen behind: `crowdsecBouncerKey`, `oidcClientSecret`,
+ * `oidcEncryptionKey` and `configToken` were all returned in full.
+ */
+function publicWorker(worker: typeof workers.$inferSelect) {
+  const safe: Record<string, unknown> = {};
+  for (const key of Object.keys(safeWorkerColumns)) {
+    safe[key] = (worker as Record<string, unknown>)[key];
   }
+  // Kept as presence flags, which is what the worker page renders.
+  safe.podmanCaCert = worker.podmanCaCert ? '***' : null;
+  safe.podmanClientCert = worker.podmanClientCert ? '***' : null;
+  return safe;
+}
 
-  // Require admin role for worker details
-  if (locals.userRole !== 'admin') {
-    return json({ error: 'Forbidden - admin access required' }, { status: 403 });
-  }
+export const GET: RequestHandler = route(async (event) => {
+  const { worker } = await requireWorker(event, event.params.id!);
+  return json(publicWorker(worker));
+});
 
-  const worker = await db.select().from(workers).where(eq(workers.id, params.id)).get();
-  
-  if (!worker) {
-    return json({ error: 'Worker not found' }, { status: 404 });
-  }
+export const PATCH: RequestHandler = route(async (event) => {
+  const workerId = event.params.id!;
+  await requireWorker(event, workerId);
 
-  // Remove sensitive data
-  return json({
-    ...worker,
-    podmanClientKey: undefined,
-    podmanCaCert: worker.podmanCaCert ? '***' : null,
-    podmanClientCert: worker.podmanClientCert ? '***' : null,
-  });
-};
-
-export const PATCH: RequestHandler = async ({ params, request, cookies, locals }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  // Check admin role
-  const { users } = await import('$lib/db/schema');
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (!user || user.role !== 'admin') {
-    return json({ error: 'Admin access required' }, { status: 403 });
-  }
-
-  const worker = await db.select().from(workers).where(eq(workers.id, params.id)).get();
-  if (!worker) {
-    return json({ error: 'Worker not found' }, { status: 404 });
-  }
-
-  const body = await request.json();
-  const allowedFields = ['name', 'hostname', 'sshPort', 'sshUser', 'labels', 'status'];
+  const body = await event.request.json();
+  const allowedFields = ['name', 'hostname', 'sshPort', 'sshUser', 'labels', 'status'] as const;
   const updates: Record<string, any> = {};
 
   for (const field of allowedFields) {
-    if (body[field] !== undefined) {
-      updates[field] = body[field];
-    }
+    if (body[field] !== undefined) updates[field] = body[field];
   }
 
   if (Object.keys(updates).length === 0) {
     return json({ error: 'No valid fields to update' }, { status: 400 });
   }
 
-  await db.update(workers).set(updates).where(eq(workers.id, params.id));
+  await db.update(workers).set(updates).where(eq(workers.id, workerId));
 
-  const updated = await db.select().from(workers).where(eq(workers.id, params.id)).get();
-  
-  return json({
-    ...updated,
-    podmanClientKey: undefined,
-    podmanCaCert: updated?.podmanCaCert ? '***' : null,
-    podmanClientCert: updated?.podmanClientCert ? '***' : null,
-  });
-};
+  const updated = await db.select().from(workers).where(eq(workers.id, workerId)).get();
+  return json(updated ? publicWorker(updated) : { error: 'Worker not found' });
+});
 
-export const DELETE: RequestHandler = async ({ params, cookies }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
+export const DELETE: RequestHandler = route(async (event) => {
+  const workerId = event.params.id!;
+  await requireWorker(event, workerId);
 
-  // Check admin role
-  const { users } = await import('$lib/db/schema');
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (!user || user.role !== 'admin') {
-    return json({ error: 'Admin access required' }, { status: 403 });
-  }
+  // Counts, not rows: this loaded every application, container and volume on
+  // the worker in full — manifests included — to find out whether any existed.
+  const [apps, conts, vols] = await Promise.all([
+    db.select({ n: count() }).from(applications).where(eq(applications.workerId, workerId)).get(),
+    db.select({ n: count() }).from(containers).where(eq(containers.workerId, workerId)).get(),
+    db.select({ n: count() }).from(volumes).where(eq(volumes.workerId, workerId)).get(),
+  ]);
 
-  const worker = await db.select().from(workers).where(eq(workers.id, params.id)).get();
-  if (!worker) {
-    return json({ error: 'Worker not found' }, { status: 404 });
-  }
-
-  // Check for existing applications/containers
-  const workerApps = await db.select().from(applications).where(eq(applications.workerId, params.id)).all();
-  const workerContainers = await db.select().from(containers).where(eq(containers.workerId, params.id)).all();
-  const workerVolumes = await db.select().from(volumes).where(eq(volumes.workerId, params.id)).all();
-
-  if (workerApps.length > 0 || workerContainers.length > 0 || workerVolumes.length > 0) {
-    return json({ 
+  if ((apps?.n ?? 0) > 0 || (conts?.n ?? 0) > 0 || (vols?.n ?? 0) > 0) {
+    return json({
       error: 'Cannot delete worker with existing applications, containers, or volumes',
-      applications: workerApps.length,
-      containers: workerContainers.length,
-      volumes: workerVolumes.length
+      applications: apps?.n ?? 0,
+      containers: conts?.n ?? 0,
+      volumes: vols?.n ?? 0,
     }, { status: 409 });
   }
 
   // Delete related data that should be cleaned up
-  await db.delete(workerMetrics).where(eq(workerMetrics.workerId, params.id));
-  await db.delete(workerPings).where(eq(workerPings.workerId, params.id));
+  await db.delete(workerMetrics).where(eq(workerMetrics.workerId, workerId));
+  await db.delete(workerPings).where(eq(workerPings.workerId, workerId));
 
-  await db.delete(workers).where(eq(workers.id, params.id));
-  
+  await db.delete(workers).where(eq(workers.id, workerId));
+
   return json({ success: true, message: 'Worker deleted' });
-};
+});

@@ -1,46 +1,24 @@
 import { redirect, fail, error } from '@sveltejs/kit';
-import { db, safeWorkerColumns, safeUserColumns } from '$lib/db';
-import { workers, users } from '$lib/db/schema';
+import { db, safeWorkerColumns } from '$lib/db';
+import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
+import { domainFormatError } from '$lib/server/domains';
+import { currentUser, isAdmin, requirePageAdmin } from '$lib/server/auth';
 
-export const load = async ({ params, cookies }: { params: { id: string }; cookies: any }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
+export const load = async (event: { params: { id: string }; locals: App.Locals }) => {
+  const user = requirePageAdmin(event).user;
 
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId) throw redirect(303, '/login');
-
-  const userId = await validateSession(sessionId);
-  if (!userId) throw redirect(303, '/login');
-
-  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
-  if (!currentUser || currentUser.role !== 'admin') {
-    throw redirect(303, '/dashboard');
-  }
-
-  const worker = await db.select(safeWorkerColumns).from(workers).where(eq(workers.id, params.id)).get();
+  const worker = await db.select(safeWorkerColumns).from(workers).where(eq(workers.id, event.params.id)).get();
   if (!worker) throw error(404, 'Worker not found');
 
-
-  return {
-    user: currentUser,
-    worker,
-  };
+  return { user, worker };
 };
 
 export const actions = {
-  default: async ({ params, request, cookies }: { params: { id: string }; request: Request; cookies: any }) => {
-    const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-    const sessionId = getSessionIdFromCookies(cookies);
-    if (!sessionId || !(await validateSession(sessionId))) {
-      return fail(401, { error: 'Unauthorized' });
-    }
-
-    const userId = await validateSession(sessionId);
-    const currentUser = await db.select().from(users).where(eq(users.id, userId!)).get();
-    if (!currentUser || currentUser.role !== 'admin') {
-      return fail(403, { error: 'Admin access required' });
-    }
+  default: async ({ params, request, locals }: { params: { id: string }; request: Request; locals: App.Locals }) => {
+    const ctx = currentUser({ locals });
+    if (!ctx) return fail(401, { error: 'Unauthorized' });
+    if (!isAdmin(ctx)) return fail(403, { error: 'Admin access required' });
 
     const worker = await db.select().from(workers).where(eq(workers.id, params.id)).get();
     if (!worker) return fail(404, { error: 'Worker not found' });
@@ -53,6 +31,14 @@ export const actions = {
     const sshUser = formData.get('sshUser')?.toString();
     const baseDomain = formData.get('baseDomain')?.toString() || '';
     const podmanApiUrl = formData.get('podmanApiUrl')?.toString() || '';
+
+    // Same rule as the create form: this value is the stem of every Traefik
+    // `Host()` rule on the worker, including its own auth/metrics/podman-api
+    // routers.
+    if (baseDomain) {
+      const badDomain = domainFormatError(baseDomain);
+      if (badDomain) return fail(400, { error: `Base domain: ${badDomain}` });
+    }
 
     if (!name || !hostname || !sshUser) {
       return fail(400, { error: 'Missing required fields' });

@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'bun:test';
-import { buildAppDomain, buildServiceDomain, routerName, toDnsLabel } from './domains';
+import {
+  buildAppDomain,
+  buildServiceDomain,
+  domainFormatError,
+  routerName,
+  toDnsLabel,
+} from './domains';
 
 describe('toDnsLabel', () => {
   test('lowercases', () => {
@@ -77,6 +83,78 @@ describe('buildServiceDomain', () => {
 
   test('returns null without a base domain', () => {
     expect(buildServiceDomain('shop', 'api', null)).toBeNull();
+  });
+});
+
+describe('domainFormatError', () => {
+  test('accepts ordinary hostnames', () => {
+    for (const domain of [
+      'example.com',
+      'app.example.com',
+      'my-app.apps.example.com',
+      'a.b.c.d.example.com',
+      'localhost',
+      'x1.example.com',
+    ]) {
+      expect(domainFormatError(domain), domain).toBeNull();
+    }
+  });
+
+  test('accepts everything buildAppDomain produces', () => {
+    // The generated path and the user-supplied path share this validator, so a
+    // canonical hostname must never be rejected by it.
+    expect(domainFormatError(buildAppDomain('My App', 'apps.example.com')!)).toBeNull();
+    expect(domainFormatError(buildServiceDomain('shop', 'api', 'apps.example.com')!)).toBeNull();
+  });
+
+  test('rejects a backtick, which closes the Traefik matcher', () => {
+    // The whole point. ``Host(`<domain>`)`` is parsed by Traefik as an
+    // expression, so a backtick ends the hostname and everything after it is
+    // rule logic — here, a second router for a host the caller does not own,
+    // longer than the victim's rule and therefore higher priority.
+    const injected = 'a.example.com`) || Host(`victim.example.com';
+    const error = domainFormatError(injected);
+    expect(error).toContain('illegal character');
+    expect(error).toContain('`');
+  });
+
+  test('rejects the rest of the Traefik rule grammar', () => {
+    for (const domain of [
+      'a.example.com) || Host(b.example.com',
+      'a.example.com && PathPrefix(/x)',
+      "a.example.com'",
+      'a.example.com"',
+      'a b.example.com',
+      'a.example.com\tb',
+    ]) {
+      expect(domainFormatError(domain), domain).not.toBeNull();
+    }
+  });
+
+  test('rejects malformed hostnames', () => {
+    expect(domainFormatError('')).toContain('required');
+    expect(domainFormatError('   ')).toContain('required');
+    expect(domainFormatError('a..example.com')).toContain('empty label');
+    expect(domainFormatError('.example.com')).toContain('empty label');
+    expect(domainFormatError('example.com.')).toContain('empty label');
+    expect(domainFormatError('-a.example.com')).toContain('not a valid hostname label');
+    expect(domainFormatError('a-.example.com')).toContain('not a valid hostname label');
+    expect(domainFormatError('a_b.example.com')).toContain('not a valid hostname label');
+    expect(domainFormatError(`${'a'.repeat(64)}.example.com`)).toContain('not a valid hostname label');
+  });
+
+  test('rejects surrounding whitespace instead of silently trimming it', () => {
+    // Callers store the value as given, so accepting a trimmed copy would write
+    // the spaces and produce a router rule that matches nothing.
+    expect(domainFormatError(' app.example.com')).not.toBeNull();
+    expect(domainFormatError('app.example.com ')).not.toBeNull();
+    expect(domainFormatError('app.example.com\n')).not.toBeNull();
+  });
+
+  test('rejects an over-long hostname', () => {
+    const long = `${Array.from({ length: 40 }, () => 'abcdef').join('.')}.example.com`;
+    expect(long.length).toBeGreaterThan(253);
+    expect(domainFormatError(long)).toContain('too long');
   });
 });
 

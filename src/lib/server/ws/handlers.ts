@@ -365,17 +365,21 @@ registerWsRoute('k8s-exec', {
   },
 });
 
-/** Find a container by pod name within one team's applications. */
+/**
+ * Find a container by pod name within one team's applications.
+ *
+ * One join, not one query per application: this used to select every
+ * application in the team and then issue a separate `SELECT *` of containers
+ * for each of them, on every `kubectl exec`.
+ */
 async function findTeamContainer(teamId: string, podName: string) {
-  const teamApps = await db.select().from(applications).where(eq(applications.teamId, teamId)).all();
-  for (const app of teamApps) {
-    const appContainers = await db
-      .select()
-      .from(containers)
-      .where(eq(containers.applicationId, app.id))
-      .all();
-    const found = appContainers.find((c) => podNameOf(c.name) === podNameOf(podName));
-    if (found) return found;
-  }
-  return null;
+  const rows = await db
+    .select({ container: containers })
+    .from(containers)
+    .innerJoin(applications, eq(containers.applicationId, applications.id))
+    .where(eq(applications.teamId, teamId))
+    .all();
+
+  const wanted = podNameOf(podName);
+  return rows.find((r) => podNameOf(r.container.name) === wanted)?.container ?? null;
 }

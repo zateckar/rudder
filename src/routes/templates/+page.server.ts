@@ -1,49 +1,31 @@
 import { redirect, fail } from '@sveltejs/kit';
-import { db, safeWorkerColumns, safeUserColumns } from '$lib/db';
-import { applicationTemplates, applications, users, teams, teamMembers, workers } from '$lib/db/schema';
-import { and, eq, inArray, or } from 'drizzle-orm';
+import { db, safeWorkerColumns } from '$lib/db';
+import { applicationTemplates, applications, teams, teamMembers, workers } from '$lib/db/schema';
+import { eq, inArray, or } from 'drizzle-orm';
 import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
+import {
+  type AuthContext,
+  canWriteToTeam,
+  currentUser as sessionUser,
+  isTeamMember,
+  requirePageUser,
+} from '$lib/server/auth';
 
-async function canModifyTemplate(userId: string, template: any): Promise<boolean> {
-  // Global admins can modify any template
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (currentUser?.role === 'admin') return true;
-
-  // Template creator can modify their own templates
-  if (template.createdBy === userId) return true;
-
-  // User is a member of the owning team
-  const membership = await db
-    .select()
-    .from(teamMembers)
-    .where(eq(teamMembers.userId, userId))
-    .all();
-  return membership.some((m) => m.teamId === template.teamId);
+/** Whether this caller may share, unshare or delete a template. */
+async function canModifyTemplate(ctx: AuthContext, template: any): Promise<boolean> {
+  if (ctx.user.role === 'admin') return true;
+  if (template.createdBy === ctx.user.id) return true;
+  return !!template.teamId && isTeamMember(ctx.user.id, template.teamId);
 }
 
-/** Whether `userId` may act on `teamId`'s behalf. Admins always may. */
-async function canActForTeam(userId: string, teamId: string): Promise<boolean> {
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (currentUser?.role === 'admin') return true;
-
-  const membership = await db
-    .select()
-    .from(teamMembers)
-    .where(and(eq(teamMembers.userId, userId), eq(teamMembers.teamId, teamId)))
-    .get();
-  return !!membership;
+/** Resolve the caller, or the `fail()` an action should return. */
+function actor(event: { locals: App.Locals }): AuthContext | null {
+  return sessionUser(event);
 }
 
-export const load = async ({ cookies, url }: { cookies: any; url: URL }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId) throw redirect(303, '/login');
-
-  const userId = await validateSession(sessionId);
-  if (!userId) throw redirect(303, '/login');
-
-  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
+export const load = async (event: { locals: App.Locals; url: URL }) => {
+  const currentUser = requirePageUser(event).user;
+  const userId = currentUser.id;
 
   // Get user's team memberships
   const memberships = await db
@@ -52,16 +34,16 @@ export const load = async ({ cookies, url }: { cookies: any; url: URL }) => {
     .where(eq(teamMembers.userId, userId))
     .all();
   const teamIds = memberships.map((m) => m.teamId);
-  const urlTeam = url.searchParams.get('team');
+  const urlTeam = event.url.searchParams.get('team');
 
   // Visible templates: own team's templates + shared templates from other teams
   let visibleTemplates;
-  if (currentUser?.role === 'admin' && (!urlTeam || urlTeam === 'all')) {
+  if (currentUser.role === 'admin' && (!urlTeam || urlTeam === 'all')) {
     visibleTemplates = await db.select().from(applicationTemplates).all();
   } else {
     let targetTeamIds = teamIds;
     if (urlTeam && urlTeam !== 'all') {
-      targetTeamIds = (currentUser?.role === 'admin' || teamIds.includes(urlTeam)) ? [urlTeam] : [];
+      targetTeamIds = (currentUser.role === 'admin' || teamIds.includes(urlTeam)) ? [urlTeam] : [];
     }
 
     if (targetTeamIds.length > 0) {
@@ -105,16 +87,11 @@ export const load = async ({ cookies, url }: { cookies: any; url: URL }) => {
 };
 
 export const actions = {
-  save: async ({ request, cookies }: { request: Request; cookies: any }) => {
-    const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-    const sessionId = getSessionIdFromCookies(cookies);
-    if (!sessionId || !(await validateSession(sessionId))) {
-      return fail(401, { error: 'Unauthorized' });
-    }
-
-    const userId = await validateSession(sessionId);
-    const formData = await request.formData();
+  save: async (event: { request: Request; locals: App.Locals }) => {
+    const ctx = actor(event);
+    if (!ctx) return fail(401, { error: 'Unauthorized' });
+    const userId = ctx.user.id;
+    const formData = await event.request.formData();
 
     const appId = formData.get('appId')?.toString();
     const name = formData.get('name')?.toString()?.trim();
@@ -138,7 +115,7 @@ export const actions = {
     // — into a template owned by that application's team. 404 rather than 403:
     // the caller cannot see this application, so it should not be able to tell
     // an inaccessible id from a nonexistent one.
-    if (!userId || !(await canActForTeam(userId, app.teamId))) {
+    if (!(await canWriteToTeam(ctx, app.teamId))) {
       return fail(404, { error: 'Application not found' });
     }
 
@@ -178,18 +155,18 @@ export const actions = {
     return { success: true, message: `Template "${name}" created` };
   },
 
-  share: async ({ request, cookies }: { request: Request; cookies: any }) => {
-    const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
+  share: async (event: { request: Request; locals: App.Locals }) =>
+    setShared(event, true),
 
-    const sessionId = getSessionIdFromCookies(cookies);
-    if (!sessionId || !(await validateSession(sessionId))) {
-      return fail(401, { error: 'Unauthorized' });
-    }
+  unshare: async (event: { request: Request; locals: App.Locals }) =>
+    setShared(event, false),
 
-    const userId = await validateSession(sessionId);
-    const formData = await request.formData();
+  delete: async (event: { request: Request; locals: App.Locals }) => {
+    const ctx = actor(event);
+    if (!ctx) return fail(401, { error: 'Unauthorized' });
+
+    const formData = await event.request.formData();
     const templateId = formData.get('templateId')?.toString();
-
     if (!templateId) return fail(400, { error: 'Template ID required' });
 
     const template = await db
@@ -199,94 +176,20 @@ export const actions = {
       .get();
     if (!template) return fail(404, { error: 'Template not found' });
 
-    // Verify user can modify this template
-    if (!(await canModifyTemplate(userId!, template))) {
-      return fail(403, { error: 'Not authorized to modify this template' });
-    }
-
-    await db
-      .update(applicationTemplates)
-      .set({ shared: true, updatedAt: new Date() })
-      .where(eq(applicationTemplates.id, templateId));
-
-    return { success: true };
-  },
-
-  unshare: async ({ request, cookies }: { request: Request; cookies: any }) => {
-    const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-    const sessionId = getSessionIdFromCookies(cookies);
-    if (!sessionId || !(await validateSession(sessionId))) {
-      return fail(401, { error: 'Unauthorized' });
-    }
-
-    const userId = await validateSession(sessionId);
-    const formData = await request.formData();
-    const templateId = formData.get('templateId')?.toString();
-
-    if (!templateId) return fail(400, { error: 'Template ID required' });
-
-    const template = await db
-      .select()
-      .from(applicationTemplates)
-      .where(eq(applicationTemplates.id, templateId))
-      .get();
-    if (!template) return fail(404, { error: 'Template not found' });
-
-    if (!(await canModifyTemplate(userId!, template))) {
-      return fail(403, { error: 'Not authorized to modify this template' });
-    }
-
-    await db
-      .update(applicationTemplates)
-      .set({ shared: false, updatedAt: new Date() })
-      .where(eq(applicationTemplates.id, templateId));
-
-    return { success: true };
-  },
-
-  delete: async ({ request, cookies }: { request: Request; cookies: any }) => {
-    const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-    const sessionId = getSessionIdFromCookies(cookies);
-    if (!sessionId || !(await validateSession(sessionId))) {
-      return fail(401, { error: 'Unauthorized' });
-    }
-
-    const userId = await validateSession(sessionId);
-    const formData = await request.formData();
-    const templateId = formData.get('templateId')?.toString();
-
-    if (!templateId) return fail(400, { error: 'Template ID required' });
-
-    const template = await db
-      .select()
-      .from(applicationTemplates)
-      .where(eq(applicationTemplates.id, templateId))
-      .get();
-    if (!template) return fail(404, { error: 'Template not found' });
-
-    if (!(await canModifyTemplate(userId!, template))) {
+    if (!(await canModifyTemplate(ctx, template))) {
       return fail(403, { error: 'Not authorized to delete this template' });
     }
 
-    await db
-      .delete(applicationTemplates)
-      .where(eq(applicationTemplates.id, templateId));
+    await db.delete(applicationTemplates).where(eq(applicationTemplates.id, templateId));
 
     return { success: true };
   },
 
-  apply: async ({ request, cookies }: { request: Request; cookies: any }) => {
-    const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-    const sessionId = getSessionIdFromCookies(cookies);
-    if (!sessionId || !(await validateSession(sessionId))) {
-      return fail(401, { error: 'Unauthorized' });
-    }
-
-    const userId = await validateSession(sessionId);
-    const formData = await request.formData();
+  apply: async (event: { request: Request; locals: App.Locals }) => {
+    const ctx = actor(event);
+    if (!ctx) return fail(401, { error: 'Unauthorized' });
+    const userId = ctx.user.id;
+    const formData = await event.request.formData();
 
     const templateId = formData.get('templateId')?.toString();
     const name = formData.get('name')?.toString()?.trim();
@@ -316,15 +219,19 @@ export const actions = {
       .get();
     if (!template) return fail(404, { error: 'Template not found' });
 
-    // Verify visibility
-    const memberships = await db
-      .select()
-      .from(teamMembers)
-      .where(eq(teamMembers.userId, userId!))
-      .all();
-    const userTeamIds = memberships.map((m) => m.teamId);
-    if (!template.shared && !userTeamIds.includes(template.teamId)) {
+    // Verify visibility of the template…
+    if (!template.shared && !(await isTeamMember(userId, template.teamId))) {
       return fail(403, { error: 'Not authorized to use this template' });
+    }
+
+    // …and authority over the team the new application is being placed in.
+    // This was missing: the team came from the submitted form and was written
+    // straight through, so a shared template was a way to create an application
+    // inside any team in the installation — where it consumes that team's
+    // quota, claims a domain and is deployed on their behalf. This is exactly
+    // what `canWriteToTeam` exists for.
+    if (!(await canWriteToTeam(ctx, teamId))) {
+      return fail(403, { error: 'Not authorized to create applications in this team' });
     }
 
     // Validate worker
@@ -359,3 +266,34 @@ export const actions = {
     throw redirect(303, `/applications/${appId}`);
   },
 };
+
+/**
+ * `share` and `unshare` differed by one boolean and were otherwise identical,
+ * down to the error strings.
+ */
+async function setShared(event: { request: Request; locals: App.Locals }, shared: boolean) {
+  const ctx = actor(event);
+  if (!ctx) return fail(401, { error: 'Unauthorized' });
+
+  const formData = await event.request.formData();
+  const templateId = formData.get('templateId')?.toString();
+  if (!templateId) return fail(400, { error: 'Template ID required' });
+
+  const template = await db
+    .select()
+    .from(applicationTemplates)
+    .where(eq(applicationTemplates.id, templateId))
+    .get();
+  if (!template) return fail(404, { error: 'Template not found' });
+
+  if (!(await canModifyTemplate(ctx, template))) {
+    return fail(403, { error: 'Not authorized to modify this template' });
+  }
+
+  await db
+    .update(applicationTemplates)
+    .set({ shared, updatedAt: new Date() })
+    .where(eq(applicationTemplates.id, templateId));
+
+  return { success: true };
+}

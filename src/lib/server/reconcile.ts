@@ -631,6 +631,21 @@ export function autoCorrectable(drift: readonly DriftEntry[]): DriftEntry[] {
 
 export interface ReconcileOptions {
   /**
+   * Containers already read from this worker, so the pass does not read them
+   * again.
+   *
+   * The background collector lists every worker's containers for its own
+   * purposes immediately before reconciling, and this used to make a second
+   * identical `listContainers` call — a second mTLS handshake and a second
+   * round trip per worker per cycle, to learn something it had just been told.
+   *
+   * Omit it and the pass fetches its own, which is what the "Re-check" button
+   * on an application's page wants: there, being a moment out of date is the
+   * whole thing the operator is trying to fix.
+   */
+  observed?: readonly ObservedContainer[];
+
+  /**
    * Whether this pass may correct what it finds.
    *
    * **Wired false everywhere, and it must stay that way for a full release
@@ -718,12 +733,16 @@ export async function reconcileWorker(
 
   const rows = await db.select().from(containers).where(eq(containers.workerId, worker.id)).all();
 
-  const client = getRestPodmanClient(worker);
-  let observed: ObservedContainer[];
-  try {
-    observed = await observedState(client);
-  } finally {
-    client.destroy();
+  let observed: readonly ObservedContainer[];
+  if (options.observed) {
+    observed = options.observed;
+  } else {
+    const client = getRestPodmanClient(worker);
+    try {
+      observed = await observedState(client);
+    } finally {
+      client.destroy();
+    }
   }
 
   const { drift, clean } = diff({ desired, rows, observed, knownAppIds });
@@ -862,14 +881,24 @@ export function summarize(findings: readonly DriftEntry[]): string {
  * unreachable machine must not stop the others being examined.
  */
 export async function reconcileAllWorkers(
-  options: ReconcileOptions = {},
+  options: ReconcileOptions & {
+    /**
+     * Containers already listed per worker id, so this does not list them
+     * again. See `ReconcileOptions.observed`; the background collector supplies
+     * this from the sweep it has just finished.
+     */
+    observedByWorker?: ReadonlyMap<string, readonly ObservedContainer[]>;
+  } = {},
 ): Promise<ReconcileReport[]> {
   const online = await db.select().from(workers).where(eq(workers.status, 'online')).all();
   const reports: ReconcileReport[] = [];
 
   for (const worker of online) {
     try {
-      const report = await reconcileWorker(worker, options);
+      const report = await reconcileWorker(worker, {
+        ...options,
+        observed: options.observedByWorker?.get(worker.id) ?? options.observed,
+      });
       reports.push(report);
       if (!report.clean) {
         console.warn(

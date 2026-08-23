@@ -13,6 +13,7 @@ import {
   oidcCallbackUrl,
   resolveCallbackPath,
 } from '$lib/server/oidc';
+import { requireWorker, route } from '$lib/server/auth';
 
 /** Shape returned to the settings UI. Never includes secret material. */
 function publicOidcState(worker: typeof workers.$inferSelect) {
@@ -36,31 +37,17 @@ function publicOidcState(worker: typeof workers.$inferSelect) {
 }
 
 /** GET /api/workers/[id]/oidc — return current OIDC config (secret masked) */
-export const GET: RequestHandler = async ({ params, cookies, locals }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
-  if (locals.userRole !== 'admin') return json({ error: 'Admin access required' }, { status: 403 });
-
-  const worker = await db.select().from(workers).where(eq(workers.id, params.id)).get();
-  if (!worker) return json({ error: 'Worker not found' }, { status: 404 });
-
+export const GET: RequestHandler = route(async (event) => {
+  const { worker } = await requireWorker(event, event.params.id!);
   return json(publicOidcState(worker));
-};
+});
 
 /** PUT /api/workers/[id]/oidc — save OIDC config */
-export const PUT: RequestHandler = async ({ params, request, cookies, locals }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
-  if (locals.userRole !== 'admin') return json({ error: 'Admin access required' }, { status: 403 });
+export const PUT: RequestHandler = route(async (event) => {
+  const workerId = event.params.id!;
+  const { worker } = await requireWorker(event, workerId);
 
-  const worker = await db.select().from(workers).where(eq(workers.id, params.id)).get();
-  if (!worker) return json({ error: 'Worker not found' }, { status: 404 });
-
-  const body = await request.json();
+  const body = await event.request.json();
   const {
     oidcEnabled,
     oidcProviderUrl,
@@ -119,22 +106,16 @@ export const PUT: RequestHandler = async ({ params, request, cookies, locals }) 
     updates.oidcEncryptionKey = encryptField(generateOidcSecret());
   }
 
-  await db.update(workers).set(updates).where(eq(workers.id, params.id));
-  const updated = await db.select().from(workers).where(eq(workers.id, params.id)).get();
+  await db.update(workers).set(updates).where(eq(workers.id, workerId));
+  const updated = await db.select().from(workers).where(eq(workers.id, workerId)).get();
 
   return json(publicOidcState(updated!));
-};
+});
 
 /** DELETE /api/workers/[id]/oidc — clear all OIDC config */
-export const DELETE: RequestHandler = async ({ params, cookies, locals }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
-  if (locals.userRole !== 'admin') return json({ error: 'Admin access required' }, { status: 403 });
-
-  const worker = await db.select().from(workers).where(eq(workers.id, params.id)).get();
-  if (!worker) return json({ error: 'Worker not found' }, { status: 404 });
+export const DELETE: RequestHandler = route(async (event) => {
+  const workerId = event.params.id!;
+  await requireWorker(event, workerId);
 
   await db.update(workers).set({
     oidcEnabled: false,
@@ -144,7 +125,7 @@ export const DELETE: RequestHandler = async ({ params, cookies, locals }) => {
     oidcEncryptionKey: null,
     oidcCallbackPath: null,
     oidcAppliedAt: null,
-  }).where(eq(workers.id, params.id));
+  }).where(eq(workers.id, workerId));
 
   return json({ success: true });
-};
+});

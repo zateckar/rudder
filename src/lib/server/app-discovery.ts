@@ -49,6 +49,7 @@ import type { Container, ContainerInspect } from '$lib/server/podman';
 // deploy; keep it out of Rudder's database.
 import { redactSecretLabels } from '$lib/server/redaction';
 import { podmanName } from '$lib/server/reconcile';
+import { assertDomainAvailable } from '$lib/server/domains';
 
 /** Platform containers. Rudder runs these; they are not applications. */
 const INFRASTRUCTURE = ['traefik', 'crowdsec', 'podman-api'];
@@ -285,6 +286,19 @@ export async function adoptContainers(
         const now = new Date();
         const image = inspect.Config?.Image ?? 'unknown';
         const domain = request.domain ?? routedDomain(inspect.Config?.Labels);
+
+        // Adoption is the one write site that did not go through
+        // `assertDomainAvailable`, so it had neither the format check nor the
+        // uniqueness one. Both matter here: the hostname is either typed by the
+        // operator or parsed back out of a `Host()` rule on a container Rudder
+        // did not create, and it goes straight back into a router rule at the
+        // first deploy. A duplicate would give Traefik two routers with the
+        // same rule.
+        const domainRejected = domain ? await assertDomainAvailable(domain) : null;
+        if (domainRejected) {
+          result.skipped.push({ containerId: request.containerId, reason: domainRejected });
+          continue;
+        }
 
         await db.insert(applications).values({
           id: applicationId,

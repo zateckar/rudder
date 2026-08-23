@@ -4,7 +4,8 @@ import { db } from '$lib/db';
 import { users, sessions, teamMembers, userOidc } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { hashPassword, validatePassword } from '$lib/auth';
-import { parseJsonBody, schemas, ValidationError } from '$lib/server/validation';
+import { parseJsonBody, schemas } from '$lib/server/validation';
+import { requireAdminUser, requireUser, route } from '$lib/server/auth';
 import { z } from 'zod';
 
 /**
@@ -29,23 +30,12 @@ const patchUserSchema = schemas.userUpdate.extend({
   password: z.string().optional(),
 });
 
-export const GET: RequestHandler = async ({ params, cookies }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
+export const GET: RequestHandler = route(async (event) => {
+  const targetId = event.params.id!;
+  const currentUser = requireUser(event).user;
 
   // Users can view their own profile, admins can view any
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (!currentUser) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  if (params.id !== userId && currentUser.role !== 'admin') {
+  if (targetId !== currentUser.id && currentUser.role !== 'admin') {
     return json({ error: 'Access denied' }, { status: 403 });
   }
 
@@ -57,7 +47,7 @@ export const GET: RequestHandler = async ({ params, cookies }) => {
     role: users.role,
     createdAt: users.createdAt,
     updatedAt: users.updatedAt,
-  }).from(users).where(eq(users.id, params.id)).get();
+  }).from(users).where(eq(users.id, targetId)).get();
 
   if (!user) {
     return json({ error: 'User not found' }, { status: 404 });
@@ -67,35 +57,24 @@ export const GET: RequestHandler = async ({ params, cookies }) => {
   const oidcLinks = await db.select({
     provider: userOidc.provider,
     lastSyncedAt: userOidc.lastSyncedAt,
-  }).from(userOidc).where(eq(userOidc.userId, params.id)).all();
+  }).from(userOidc).where(eq(userOidc.userId, targetId)).all();
 
   return json({ ...user, oidcProviders: oidcLinks });
-};
+});
 
-export const PATCH: RequestHandler = async ({ params, request, cookies }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (!currentUser) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
+export const PATCH: RequestHandler = route(async (event) => {
+  const targetId = event.params.id!;
+  const currentUser = requireUser(event).user;
 
   // Users can update their own profile, admins can update any
   const isAdmin = currentUser.role === 'admin';
-  const isSelf = params.id === userId;
+  const isSelf = targetId === currentUser.id;
 
   if (!isSelf && !isAdmin) {
     return json({ error: 'Access denied' }, { status: 403 });
   }
 
-  const targetUser = await db.select().from(users).where(eq(users.id, params.id)).get();
+  const targetUser = await db.select().from(users).where(eq(users.id, targetId)).get();
   if (!targetUser) {
     return json({ error: 'User not found' }, { status: 404 });
   }
@@ -103,15 +82,10 @@ export const PATCH: RequestHandler = async ({ params, request, cookies }) => {
   // Validated rather than copied through. `role` in particular reaches every
   // authorization check in the codebase, all of which test `role === 'admin'`,
   // so an unconstrained string does not error — it silently demotes the user.
-  let body: z.infer<typeof patchUserSchema>;
-  try {
-    body = await parseJsonBody(request, patchUserSchema);
-  } catch (error) {
-    if (error instanceof ValidationError) {
-      return json({ error: error.message }, { status: 400 });
-    }
-    throw error;
-  }
+  const body: z.infer<typeof patchUserSchema> = await parseJsonBody(
+    event.request,
+    patchUserSchema,
+  );
 
   const updates: Record<string, any> = { updatedAt: new Date() };
 
@@ -161,7 +135,7 @@ export const PATCH: RequestHandler = async ({ params, request, cookies }) => {
     }
   }
 
-  await db.update(users).set(updates).where(eq(users.id, params.id));
+  await db.update(users).set(updates).where(eq(users.id, targetId));
 
   // A password change has to evict the sessions minted under the old one, or
   // resetting a compromised account's password leaves the attacker signed in
@@ -170,7 +144,7 @@ export const PATCH: RequestHandler = async ({ params, request, cookies }) => {
   // the correct outcome and the alternative is a carve-out that has to be right.
   if (passwordChanged) {
     try {
-      await db.delete(sessions).where(eq(sessions.userId, params.id));
+      await db.delete(sessions).where(eq(sessions.userId, targetId));
     } catch (e) {
       console.error('Failed to revoke sessions after password change:', e);
     }
@@ -184,42 +158,30 @@ export const PATCH: RequestHandler = async ({ params, request, cookies }) => {
     role: users.role,
     createdAt: users.createdAt,
     updatedAt: users.updatedAt,
-  }).from(users).where(eq(users.id, params.id)).get();
+  }).from(users).where(eq(users.id, targetId)).get();
 
   return json(updated);
-};
+});
 
-export const DELETE: RequestHandler = async ({ params, cookies }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  // Only admins can delete users
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (!currentUser || currentUser.role !== 'admin') {
-    return json({ error: 'Admin access required' }, { status: 403 });
-  }
+export const DELETE: RequestHandler = route(async (event) => {
+  const targetId = event.params.id!;
+  const currentUser = requireAdminUser(event).user;
 
   // Cannot delete yourself
-  if (params.id === userId) {
+  if (targetId === currentUser.id) {
     return json({ error: 'Cannot delete your own account' }, { status: 400 });
   }
 
-  const targetUser = await db.select().from(users).where(eq(users.id, params.id)).get();
+  const targetUser = await db.select().from(users).where(eq(users.id, targetId)).get();
   if (!targetUser) {
     return json({ error: 'User not found' }, { status: 404 });
   }
 
   // Delete related records
-  await db.delete(sessions).where(eq(sessions.userId, params.id));
-  await db.delete(teamMembers).where(eq(teamMembers.userId, params.id));
-  await db.delete(userOidc).where(eq(userOidc.userId, params.id));
-  await db.delete(users).where(eq(users.id, params.id));
+  await db.delete(sessions).where(eq(sessions.userId, targetId));
+  await db.delete(teamMembers).where(eq(teamMembers.userId, targetId));
+  await db.delete(userOidc).where(eq(userOidc.userId, targetId));
+  await db.delete(users).where(eq(users.id, targetId));
 
   return json({ success: true, message: 'User deleted' });
-};
+});

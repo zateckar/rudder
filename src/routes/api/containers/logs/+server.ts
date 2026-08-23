@@ -1,8 +1,10 @@
 import { json } from '@sveltejs/kit';
-import { getRestPodmanClient } from '$lib/server/podman-client';
-import { authErrorResponse, requireContainerAccess } from '$lib/server/auth';
+import type { RequestHandler } from './$types';
+import { getRestPodmanClient, withPodman } from '$lib/server/podman-client';
+import { requireContainer, route } from '$lib/server/auth';
 
-export async function GET({ url, cookies }: { url: URL; cookies: any }) {
+export const GET: RequestHandler = route(async (event) => {
+  const { url } = event;
   const containerIdParam = url.searchParams.get('containerId');
   const tail = parseInt(url.searchParams.get('tail') || '1000');
   const follow = url.searchParams.get('follow') === 'true';
@@ -11,21 +13,12 @@ export async function GET({ url, cookies }: { url: URL; cookies: any }) {
     return json({ error: 'Container ID required' }, { status: 400 });
   }
 
-  let container, worker;
-  try {
-    ({ container, worker } = await requireContainerAccess(cookies, containerIdParam));
-  } catch (error) {
-    return authErrorResponse(error);
-  }
-
-  let client: ReturnType<typeof getRestPodmanClient>;
-  try {
-    client = getRestPodmanClient(worker);
-  } catch (e: any) {
-    return json({ error: `Client creation failed: ${e.message}` }, { status: 400 });
-  }
+  const { container, worker } = await requireContainer(event, containerIdParam);
 
   if (follow) {
+    // Not `withPodman`: the client has to outlive this function — it is owned
+    // by the stream and destroyed when the stream closes or is cancelled.
+    const client = getRestPodmanClient(worker);
     // Stream logs using Server-Sent Events
     const encoder = new TextEncoder();
     let controllerClosed = false;
@@ -99,31 +92,22 @@ export async function GET({ url, cookies }: { url: URL; cookies: any }) {
         'Connection': 'keep-alive',
       },
     });
-  } else {
-    // One-time fetch for historical logs
-    try {
-      const logs = await client.getContainerLogs(container.containerId, {
-        stdout: true,
-        stderr: true,
-        tail,
-        timestamps: true,
-      });
-      
-      client.destroy();
-      
-      return new Response(logs, {
-        headers: {
-          'Content-Type': 'text/plain',
-          'Cache-Control': 'no-cache',
-        },
-      });
-    } catch (error: any) {
-      console.error('Logs error:', {
-        message: error.message,
-        code: error.code,
-      });
-      client.destroy();
-      return json({ error: error.message, code: error.code }, { status: 500 });
-    }
   }
-}
+
+  // One-time fetch for historical logs.
+  const logs = await withPodman(worker, (client) =>
+    client.getContainerLogs(container.containerId, {
+      stdout: true,
+      stderr: true,
+      tail,
+      timestamps: true,
+    }),
+  );
+
+  return new Response(logs, {
+    headers: {
+      'Content-Type': 'text/plain',
+      'Cache-Control': 'no-cache',
+    },
+  });
+});

@@ -539,6 +539,48 @@ for (const col of [
   try { sqlite.run(col); } catch { /* Column already exists */ }
 }
 
+// ── Indexes on the operational tables ────────────────────────────────────────
+//
+// Last, because several of these cover columns the ALTER block above adds
+// (`containers.state`, `containers.spec_hash`); an index created before its
+// column exists fails, and CREATE INDEX IF NOT EXISTS would then never retry.
+//
+// Until this block existed the only indexes in the database were uniqueness
+// constraints and the three (resource, timestamp) pairs on the metrics tables,
+// so every query below was a full table scan — including the two hottest paths
+// in the system:
+//
+//   - `containers WHERE worker_id`, which every http-mode worker's routing
+//     config fetch runs, on a timer measured in seconds (see traefik-config.ts).
+//   - `containers WHERE application_id`, which runs several times per deploy
+//     and on every application page.
+//
+// A scan of a dozen rows costs nothing, which is why this went unnoticed; the
+// cost arrives all at once at a few hundred containers.
+for (const idx of [
+  `CREATE INDEX IF NOT EXISTS containers_worker_idx ON containers (worker_id);`,
+  `CREATE INDEX IF NOT EXISTS containers_application_idx ON containers (application_id);`,
+  // Covers buildWorkerDynamicConfig's exact predicate.
+  `CREATE INDEX IF NOT EXISTS containers_worker_state_idx ON containers (worker_id, state, status);`,
+  `CREATE INDEX IF NOT EXISTS applications_worker_idx ON applications (worker_id);`,
+  `CREATE INDEX IF NOT EXISTS applications_team_idx ON applications (team_id);`,
+  `CREATE INDEX IF NOT EXISTS applications_stack_idx ON applications (stack_id);`,
+  // DESC to match `ORDER BY version DESC LIMIT 1`, which is how the next
+  // deployment version is computed on every deploy.
+  `CREATE INDEX IF NOT EXISTS deployments_app_version_idx ON deployments (application_id, version DESC);`,
+  `CREATE INDEX IF NOT EXISTS audit_logs_created_idx ON audit_logs (created_at DESC);`,
+  `CREATE INDEX IF NOT EXISTS audit_logs_team_created_idx ON audit_logs (team_id, created_at DESC);`,
+  `CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions (user_id);`,
+  `CREATE INDEX IF NOT EXISTS alert_events_created_idx ON alert_events (created_at DESC);`,
+  `CREATE INDEX IF NOT EXISTS team_members_user_idx ON team_members (user_id);`,
+  `CREATE INDEX IF NOT EXISTS secrets_team_idx ON secrets (team_id);`,
+  `CREATE INDEX IF NOT EXISTS deploy_webhooks_app_idx ON deploy_webhooks (application_id);`,
+]) {
+  try { sqlite.run(idx); } catch (e) {
+    console.error('[db] Could not create index:', idx, e);
+  }
+}
+
 const db = drizzle(sqlite);
 
 export { db, sqlite };
@@ -576,11 +618,54 @@ export { db, sqlite };
   }
 }
 
+// ── Backfill: encrypt applications.auth_config ───────────────────────────────
+//
+// The column holds a per-application OIDC client secret and the 32-character
+// session key the Traefik plugin uses as an AES-256 key, and was stored as
+// plain text while every other credential in the database went through
+// `encryptField`.
+//
+// Readers use `decryptField`, which passes plaintext through, so this is not
+// required for correctness — it is required for the column to actually be
+// encrypted at rest without waiting for someone to re-save each application.
+// Idempotent: `isEncrypted` skips rows that are already ciphertext, so this is
+// a no-op on every boot after the first.
+{
+  try {
+    const rows = sqlite
+      .query("SELECT id, auth_config FROM applications WHERE auth_config IS NOT NULL AND auth_config != ''")
+      .all() as Array<{ id: string; auth_config: string }>;
+
+    if (rows.length > 0) {
+      const { encryptField, isEncrypted } = await import('../server/encryption');
+      const stale = rows.filter((r) => !isEncrypted(r.auth_config));
+
+      for (const row of stale) {
+        sqlite.run('UPDATE applications SET auth_config = ? WHERE id = ?', [
+          encryptField(row.auth_config),
+          row.id,
+        ]);
+      }
+      if (stale.length > 0) {
+        console.log(`[db] Encrypted auth_config for ${stale.length} application(s).`);
+      }
+    }
+  } catch (e) {
+    // Never fatal: the readers tolerate plaintext, so a failure here degrades to
+    // the previous behaviour rather than preventing startup.
+    console.error('[db] Could not backfill encrypted auth_config:', e);
+  }
+}
+
 
 // ── Safe column subsets & runtime helpers (sensitive fields excluded) ────────
 // These must be used in every page load() that returns data to the browser.
 import { getTableColumns } from 'drizzle-orm';
-import { workers as _workersTable, users as _usersTable } from './schema';
+import {
+  workers as _workersTable,
+  users as _usersTable,
+  applications as _applicationsTable,
+} from './schema';
 
 /**
  * Worker columns safe to serialise to the browser.
@@ -606,5 +691,30 @@ export const safeWorkerColumns = (() => {
  */
 export const safeUserColumns = (() => {
   const { passwordHash: _, ...cols } = getTableColumns(_usersTable);
+  return cols;
+})();
+
+/**
+ * Application columns safe to put in a *list* payload.
+ *
+ * Excludes three columns that no list or dashboard renders and that should not
+ * be broadcast to every member of a team:
+ *
+ * - `authConfig` — holds the per-application OIDC `clientSecret` and the
+ *   32-character `sessionEncryptionKey` the Traefik plugin uses as an AES key.
+ *   The edit form legitimately reads it back to prefill itself, and does so with
+ *   a full `select()`; a list has no such need.
+ * - `manifest` — up to 100,000 characters per application (see
+ *   `schemas.createApplication`), rendered by nothing on a list page, and
+ *   serialised into the SSR payload of the page users land on most.
+ * - `environment` — the application's own environment block, same reasoning.
+ *
+ * Detail and edit pages keep using a full `select()`; they show these fields.
+ */
+export const safeApplicationColumns = (() => {
+  const {
+    authConfig: _a, manifest: _b, environment: _c,
+    ...cols
+  } = getTableColumns(_applicationsTable);
   return cols;
 })();

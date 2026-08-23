@@ -2,12 +2,14 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { executeSSHCommand, createTempKeyFile, deleteTempKeyFile, testSSHConnection } from '$lib/server/ssh';
+import { executeSSHCommand, testSSHConnection } from '$lib/server/ssh';
 import { generateProvisioningScript } from '$lib/server/provisioning';
 import { env } from '$lib/server/env';
 import { randomBytes } from 'crypto';
 import { withLock, LockError } from '$lib/server/locks';
-import { parseJsonBody, ValidationError, schemas } from '$lib/server/validation';
+import type { RequestHandler } from './$types';
+import { parseJsonBody, schemas } from '$lib/server/validation';
+import { requireAdminUser, route } from '$lib/server/auth';
 import { encryptField, decryptField } from '$lib/server/encryption';
 import { normalizeOidcSecret } from '$lib/server/oidc';
 import { redactProvisioningOutput } from '$lib/server/redaction';
@@ -51,32 +53,13 @@ function parseCertsFromOutput(stdout: string): {
   return result;
 }
 
-export async function POST({ request, cookies, locals }: { request: Request; cookies: any; locals: any }) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
+export const POST: RequestHandler = route(async (event) => {
+  const userId = requireAdminUser(event).user.id;
 
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  // Require admin role
-  if (locals.userRole !== 'admin') {
-    return json({ error: 'Forbidden - admin access required' }, { status: 403 });
-  }
-
-  let body;
-  try {
-    body = await parseJsonBody(request, schemas.provisionWorker);
-  } catch (error) {
-    if (error instanceof ValidationError) {
-      return json({ error: error.message }, { status: 400 });
-    }
-    throw error;
-  }
-
-  const { workerId, sshPrivateKey: adHocKey, applyUpdates } = body;
+  const { workerId, sshPrivateKey: adHocKey, applyUpdates } = await parseJsonBody(
+    event.request,
+    schemas.provisionWorker,
+  );
 
   try {
     return await withLock(
@@ -97,13 +80,35 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
           return json({ error: 'Worker is already being provisioned' }, { status: 409 });
         }
 
+        // A worker with no base domain cannot be given an mTLS-protected route
+        // to its Podman API: Traefik binds tls.options to a router's SNI, so
+        // there is no hostname to require a client certificate for. Provisioning
+        // one used to install a catch-all route instead, publishing the
+        // root-equivalent Podman API on 443 with no client-certificate check —
+        // and then reporting "secured with mTLS". Refuse instead: the control
+        // plane would have no way to reach the API afterwards either.
+        if (!worker.baseDomain) {
+          return json(
+            {
+              error:
+                `Worker "${worker.name}" has no base domain. Set one on the worker before ` +
+                `provisioning — it is what gives the Podman API an mTLS-protected hostname ` +
+                `(podman-api.<baseDomain>). Without it the API can only be reached from the ` +
+                `worker itself, and Rudder could not manage the worker at all.`,
+            },
+            { status: 400 },
+          );
+        }
+
         const privateKey = adHocKey;
 
-        let tempKeyPath: string | undefined;
-        
+        // No temp key file is written here. `testSSHConnection` and
+        // `executeSSHCommand` each create and delete their own, scoped to the
+        // one invocation; the copy this used to make was never passed to
+        // anything and simply left the worker's SSH private key in tmpdir for
+        // the whole run — which, with the 900 s stdin timeout on the
+        // provisioning command, is up to fifteen minutes.
         try {
-          tempKeyPath = createTempKeyFile(privateKey);
-          
           const canConnect = await testSSHConnection({
             host: worker.hostname,
             port: worker.sshPort,
@@ -279,10 +284,6 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
           console.error('Provisioning error:', error);
           await db.update(workers).set({ status: 'error' }).where(eq(workers.id, workerId));
           return json({ error: error.message }, { status: 500 });
-        } finally {
-          if (tempKeyPath) {
-            deleteTempKeyFile(tempKeyPath);
-          }
         }
       }
     );
@@ -292,4 +293,4 @@ export async function POST({ request, cookies, locals }: { request: Request; coo
     }
     throw error;
   }
-}
+});

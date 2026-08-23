@@ -2,12 +2,12 @@ import { error, redirect } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { workers, containers, workerPings, workerMetrics, teams } from '$lib/db/schema';
 import { eq, and, gte, desc } from 'drizzle-orm';
-import { canManageWorker } from '$lib/server/auth';
+import { requireWorker } from '$lib/server/auth';
 
-export const load = async ({ params, cookies }: { params: { id: string }; cookies: any }) => {
+export const load = async ({ params, locals }: { params: { id: string }; locals: App.Locals }) => {
   let access;
   try {
-    access = await canManageWorker(cookies, params.id);
+    access = await requireWorker({ locals }, params.id);
   } catch (e: any) {
     if (e.statusCode === 401) throw redirect(303, '/login');
     if (e.statusCode === 403) throw redirect(303, '/dashboard');

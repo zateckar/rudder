@@ -3,6 +3,7 @@ import {
   PLATFORM_IMAGES,
   generateProvisioningScript,
   generateTraefikLabelsForApp,
+  isPlainPathPrefix,
   renderGlobalOidcConfig,
   type AppMiddlewareOptions,
 } from './index';
@@ -188,6 +189,51 @@ describe('generateTraefikLabelsForApp — per-app OIDC plugin config', () => {
       'PathPrefix(`/health`) || PathPrefix(`/public`)'
     );
   });
+
+  test('drops an exclusion path that would close the matcher and add rule logic', () => {
+    // Each path lands inside a backtick-quoted PathPrefix(). A backtick in the
+    // value ends the matcher, so this turned "exclude one path" into "bypass
+    // authentication for every GET".
+    const labels = oidcLabels({
+      excludedURLs: ['/health', '/x`) || Method(`GET'],
+    });
+    const rule = labels[`${prefix}.BypassAuthenticationRule`];
+    expect(rule).toBe('PathPrefix(`/health`)');
+    expect(rule).not.toContain('Method');
+  });
+
+  test('emits no bypass rule at all when every path is rejected', () => {
+    // Rather than an empty `PathPrefix()`, which Traefik would reject and take
+    // the whole middleware down with it.
+    const labels = oidcLabels({ excludedURLs: ['not-absolute', '/a b'] });
+    expect(labels[`${prefix}.BypassAuthenticationRule`]).toBeUndefined();
+  });
+});
+
+describe('isPlainPathPrefix', () => {
+  test('accepts ordinary absolute paths', () => {
+    for (const path of ['/', '/health', '/api/v1/status', '/a-b_c.d/~x', '/%20encoded']) {
+      expect(isPlainPathPrefix(path), path).toBe(true);
+    }
+  });
+
+  test('rejects anything that is not an absolute path', () => {
+    for (const path of ['health', '', 'http://x/y', ' /health']) {
+      expect(isPlainPathPrefix(path), path).toBe(false);
+    }
+  });
+
+  test('rejects the characters Traefik reads as rule syntax', () => {
+    for (const path of ['/x`', "/x'", '/x"', '/x(', '/x)', '/x|', '/x&', '/x,', '/x y', '/x\\y']) {
+      expect(isPlainPathPrefix(path), path).toBe(false);
+    }
+  });
+
+  test('rejects non-strings', () => {
+    expect(isPlainPathPrefix(undefined)).toBe(false);
+    expect(isPlainPathPrefix(null)).toBe(false);
+    expect(isPlainPathPrefix(42)).toBe(false);
+  });
 });
 
 describe('renderGlobalOidcConfig', () => {
@@ -337,11 +383,16 @@ describe('generateProvisioningScript', () => {
     }
   });
 
-  /** Decode a base64 blob the script writes to `target`. */
-  function blobFor(target: string): string {
-    const m = script.match(new RegExp(`echo "([^"]*)" \\| base64 -d > ${target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  /** Decode a base64 blob `source` writes to `target`. */
+  function blobIn(source: string, target: string): string {
+    const m = source.match(new RegExp(`echo "([^"]*)" \\| base64 -d > ${target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
     if (!m) throw new Error(`no blob written to ${target}`);
     return Buffer.from(m[1], 'base64').toString('utf-8');
+  }
+
+  /** Decode a base64 blob the script writes to `target`. */
+  function blobFor(target: string): string {
+    return blobIn(script, target);
   }
 
   test('installs every AppSec config the acquisition references', () => {
@@ -370,6 +421,40 @@ describe('generateProvisioningScript', () => {
 
   test('opens the configured SSH port in the firewall', () => {
     expect(script).toContain('local SSH_PORT="2222"');
+  });
+
+  describe('Podman API route', () => {
+    test('requires a verified client certificate when there is a base domain', () => {
+      const routing = blobFor('/etc/traefik/dynamic/podman-api.yml');
+      expect(routing).toContain('Host(`podman-api.apps.example.com`)');
+      expect(routing).toContain('clientAuthType: RequireAndVerifyClientCert');
+      expect(routing).toContain('options: podman-mtls');
+    });
+
+    test('is not published at all without a base domain', () => {
+      // There used to be a "notls" variant for this case: a catch-all
+      // ``PathPrefix(`/`)`` router with no clientAuth block. Traefik listens on
+      // 443 and the firewall admits 443, so it published the root-equivalent
+      // Podman API to anyone who could reach the worker — `POST
+      // /containers/create` with a privileged bind mount of `/` is host
+      // takeover. It cannot be secured in place, because Traefik binds
+      // tls.options to a router's SNI and a catch-all has no host to bind to.
+      const noDomain = generateProvisioningScript('worker-1', { bouncerKey: 'k' });
+
+      // The blob is empty, so the guard around the write is not taken and the
+      // stale file from any earlier run is removed instead.
+      expect(blobIn(noDomain, '/etc/traefik/dynamic/podman-api.yml')).toBe('');
+      expect(noDomain).toContain('rm -f /etc/traefik/dynamic/podman-api.yml');
+      expect(noDomain).not.toContain('PathPrefix(`/`)');
+    });
+
+    test('never claims mTLS on a run that did not configure it', () => {
+      // This line was unconditional, so the operator was told the Podman API was
+      // "secured with mTLS client certificate authentication" on exactly the
+      // runs where it was not secured at all.
+      const noDomain = generateProvisioningScript('worker-1', { bouncerKey: 'k' });
+      expect(noDomain).toContain('Podman API NOT published');
+    });
   });
 
   test('lets containers reach aardvark-dns on the bridge gateway', () => {

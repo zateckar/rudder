@@ -2,34 +2,20 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { containers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { getRestPodmanClient } from '$lib/server/podman-client';
-import { authErrorResponse, requireContainerAccess } from '$lib/server/auth';
+import type { RequestHandler } from './$types';
+import { withPodman } from '$lib/server/podman-client';
+import { requireContainer, route } from '$lib/server/auth';
 
-export async function POST({
-  params,
-  request,
-  cookies,
-}: {
-  params: { id: string };
-  request: Request;
-  cookies: any;
-}) {
-  let dbContainer, worker;
-  try {
-    ({ container: dbContainer, worker } = await requireContainerAccess(cookies, params.id));
-  } catch (error) {
-    return authErrorResponse(error);
-  }
+export const POST: RequestHandler = route(async (event) => {
+  const { container: dbContainer, worker } = await requireContainer(event, event.params.id!);
 
-  const body = await request.json().catch(() => ({}));
+  const body = await event.request.json().catch(() => ({}));
   const pullImage = body.pullImage ?? true;
   const memory = body.memory;
   const cpuQuota = body.cpuQuota;
   const cpuPeriod = body.cpuPeriod;
 
-  try {
-    const podmanClient = getRestPodmanClient(worker);
-
+  return withPodman(worker, async (podmanClient) => {
     // Inspect current container to get config
     const inspectData = await podmanClient.getContainer(dbContainer.containerId);
     const oldConfig = inspectData.Config;
@@ -76,7 +62,6 @@ export async function POST({
     });
 
     await podmanClient.startContainer(newContainer.Id);
-    podmanClient.destroy();
 
     // Update DB record
     await db
@@ -89,8 +74,5 @@ export async function POST({
       .where(eq(containers.id, dbContainer.id));
 
     return json({ success: true, message: 'Container recreated successfully' });
-  } catch (error: any) {
-    console.error('Recreate container error:', error);
-    return json({ error: error.message }, { status: 500 });
-  }
-}
+  });
+});

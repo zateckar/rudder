@@ -145,6 +145,22 @@ OIDC_GOOGLE_CLIENT_SECRET=...
 > doing so would let a client choose its own origin unless the proxy always
 > overwrites that header.
 
+### Run exactly one instance
+
+Rudder is a single-process control plane, and three separate mechanisms depend
+on that:
+
+| Mechanism | Why one process |
+| --- | --- |
+| **SQLite** | One writer. Two instances on a shared volume corrupt each other's WAL. |
+| **Deploy locks** | Held in memory (`$lib/server/locks`). Two instances would each think they had the worker, allocate the same host port and collide on container names — the exact race the lock exists to prevent. |
+| **Rate limits, terminal tokens, WebSocket registry** | Per-process state. A second instance halves the effective login throttle and cannot validate a terminal token minted by the first. |
+
+So: **do not scale the deployment past one replica**, and do not run two
+containers against the same data volume. The Kubernetes manifest below sets
+`replicas: 1` deliberately. Nothing enforces this at runtime — it is the one
+constraint the code cannot check for you.
+
 ### Kubernetes
 
 **1. Copy and edit the manifest:**

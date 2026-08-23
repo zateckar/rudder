@@ -149,3 +149,54 @@ describe('syncUserTeams', () => {
     expect(await membershipsOf(userId)).toEqual(['Platform']);
   });
 });
+
+/**
+ * Two teams whose names differ only by capitalisation.
+ *
+ * `teams.name` is UNIQUE, but SQLite compares text case-sensitively without
+ * COLLATE NOCASE, so this pair is storable — and group claims are matched
+ * case-insensitively, so it does not name one team. The lookup used to be built
+ * by assignment, which silently picked whichever row came back last: renaming a
+ * team to a case-variant of another was enough to divert that team's OIDC
+ * members into it. `PATCH /api/teams/[id]` now refuses such a rename; these
+ * cover rows that predate the check.
+ */
+describe('syncUserTeams — a name that matches two teams', () => {
+  beforeAll(async () => {
+    await makeTeam('Design');
+    await makeTeam('design');
+  });
+
+  test('joins neither, rather than guessing which one the claim meant', async () => {
+    const userId = await makeUser();
+    await syncUserTeams(userId, ['Design']);
+
+    expect(await membershipsOf(userId)).toEqual([]);
+  });
+
+  test('does not withdraw an existing membership it could not confirm', async () => {
+    // Fail-closed on joining must not become fail-open into revocation: "Rudder
+    // cannot tell these two teams apart" is not a reason to remove access.
+    const userId = await makeUser();
+    await join(userId, 'design', 'member');
+    await syncUserTeams(userId, ['Platform']);
+
+    expect(await membershipsOf(userId)).toEqual(['Platform', 'design']);
+  });
+
+  test('the unambiguous names in the same claim are still honoured', async () => {
+    const userId = await makeUser();
+    await syncUserTeams(userId, ['Design', 'Payments']);
+
+    expect(await membershipsOf(userId)).toEqual(['Payments']);
+  });
+
+  test('does not create a third team for the ambiguous name', async () => {
+    const userId = await makeUser();
+    await syncUserTeams(userId, ['DESIGN']);
+
+    const rows = await db.select().from(teams).all();
+    expect(rows.filter((t) => t.name.toLowerCase() === 'design')).toHaveLength(2);
+    expect(await membershipsOf(userId)).toEqual([]);
+  });
+});

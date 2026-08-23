@@ -8,14 +8,10 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { alertEvents } from '$lib/db/schema';
 import { eq, desc } from 'drizzle-orm';
-import { authErrorResponse, requireAdmin } from '$lib/server/auth';
+import { requireAdminUser, route } from '$lib/server/auth';
 
-export const GET: RequestHandler = async ({ url, cookies }) => {
-  try {
-    await requireAdmin(cookies);
-  } catch (error) {
-    return authErrorResponse(error);
-  }
+export const GET: RequestHandler = route(async ({ url, locals }) => {
+  requireAdminUser({ locals });
 
   const acknowledgedFilter = url.searchParams.get('acknowledged');
 
@@ -45,15 +41,11 @@ export const GET: RequestHandler = async ({ url, cookies }) => {
   }));
 
   return json(result);
-};
+});
 
 /** PATCH to acknowledge an event — pass { id, acknowledged: true } */
-export const PATCH: RequestHandler = async ({ request, cookies }) => {
-  try {
-    await requireAdmin(cookies);
-  } catch (error) {
-    return authErrorResponse(error);
-  }
+export const PATCH: RequestHandler = route(async ({ request, locals }) => {
+  requireAdminUser({ locals });
 
   const body = await request.json();
   const { id, acknowledged } = body;
@@ -70,4 +62,4 @@ export const PATCH: RequestHandler = async ({ request, cookies }) => {
     .where(eq(alertEvents.id, id));
 
   return json({ success: true });
-};
+});

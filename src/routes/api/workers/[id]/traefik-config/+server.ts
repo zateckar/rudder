@@ -5,7 +5,7 @@ import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { decryptField } from '$lib/server/encryption';
 import { buildWorkerDynamicConfig } from '$lib/server/traefik-config';
-import { timingSafeEqual } from 'crypto';
+import { createHash, timingSafeEqual } from 'crypto';
 
 /**
  * GET /api/workers/[id]/traefik-config
@@ -67,10 +67,39 @@ export const GET: RequestHandler = async ({ params, request, setHeaders }) => {
     return json({ error: 'Configuration unavailable' }, { status: 503 });
   }
 
+  // Recorded before the 304 branch, not after it.
+  //
+  // A deploy's cutover waits on `configFetchedAt` to know the worker has taken
+  // the new routing — see `waitForConfigConvergence` — and only reaps the old
+  // generation once it has. A 304 that skipped this write would stall every
+  // cutover until something happened to change the document, which is the one
+  // thing that must not depend on the response being a 200.
   await db
     .update(workers)
     .set({ configFetchedAt: new Date(), lastSeenAt: new Date() })
     .where(eq(workers.id, worker.id));
 
-  return text(body, { headers: { 'Content-Type': 'application/json' } });
+  // The document is rebuilt from the database on every request — this is not a
+  // cache, and a stale route is never served. The ETag saves sending the body
+  // again, which matters because it carries every hostname on the worker and is
+  // fetched on a timer measured in seconds.
+  //
+  // It does *not* save the worker rewriting routes.yml or Traefik reloading it:
+  // `rudder-traefik-config.sh` already compares the fetched document against
+  // the installed one with `cmp` and stops there. That script is deliberately
+  // left alone — with `curl -f`, a 304 writes an empty staging file, which its
+  // "is this a routing document" check would reject, and a worker that stops
+  // updating its routes is a far worse outcome than a redundant transfer. The
+  // header is here for any client that does handle it, and because an endpoint
+  // polled this often should answer conditional requests correctly.
+  const etag = `"${createHash('sha256').update(body).digest('base64url').slice(0, 27)}"`;
+
+  if (request.headers.get('if-none-match') === etag) {
+    return new Response(null, {
+      status: 304,
+      headers: { ETag: etag, 'Cache-Control': 'no-store' },
+    });
+  }
+
+  return text(body, { headers: { 'Content-Type': 'application/json', ETag: etag } });
 };

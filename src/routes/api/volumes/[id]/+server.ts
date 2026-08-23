@@ -1,8 +1,9 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
-import { volumes, users, teamMembers } from '$lib/db/schema';
+import { volumes, teamMembers } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
+import { AuthorizationError, requireUser, route } from '$lib/server/auth';
 
 /**
  * Resolve a volume the caller may act on.
@@ -22,79 +23,61 @@ import { eq, and } from 'drizzle-orm';
  * something true and useful: a member of the owning team who can read the volume
  * and needs the `owner` role to change it.
  */
-type VolumeAccess =
-  | { ok: false; response: Response }
-  | { ok: true; userId: string; volume: typeof volumes.$inferSelect };
-
-async function requireVolumeAccess(
-  cookies: any,
+async function requireVolume(
+  event: { locals: App.Locals },
   volumeId: string,
   needOwner: boolean,
-): Promise<VolumeAccess> {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const deny = (message: string, status: number): VolumeAccess => ({
-    ok: false,
-    response: json({ error: message }, { status }),
-  });
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-
-  if (!userId) return deny('Unauthorized', 401);
+): Promise<typeof volumes.$inferSelect> {
+  const ctx = requireUser(event);
 
   const volume = await db.select().from(volumes).where(eq(volumes.id, volumeId)).get();
-  if (!volume) return deny('Volume not found', 404);
+  if (!volume) throw new AuthorizationError('Volume not found', 404);
 
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (user?.role !== 'admin') {
-    if (!volume.teamId) return deny('Volume not found', 404);
+  if (ctx.user.role !== 'admin') {
+    if (!volume.teamId) throw new AuthorizationError('Volume not found', 404);
 
-    const membership = await db.select().from(teamMembers)
-      .where(and(eq(teamMembers.teamId, volume.teamId), eq(teamMembers.userId, userId)))
+    const membership = await db
+      .select()
+      .from(teamMembers)
+      .where(and(eq(teamMembers.teamId, volume.teamId), eq(teamMembers.userId, ctx.user.id)))
       .get();
 
-    if (!membership) return deny('Volume not found', 404);
+    if (!membership) throw new AuthorizationError('Volume not found', 404);
     if (needOwner && membership.role !== 'owner') {
-      return deny('Access denied - owner role required', 403);
+      throw new AuthorizationError('Access denied - owner role required', 403);
     }
   }
 
-  return { ok: true, userId, volume };
+  return volume;
 }
 
-export const GET: RequestHandler = async ({ params, cookies }) => {
-  const auth = await requireVolumeAccess(cookies, params.id, false);
-  if (!auth.ok) return auth.response;
+export const GET: RequestHandler = route(async (event) => {
+  return json(await requireVolume(event, event.params.id!, false));
+});
 
-  return json(auth.volume);
-};
+export const PATCH: RequestHandler = route(async (event) => {
+  const volumeId = event.params.id!;
+  await requireVolume(event, volumeId, true);
 
-export const PATCH: RequestHandler = async ({ params, request, cookies }) => {
-  const auth = await requireVolumeAccess(cookies, params.id, true);
-  if (!auth.ok) return auth.response;
-
-  const body = await request.json();
-  const allowedFields = ['name', 'containerPath', 'sizeLimit', 'workerId'];
+  const body = await event.request.json();
+  const allowedFields = ['name', 'containerPath', 'sizeLimit', 'workerId'] as const;
   const updates: Record<string, any> = { updatedAt: new Date() };
 
   for (const field of allowedFields) {
-    if (body[field] !== undefined) {
-      updates[field] = body[field];
-    }
+    if (body[field] !== undefined) updates[field] = body[field];
   }
 
-  await db.update(volumes).set(updates).where(eq(volumes.id, params.id));
+  await db.update(volumes).set(updates).where(eq(volumes.id, volumeId));
 
-  const updated = await db.select().from(volumes).where(eq(volumes.id, params.id)).get();
+  const updated = await db.select().from(volumes).where(eq(volumes.id, volumeId)).get();
   return json(updated);
-};
+});
 
-export const DELETE: RequestHandler = async ({ params, cookies }) => {
-  const auth = await requireVolumeAccess(cookies, params.id, true);
-  if (!auth.ok) return auth.response;
+export const DELETE: RequestHandler = route(async (event) => {
+  const volumeId = event.params.id!;
+  await requireVolume(event, volumeId, true);
 
-  await db.delete(volumes).where(eq(volumes.id, params.id));
-  
+  await db.delete(volumes).where(eq(volumes.id, volumeId));
+
   return json({ success: true, message: 'Volume deleted' });
-};
+});

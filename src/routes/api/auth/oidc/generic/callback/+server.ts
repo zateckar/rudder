@@ -44,9 +44,29 @@ function decodeJwtPayload(token: string): Record<string, any> | null {
 export async function syncUserTeams(userId: string, teamNames: string[]): Promise<void> {
   const now = new Date();
 
-  // Get existing teams
+  // Get existing teams, keyed the way group claims are matched: case-insensitively.
+  //
+  // `teams.name` is UNIQUE, but SQLite compares text case-sensitively without
+  // COLLATE NOCASE, so "Platform" and "platform" can both exist. Building the
+  // map by assignment let the last row win silently, which made a group claim
+  // resolve to whichever of two case-variant teams happened to come back last —
+  // renaming a team was enough to divert another team's OIDC members into it.
+  //
+  // `PATCH /api/teams/[id]` now rejects such a rename, but rows predating that
+  // check can still be here, so ambiguity is detected rather than assumed away:
+  // an ambiguous name is skipped below, leaving memberships untouched. Guessing
+  // is the one thing this must not do.
   const existingTeams = await db.select().from(teams).all();
-  const existingTeamMap = new Map(existingTeams.map(t => [t.name.toLowerCase(), t]));
+  const existingTeamMap = new Map<string, typeof existingTeams[number]>();
+  const ambiguousNames = new Set<string>();
+  for (const team of existingTeams) {
+    const key = team.name.toLowerCase();
+    if (existingTeamMap.has(key)) {
+      ambiguousNames.add(key);
+      continue;
+    }
+    existingTeamMap.set(key, team);
+  }
 
   // Get user's current team memberships
   const currentMemberships = await db.select().from(teamMembers).where(eq(teamMembers.userId, userId)).all();
@@ -57,6 +77,15 @@ export async function syncUserTeams(userId: string, teamNames: string[]): Promis
   const claimedTeamIds = new Set<string>();
   for (const teamName of teamNames) {
     const normalizedName = teamName.toLowerCase();
+    if (ambiguousNames.has(normalizedName)) {
+      // Two teams differ only by capitalisation, so this claim does not name one
+      // team. Joining either could put the user in the wrong tenant.
+      console.error(
+        `[oidc/team-sync] Group "${teamName}" matches more than one team case-insensitively; ` +
+          `skipping it. Rename one of the teams so the names differ by more than capitalisation.`,
+      );
+      continue;
+    }
     if (existingTeamMap.has(normalizedName)) {
       const team = existingTeamMap.get(normalizedName)!;
       claimedTeamIds.add(team.id);
@@ -90,9 +119,19 @@ export async function syncUserTeams(userId: string, teamNames: string[]): Promis
     }).onConflictDoNothing();
   }
 
+  // Teams whose name is ambiguous were skipped above, so the claim could not
+  // confirm them. Withdrawing on that basis would turn "Rudder cannot tell these
+  // two teams apart" into "the user loses access to both" — the same
+  // fail-open-into-mass-revocation this function's contract rules out. They are
+  // left exactly as they are until an operator renames one.
+  const ambiguousTeamIds = new Set(
+    existingTeams.filter((t) => ambiguousNames.has(t.name.toLowerCase())).map((t) => t.id),
+  );
+
   // Withdraw memberships the claim no longer asserts.
   for (const membership of currentMemberships) {
     if (claimedTeamIds.has(membership.teamId)) continue;
+    if (ambiguousTeamIds.has(membership.teamId)) continue;
     if (membership.role === 'owner') continue;
     await db
       .delete(teamMembers)

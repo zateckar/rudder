@@ -159,11 +159,32 @@ export function applicationToDeployment(
     }
   }
 
-  let envVars: Array<{ name: string; value: string }> = [];
+  // Environment values flagged `secret` are withheld, not rendered.
+  //
+  // `applications.environment` is `[{ key, value, secret }]`, and
+  // /api/applications/[id]/export has always replaced the value of a
+  // secret-flagged entry before returning it. This mapper ignored the flag
+  // entirely, so `kubectl get deploy -o yaml` handed the plaintext to any
+  // team-scoped API key — the values the REST export deliberately hides.
+  //
+  // Withheld by omission rather than by a placeholder value, which is where
+  // this differs from the export: that endpoint is read-only, while this one is
+  // half of an apply loop. A `***REDACTED***` string here would be read back by
+  // `parseDeploymentBody` on the next `kubectl apply` and stored as if it were
+  // the real value, quietly replacing the secret with the marker. The names are
+  // still reported, so the output says what it is not showing.
+  const envVars: Array<{ name: string; value: string }> = [];
+  const withheldEnv: string[] = [];
   if (app.environment) {
     try {
       const arr = JSON.parse(app.environment);
-      envVars = arr.map((e: any) => ({ name: e.key, value: e.value || '' }));
+      for (const e of arr) {
+        if (e?.secret) {
+          withheldEnv.push(e.key);
+        } else {
+          envVars.push({ name: e.key, value: e.value || '' });
+        }
+      }
     } catch {
       /* ignore */
     }
@@ -187,6 +208,11 @@ export function applicationToDeployment(
         ...(app.workerId ? { 'rudder.dev/worker-id': app.workerId } : {}),
         ...(app.domain ? { 'rudder.dev/domain': app.domain } : {}),
         ...(app.description ? { 'rudder.dev/description': app.description } : {}),
+        // Names only. Says which variables exist without showing their values,
+        // so a withheld secret does not look like a missing one.
+        ...(withheldEnv.length > 0
+          ? { 'rudder.dev/withheld-env': withheldEnv.join(',') }
+          : {}),
       },
     },
     spec: {

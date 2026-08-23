@@ -7,18 +7,12 @@ import { executeSSHCommand } from '$lib/server/ssh';
 import { decryptField, encryptField } from '$lib/server/encryption';
 import { renderGlobalOidcConfig } from '$lib/server/provisioning';
 import { normalizeOidcSecret, oidcCallbackHost, oidcCallbackUrl } from '$lib/server/oidc';
+import { requireWorker, route } from '$lib/server/auth';
 
 /** POST /api/workers/[id]/oidc/apply — push global-oidc.yml to the worker via SSH.
  *  Traefik watches /etc/traefik/dynamic/ and hot-reloads within seconds. */
-export const POST: RequestHandler = async ({ params, request, cookies, locals }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
-  if (locals.userRole !== 'admin') return json({ error: 'Admin access required' }, { status: 403 });
-
-  const worker = await db.select().from(workers).where(eq(workers.id, params.id)).get();
-  if (!worker) return json({ error: 'Worker not found' }, { status: 404 });
+export const POST: RequestHandler = route(async (event) => {
+  const { worker } = await requireWorker(event, event.params.id!);
 
   if (!worker.oidcEnabled || !worker.oidcProviderUrl || !worker.oidcClientId || !worker.oidcClientSecret) {
     return json({ error: 'OIDC is not fully configured on this worker. Save a complete configuration first.' }, { status: 400 });
@@ -28,7 +22,7 @@ export const POST: RequestHandler = async ({ params, request, cookies, locals })
     return json({ error: 'Worker has no base domain — required for the OIDC callback URL.' }, { status: 400 });
   }
 
-  const body = await request.json();
+  const body = await event.request.json();
   const { sshPrivateKey } = body;
   if (!sshPrivateKey) {
     return json({ error: 'SSH private key is required' }, { status: 400 });
@@ -96,4 +90,4 @@ export const POST: RequestHandler = async ({ params, request, cookies, locals })
     console.error('[oidc/apply] Error:', e);
     return json({ error: e.message }, { status: 500 });
   }
-};
+});

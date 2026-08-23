@@ -69,6 +69,12 @@ metadata:
     app.kubernetes.io/name: rudder
     app.kubernetes.io/component: web
 spec:
+  # Must stay 1. Rudder holds its deploy locks, rate-limit counters, terminal
+  # tokens and WebSocket registry in process memory, and writes to SQLite on the
+  # PVC below. A second replica does not share any of it: two instances would
+  # each believe they held a worker's deploy lock and hand out the same host
+  # port, and the second SQLite writer corrupts the first one's WAL.
+  # See "Run exactly one instance" in the README.
   replicas: 1
   selector:
     matchLabels:

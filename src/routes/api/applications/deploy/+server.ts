@@ -1,13 +1,46 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { applications, workers, containers, deployments, deployWebhooks, applicationTemplates } from '$lib/db/schema';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { getRestPodmanClient } from '$lib/server/podman-client';
 import { executeApplicationDeploy, resolveWorkerSSHConfig } from '$lib/server/deploy';
+import {
+  applyToContainers,
+  lifecycleMessage,
+  type LifecycleVerb,
+} from '$lib/server/deploy/lifecycle';
 import { teardownAppNetwork } from '$lib/server/networks';
 import { canAccessApplication } from '$lib/server/auth';
 import { checkDeployQuota } from '$lib/server/quota';
 
+type PodmanClient = ReturnType<typeof getRestPodmanClient>;
+
+type LifecycleAction = 'start' | 'stop' | 'restart';
+
+/**
+ * The three actions that act on containers already on the worker.
+ *
+ * One table rather than three near-identical branches: they differed only in
+ * the Podman call and the status to write, and keeping them apart is how the
+ * same six-line comment came to be pasted three times.
+ */
+const LIFECYCLE: Record<
+  LifecycleAction,
+  {
+    verb: LifecycleVerb;
+    /** What the container's status becomes once the call lands. */
+    status: string;
+    run: (client: PodmanClient, containerId: string) => Promise<void>;
+  }
+> = {
+  start: { verb: 'started', status: 'running', run: (c, id) => c.startContainer(id) },
+  stop: { verb: 'stopped', status: 'exited', run: (c, id) => c.stopContainer(id) },
+  restart: { verb: 'restarted', status: 'running', run: (c, id) => c.restartContainer(id) },
+};
+
+function isLifecycleAction(action: unknown): action is LifecycleAction {
+  return action === 'start' || action === 'stop' || action === 'restart';
+}
 
 export async function POST({ request, cookies }: { request: Request; cookies: any }) {
   const body = await request.json();
@@ -67,9 +100,12 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
       }
       return json({ success: true, message: result.message });
 
-    // ──────────────────────── START ────────────────────────
-    } else if (action === 'start') {
-      podmanClient = getRestPodmanClient(worker);
+    // ──────── START / STOP / RESTART ───────────────────────
+    } else if (isLifecycleAction(action)) {
+      const lifecycle = LIFECYCLE[action];
+      const client = getRestPodmanClient(worker);
+      podmanClient = client;
+
       // Only the generation that is serving. A superseded generation retained
       // for a fast rollback is deliberately stopped, and starting or restarting
       // it here would resurrect the old version's processes without routing any
@@ -80,67 +116,32 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
         .where(and(eq(containers.applicationId, applicationId), eq(containers.state, 'active')))
         .all();
 
-      for (const container of appContainers) {
-        try {
-          await podmanClient.startContainer(container.containerId);
-          await db.update(containers)
-            .set({ status: 'running', updatedAt: new Date() })
-            .where(eq(containers.id, container.id));
-        } catch (e: any) {
-          console.error('Failed to start container:', e);
-        }
+      const outcome = await applyToContainers(appContainers, (id) =>
+        lifecycle.run(client, id),
+      );
+
+      // One statement for everything that took it, rather than one per
+      // container — and only for those, so a container Podman refused keeps the
+      // status it really has instead of the one that was asked for.
+      if (outcome.succeeded.length > 0) {
+        await db
+          .update(containers)
+          .set({ status: lifecycle.status, updatedAt: new Date() })
+          .where(inArray(containers.id, outcome.succeeded));
       }
-      return json({ success: true, message: 'Application started' });
 
-    // ──────────────────────── STOP ─────────────────────────
-    } else if (action === 'stop') {
-      podmanClient = getRestPodmanClient(worker);
-      // Only the generation that is serving. A superseded generation retained
-      // for a fast rollback is deliberately stopped, and starting or restarting
-      // it here would resurrect the old version's processes without routing any
-      // traffic to them.
-      const appContainers = await db
-        .select()
-        .from(containers)
-        .where(and(eq(containers.applicationId, applicationId), eq(containers.state, 'active')))
-        .all();
-
-      for (const container of appContainers) {
-        try {
-          await podmanClient.stopContainer(container.containerId);
-          await db.update(containers)
-            .set({ status: 'exited', updatedAt: new Date() })
-            .where(eq(containers.id, container.id));
-        } catch (e: any) {
-          console.error('Failed to stop container:', e);
-        }
+      if (outcome.failures.length > 0) {
+        console.error(`[applications] ${action} "${app.name}":`, outcome.failures);
       }
-      return json({ success: true, message: 'Application stopped' });
 
-    // ──────────────────────── RESTART ──────────────────────
-    } else if (action === 'restart') {
-      podmanClient = getRestPodmanClient(worker);
-      // Only the generation that is serving. A superseded generation retained
-      // for a fast rollback is deliberately stopped, and starting or restarting
-      // it here would resurrect the old version's processes without routing any
-      // traffic to them.
-      const appContainers = await db
-        .select()
-        .from(containers)
-        .where(and(eq(containers.applicationId, applicationId), eq(containers.state, 'active')))
-        .all();
-
-      for (const container of appContainers) {
-        try {
-          await podmanClient.restartContainer(container.containerId);
-          await db.update(containers)
-            .set({ status: 'running', updatedAt: new Date() })
-            .where(eq(containers.id, container.id));
-        } catch (e: any) {
-          console.error('Failed to restart container:', e);
-        }
-      }
-      return json({ success: true, message: 'Application restarted' });
+      // 200 even when some containers refused: something did happen, and the
+      // message says exactly what. `success` and `failures` are what the caller
+      // reads to decide whether to say so in red.
+      return json({
+        success: outcome.failures.length === 0,
+        message: lifecycleMessage(lifecycle.verb, appContainers.length, outcome),
+        failures: outcome.failures,
+      });
 
     // ──────────────────────── DELETE ───────────────────────
     } else if (action === 'delete') {

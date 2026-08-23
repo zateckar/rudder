@@ -4,22 +4,10 @@ import { db } from '$lib/db';
 import { users } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { hashPassword, validatePassword } from '$lib/auth';
+import { requireAdminUser, route } from '$lib/server/auth';
 
-export const GET: RequestHandler = async ({ cookies, url }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  // Only admins can list users
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (!currentUser || currentUser.role !== 'admin') {
-    return json({ error: 'Admin access required' }, { status: 403 });
-  }
+export const GET: RequestHandler = route(async (event) => {
+  requireAdminUser(event);
 
   const allUsers = await db.select({
     id: users.id,
@@ -32,25 +20,12 @@ export const GET: RequestHandler = async ({ cookies, url }) => {
   }).from(users).all();
 
   return json(allUsers);
-};
+});
 
-export const POST: RequestHandler = async ({ request, cookies }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
+export const POST: RequestHandler = route(async (event) => {
+  requireAdminUser(event);
 
-  // Only admins can create users
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (!currentUser || currentUser.role !== 'admin') {
-    return json({ error: 'Admin access required' }, { status: 403 });
-  }
-
-  const body = await request.json();
+  const body = await event.request.json();
   const { username, email, password, fullName, role } = body;
 
   if (!username || !email || !fullName) {
@@ -105,4 +80,4 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
   }).from(users).where(eq(users.id, newUserId)).get();
 
   return json(created, { status: 201 });
-};
+});

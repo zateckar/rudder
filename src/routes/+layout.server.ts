@@ -1,41 +1,35 @@
 import { redirect } from '@sveltejs/kit';
-import { db, safeUserColumns } from '$lib/db';
-import { users } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { currentUser, userTeams } from '$lib/server/auth';
 
-export const load = async ({ cookies, url }: { cookies: any; url: URL }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
-  const sessionId = getSessionIdFromCookies(cookies);
-  
+/**
+ * The user every page's layout renders, and the gate that sends an anonymous
+ * caller to the login form.
+ *
+ * Reads `locals.auth`, which `hooks.server.ts` has already resolved — this used
+ * to validate the session and read the `users` row itself, which was the second
+ * of the three times a single page load did both.
+ */
+export const load = async (event: { locals: App.Locals; url: URL }) => {
+  const ctx = currentUser(event);
+
   // Public paths that must not redirect to /login.
-  const isPublicPath = url.pathname === '/login' || url.pathname.startsWith('/api/health');
+  const isPublicPath =
+    event.url.pathname === '/login' || event.url.pathname.startsWith('/api/health');
 
-  if (!sessionId) {
-    if (!isPublicPath) {
-      throw redirect(303, '/login');
-    }
-    return { user: null };
+  if (!ctx) {
+    if (!isPublicPath) throw redirect(303, '/login');
+    return { user: null, teams: [] };
   }
 
-  const userId = await validateSession(sessionId);
-
-  if (!userId) {
-    if (!isPublicPath) {
-      throw redirect(303, '/login');
-    }
-    return { user: null };
-  }
-
-  // Select explicit columns: the previous `select()` shipped the bcrypt
-  // password hash to the browser in every SSR payload.
-  const currentUser = await db
-    .select(safeUserColumns)
-    .from(users)
-    .where(eq(users.id, userId))
-    .get();
-
+  // Loaded here rather than fetched from `/api/teams` by the sidebar's own
+  // `$effect`. That fetch was a second authenticated round trip after *every*
+  // navigation, and the sidebar rendered without its team selector until it
+  // came back — a visible flash on every page.
+  //
+  // `AuthContext.user` is already the safe column subset — no password hash, by
+  // construction rather than by remembering to exclude it.
   return {
-    user: currentUser,
+    user: ctx.user,
+    teams: (await userTeams(event)).map((t) => ({ id: t.id, name: t.name, slug: t.slug })),
   };
 };

@@ -7,7 +7,6 @@ import provisionShTemplate from './shell/provision.sh?raw';
 // Config templates
 import traefikYmlTemplate from './shell/templates/traefik.yml?raw';
 import podmanApiRoutingTlsTemplate from './shell/templates/podman-api-routing-tls.yml?raw';
-import podmanApiRoutingNotlsTemplate from './shell/templates/podman-api-routing-notls.yml?raw';
 import metricsRoutingTemplate from './shell/templates/metrics-routing.yml?raw';
 import crowdsecMiddlewareTemplate from './shell/templates/crowdsec-middleware.yml?raw';
 import globalOidcMiddlewareTemplate from './shell/templates/global-oidc-middleware.yml?raw';
@@ -180,9 +179,25 @@ export function generateProvisioningScript(
 
   // Render config templates with runtime values
   const traefikYml = replacePlaceholders(traefikYmlTemplate, templateVars);
+  // No base domain means no Podman API route at all.
+  //
+  // There used to be a "notls" variant here for that case: a catch-all
+  // ``PathPrefix(`/`)`` router, `tls: {}`, and — crucially — no `clientAuth`
+  // block. Traefik listens on 443 and the host firewall admits 443, so every
+  // worker provisioned without a base domain published the root-equivalent
+  // Podman API to anyone who could reach it. `POST /containers/create` with a
+  // privileged bind mount of `/` is host takeover.
+  //
+  // It cannot be fixed in place: Traefik binds `tls.options` to a router's SNI,
+  // and a catch-all has no Host rule to bind to, so `RequireAndVerifyClientCert`
+  // there is silently ignored or applied to every connection. Without a
+  // hostname there is nothing to route, so nothing is routed — the API stays on
+  // 127.0.0.1:8080 for local use. `/api/workers/provision` refuses these
+  // workers up front; this is the second layer, so the insecure document cannot
+  // be generated even by a caller that bypasses the route.
   const podmanApiRouting = baseDomain
     ? replacePlaceholders(podmanApiRoutingTlsTemplate, templateVars)
-    : podmanApiRoutingNotlsTemplate;
+    : '';
   const metricsRouting = baseDomain
     ? replacePlaceholders(metricsRoutingTemplate, templateVars)
     : '';
@@ -210,7 +225,7 @@ export function generateProvisioningScript(
 
     // Config templates (base64-encoded)
     TRAEFIK_YML_B64: toBase64(traefikYml),
-    PODMAN_API_ROUTING_B64: toBase64(podmanApiRouting),
+    PODMAN_API_ROUTING_B64: podmanApiRouting ? toBase64(podmanApiRouting) : '',
     METRICS_ROUTING_B64: metricsRouting ? toBase64(metricsRouting) : '',
     CROWDSEC_MIDDLEWARE_B64: toBase64(crowdsecMiddleware),
     GLOBAL_OIDC_MIDDLEWARE_B64: globalOidcMiddleware ? toBase64(globalOidcMiddleware) : '',
@@ -282,6 +297,23 @@ export interface AppMiddlewareOptions {
   };
   healthCheckPath?: string;   // Traefik health check endpoint, e.g. /health
   useGlobalAuth?: boolean;    // whether to apply global OIDC auth (default: true if global OIDC is configured)
+}
+
+/**
+ * Is this an absolute URL path safe to place inside a Traefik matcher?
+ *
+ * Must start with `/`, and may not contain a backtick (which would close the
+ * matcher), whitespace, or the characters Traefik's rule grammar reads as
+ * operators and grouping. Deliberately narrow: this guards a value that becomes
+ * authentication logic.
+ */
+export function isPlainPathPrefix(path: unknown): path is string {
+  return (
+    typeof path === 'string' &&
+    path.startsWith('/') &&
+    path.length <= 2048 &&
+    !/[`'"()|&,\s\\]/.test(path)
+  );
 }
 
 export function generateTraefikLabelsForApp(
@@ -374,10 +406,27 @@ export function generateTraefikLabelsForApp(
     }
 
     // excludedURLs are path prefixes; the plugin takes a single Traefik-style rule.
+    //
+    // Each path goes inside a backtick-quoted matcher, so an unfiltered value
+    // could close it and append rule logic of its own: a path of
+    // `` /x`) || Method(`GET `` turned a path exclusion into "bypass
+    // authentication for every GET". Anything that is not a plain absolute path
+    // is dropped rather than escaped — there is no legitimate exclusion that
+    // needs these characters, and a silently rewritten rule is worse than a
+    // missing one.
     if (cfg.excludedURLs?.length) {
-      labels[`${p}.BypassAuthenticationRule`] = cfg.excludedURLs
-        .map((path) => `PathPrefix(\`${path}\`)`)
-        .join(' || ');
+      const paths = cfg.excludedURLs.filter(isPlainPathPrefix);
+      if (paths.length !== cfg.excludedURLs.length) {
+        console.warn(
+          `[traefik] Dropped ${cfg.excludedURLs.length - paths.length} OIDC exclusion path(s) for ` +
+            `"${safeName}" that were not plain absolute paths.`,
+        );
+      }
+      if (paths.length) {
+        labels[`${p}.BypassAuthenticationRule`] = paths
+          .map((path) => `PathPrefix(\`${path}\`)`)
+          .join(' || ');
+      }
     }
 
     middlewares.push(`${oidcName}@docker`);

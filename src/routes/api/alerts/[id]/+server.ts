@@ -8,16 +8,12 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { alertRules } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { authErrorResponse, requireAdmin } from '$lib/server/auth';
+import { requireAdminUser, route } from '$lib/server/auth';
 
-export const PATCH: RequestHandler = async ({ params, request, cookies }) => {
-  try {
-    await requireAdmin(cookies);
-  } catch (error) {
-    return authErrorResponse(error);
-  }
+export const PATCH: RequestHandler = route(async ({ params, request, locals }) => {
+  requireAdminUser({ locals });
 
-  const { id } = params;
+  const id = params.id!;
   const existing = await db.select().from(alertRules)
     .where(eq(alertRules.id, id))
     .get();
@@ -49,16 +45,12 @@ export const PATCH: RequestHandler = async ({ params, request, cookies }) => {
   await db.update(alertRules).set(updates).where(eq(alertRules.id, id));
 
   return json({ success: true });
-};
+});
 
-export const DELETE: RequestHandler = async ({ params, cookies }) => {
-  try {
-    await requireAdmin(cookies);
-  } catch (error) {
-    return authErrorResponse(error);
-  }
+export const DELETE: RequestHandler = route(async ({ params, locals }) => {
+  requireAdminUser({ locals });
 
-  const { id } = params;
+  const id = params.id!;
   const existing = await db.select().from(alertRules)
     .where(eq(alertRules.id, id))
     .get();
@@ -67,4 +59,4 @@ export const DELETE: RequestHandler = async ({ params, cookies }) => {
   await db.delete(alertRules).where(eq(alertRules.id, id));
 
   return json({ success: true });
-};
+});

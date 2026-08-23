@@ -1,26 +1,17 @@
-import { redirect, fail } from '@sveltejs/kit';
-import { db, safeUserColumns } from '$lib/db';
-import { users, oidcConfig } from '$lib/db/schema';
+import { fail } from '@sveltejs/kit';
+import { db } from '$lib/db';
+import { oidcConfig } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
+import { isAdmin, currentUser as sessionUser, requirePageAdmin } from '$lib/server/auth';
 
-export const load = async ({ cookies, url }: { cookies: any; url: URL }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId) throw redirect(303, '/login');
-
-  const userId = await validateSession(sessionId);
-  if (!userId) throw redirect(303, '/login');
-
-  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
-  if (!currentUser || currentUser.role !== 'admin') throw redirect(303, '/dashboard');
+export const load = async (event: { locals: App.Locals; url: URL }) => {
+  const currentUser = requirePageAdmin(event).user;
 
   // Load generic OIDC config from DB (take first/only row)
   const config = await db.select().from(oidcConfig).get();
 
   // The callback URL that must be registered in the OIDC provider
-  const publicUrl = url.origin;
-  const callbackUrl = `${publicUrl}/api/auth/oidc/generic/callback`;
+  const callbackUrl = `${event.url.origin}/api/auth/oidc/generic/callback`;
 
   return {
     user: currentUser,
@@ -30,21 +21,12 @@ export const load = async ({ cookies, url }: { cookies: any; url: URL }) => {
 };
 
 export const actions = {
-  save: async ({ request, cookies }: { request: Request; cookies: any }) => {
-    const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
+  save: async (event: { request: Request; locals: App.Locals }) => {
+    const ctx = sessionUser(event);
+    if (!ctx) return fail(401, { error: 'Unauthorized' });
+    if (!isAdmin(ctx)) return fail(403, { error: 'Forbidden' });
 
-    const sessionId = getSessionIdFromCookies(cookies);
-    if (!sessionId || !(await validateSession(sessionId))) {
-      return fail(401, { error: 'Unauthorized' });
-    }
-
-    const userId = await validateSession(sessionId);
-    const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId!)).get();
-    if (!currentUser || currentUser.role !== 'admin') {
-      return fail(403, { error: 'Forbidden' });
-    }
-
-    const formData = await request.formData();
+    const formData = await event.request.formData();
 
     const data = {
       enabled: formData.get('enabled') === 'on',
@@ -75,15 +57,17 @@ export const actions = {
     return { success: true };
   },
 
-  discover: async ({ request, cookies }: { request: Request; cookies: any }) => {
-    const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
+  // Admin, like `save` next to it. This makes the server fetch a URL the caller
+  // supplies, and it only ever checked that *a* session existed — so any member
+  // could aim the control plane at an arbitrary host and read back four fields
+  // of the response. It sits on an admin-only page and configures an admin-only
+  // setting; there was never a reason for it to be reachable by anyone else.
+  discover: async (event: { request: Request; locals: App.Locals }) => {
+    const ctx = sessionUser(event);
+    if (!ctx) return fail(401, { error: 'Unauthorized' });
+    if (!isAdmin(ctx)) return fail(403, { error: 'Forbidden' });
 
-    const sessionId = getSessionIdFromCookies(cookies);
-    if (!sessionId || !(await validateSession(sessionId))) {
-      return fail(401, { error: 'Unauthorized' });
-    }
-
-    const formData = await request.formData();
+    const formData = await event.request.formData();
     const issuerUrl = formData.get('issuerUrl')?.toString();
     if (!issuerUrl) return fail(400, { error: 'Issuer URL required' });
 

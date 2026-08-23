@@ -3,67 +3,66 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { containers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { getRestPodmanClient } from '$lib/server/podman-client';
-import { authErrorResponse, requireContainerAccess } from '$lib/server/auth';
+import { withPodman } from '$lib/server/podman-client';
+import { requireContainer, route } from '$lib/server/auth';
+import { parseJsonBody, schemas } from '$lib/server/validation';
 
-export const GET: RequestHandler = async ({ params, cookies }) => {
-  let dbContainer, worker;
-  try {
-    ({ container: dbContainer, worker } = await requireContainerAccess(cookies, params.id));
-  } catch (error) {
-    return authErrorResponse(error);
-  }
+export const GET: RequestHandler = route(async (event) => {
+  const { container, worker } = await requireContainer(event, event.params.id!);
+  // `withPodman` rather than a hand-written destroy: the previous version
+  // destroyed the client after a successful inspect and not at all when the
+  // inspect threw, so a misbehaving worker leaked a keep-alive TLS agent per
+  // request — on exactly the requests most likely to be retried.
+  return json(await withPodman(worker, (c) => c.getContainer(container.containerId)));
+});
 
-  try {
-    const client = getRestPodmanClient(worker);
-    const inspect = await client.getContainer(dbContainer.containerId);
-    client.destroy();
-    return json(inspect);
-  } catch (error: any) {
-    return json({ error: error.message }, { status: 500 });
-  }
-};
+/**
+ * The four things that can be done to one container, and what each leaves
+ * behind in the database.
+ *
+ * A table rather than an if/else chain, because the chain repeated the same
+ * `db.update(...).set({ status, updatedAt })` three times with one word
+ * different, and every branch had to remember to destroy the client itself.
+ */
+const ACTIONS = {
+  start: {
+    run: (c: PodmanClient, id: string) => c.startContainer(id),
+    record: (rowId: string) => setStatus(rowId, 'running'),
+  },
+  stop: {
+    run: (c: PodmanClient, id: string) => c.stopContainer(id),
+    record: (rowId: string) => setStatus(rowId, 'exited'),
+  },
+  restart: {
+    run: (c: PodmanClient, id: string) => c.restartContainer(id),
+    record: (rowId: string) => setStatus(rowId, 'running'),
+  },
+  remove: {
+    run: (c: PodmanClient, id: string) => c.removeContainer(id, true),
+    record: (rowId: string) => db.delete(containers).where(eq(containers.id, rowId)),
+  },
+} satisfies Record<string, { run: (c: PodmanClient, id: string) => Promise<void>; record: (rowId: string) => unknown }>;
 
-export const PATCH: RequestHandler = async ({ params, request, cookies }) => {
-  let dbContainer, worker;
-  try {
-    ({ container: dbContainer, worker } = await requireContainerAccess(cookies, params.id));
-  } catch (error) {
-    return authErrorResponse(error);
-  }
+type PodmanClient = Parameters<Parameters<typeof withPodman>[1]>[0];
 
-  const body = await request.json();
-  const { action } = body;
+function setStatus(rowId: string, status: string) {
+  return db
+    .update(containers)
+    .set({ status, updatedAt: new Date() })
+    .where(eq(containers.id, rowId));
+}
 
-  let client: ReturnType<typeof getRestPodmanClient>;
-  try {
-    client = getRestPodmanClient(worker);
-  } catch (error: any) {
-    return json({ error: error.message }, { status: 400 });
-  }
+export const PATCH: RequestHandler = route(async (event) => {
+  const { container, worker } = await requireContainer(event, event.params.id!);
 
-  try {
-    if (action === 'start') {
-      await client.startContainer(dbContainer.containerId);
-      await db.update(containers).set({ status: 'running', updatedAt: new Date() }).where(eq(containers.id, params.id));
-    } else if (action === 'stop') {
-      await client.stopContainer(dbContainer.containerId);
-      await db.update(containers).set({ status: 'exited', updatedAt: new Date() }).where(eq(containers.id, params.id));
-    } else if (action === 'restart') {
-      await client.restartContainer(dbContainer.containerId);
-      await db.update(containers).set({ status: 'running', updatedAt: new Date() }).where(eq(containers.id, params.id));
-    } else if (action === 'remove') {
-      await client.removeContainer(dbContainer.containerId, true);
-      await db.delete(containers).where(eq(containers.id, params.id));
-    } else {
-      client.destroy();
-      return json({ error: 'Invalid action. Use: start, stop, restart, remove' }, { status: 400 });
-    }
+  // `schemas.containerAction` already described this shape and went unused; the
+  // handler destructured `{ action }` and validated it with an if/else chain
+  // whose final `else` was the error message.
+  const { action } = await parseJsonBody(event.request, schemas.containerAction);
+  const operation = ACTIONS[action];
 
-    client.destroy();
-    return json({ success: true, action });
-  } catch (error: any) {
-    client.destroy();
-    return json({ error: error.message }, { status: 500 });
-  }
-};
+  await withPodman(worker, (client) => operation.run(client, container.containerId));
+  await operation.record(container.id);
+
+  return json({ success: true, action });
+});

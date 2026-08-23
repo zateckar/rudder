@@ -1,30 +1,17 @@
-import { redirect } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
-import { db, safeWorkerColumns, safeUserColumns } from '$lib/db';
-import { users, volumes, teams, workers, teamMembers } from '$lib/db/schema';
+import { db, safeWorkerColumns } from '$lib/db';
+import { volumes, teams, workers, teamMembers } from '$lib/db/schema';
 import { eq, inArray } from 'drizzle-orm';
+import { requirePageUser } from '$lib/server/auth';
 
-export const load: PageServerLoad = async ({ cookies, url }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId) {
-    throw redirect(303, '/login');
-  }
-
-  const userId = await validateSession(sessionId);
-  if (!userId) {
-    throw redirect(303, '/login');
-  }
-
-  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
-  if (!currentUser) {
-    throw redirect(303, '/login');
-  }
+export const load: PageServerLoad = async (event) => {
+  const currentUser = requirePageUser(event).user;
+  const userId = currentUser.id;
+  const { url } = event;
 
   // Get user's teams
-  const userTeams = await db.select().from(teamMembers).where(eq(teamMembers.userId, userId)).all();
-  const teamIds = userTeams.map(t => t.teamId);
+  const memberships = await db.select().from(teamMembers).where(eq(teamMembers.userId, userId)).all();
+  const teamIds = memberships.map(t => t.teamId);
   const urlTeam = url.searchParams.get('team');
 
   // Get volumes (admin sees all, others see their teams')

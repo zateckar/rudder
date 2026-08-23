@@ -1,6 +1,7 @@
 import { json } from '@sveltejs/kit';
-import { getRestPodmanClient } from '$lib/server/podman-client';
-import { authErrorResponse, requireContainerAccess } from '$lib/server/auth';
+import type { RequestHandler } from './$types';
+import { withPodman } from '$lib/server/podman-client';
+import { requireContainer, route } from '$lib/server/auth';
 
 const SHELL = '/bin/sh';
 
@@ -37,36 +38,21 @@ function shellIsMissing(result: { stdout: string; stderr: string; exitCode: numb
   return /executable file .*not found|no such file or directory/i.test(output);
 }
 
-export async function POST({ params, request, cookies }: { params: { id: string }; request: Request; cookies: any }) {
-  let container, worker;
-  try {
-    ({ container, worker } = await requireContainerAccess(cookies, params.id));
-  } catch (error) {
-    return authErrorResponse(error);
-  }
+export const POST: RequestHandler = route(async (event) => {
+  const { container, worker } = await requireContainer(event, event.params.id!);
 
-  const { command } = await request.json();
+  const { command } = await event.request.json();
 
   if (!command || typeof command !== 'string') {
     return json({ error: 'Command required' }, { status: 400 });
   }
 
-  let client: ReturnType<typeof getRestPodmanClient>;
-  try {
-    client = getRestPodmanClient(worker);
-  } catch (e: any) {
-    return json({ error: `Client creation failed: ${e.message}` }, { status: 400 });
-  }
-
-  try {
+  return withPodman(worker, async (client) => {
     // Run through a shell, because that is what the terminal claims to be and
     // what anyone typing `grep x | wc -l` expects. Splitting on whitespace and
     // exec'ing argv directly passed `&&`, `|` and `>` to the program as literal
     // arguments, which fails silently and confusingly.
-    let result = await client.execContainerHttp(
-      container.containerId,
-      [SHELL, '-c', command],
-    );
+    let result = await client.execContainerHttp(container.containerId, [SHELL, '-c', command]);
     let shell: string | null = SHELL;
 
     // Distroless and scratch images have no shell at all. Fall back to argv, so
@@ -80,23 +66,14 @@ export async function POST({ params, request, cookies }: { params: { id: string 
       );
     }
 
-    client.destroy();
-
     return json({
       stdout: result.stdout,
       stderr: result.stderr,
       exitCode: result.exitCode,
       shell,
     });
-  } catch (error: any) {
-    console.error('Exec error:', {
-      message: error.message,
-      code: error.code,
-    });
-    client.destroy();
-    return json({ error: error.message, code: error.code }, { status: 500 });
-  }
-}
+  });
+});
 
 /**
  * Interactive terminals do not run through this route.
@@ -106,12 +83,8 @@ export async function POST({ params, request, cookies }: { params: { id: string 
  * connected. The working path is `/api/terminal/ws`, whose upgrade is handled
  * on the HTTP server; see `src/lib/server/ws/registry.ts`.
  */
-export async function GET({ params, cookies }: { params: { id: string }; cookies: any }) {
-  try {
-    await requireContainerAccess(cookies, params.id);
-  } catch (error) {
-    return authErrorResponse(error);
-  }
+export const GET: RequestHandler = route(async (event) => {
+  await requireContainer(event, event.params.id!);
 
   return json(
     {
@@ -121,4 +94,4 @@ export async function GET({ params, cookies }: { params: { id: string }; cookies
     },
     { status: 410 },
   );
-}
+});

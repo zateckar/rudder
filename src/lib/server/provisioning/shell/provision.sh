@@ -448,8 +448,19 @@ step_traefik_config() {
   sed -i "s/BOUNCER_VERSION_PLACEHOLDER/${BOUNCER_VERSION}/g" /etc/traefik/traefik.yml
   sed -i "s/OIDC_VERSION_PLACEHOLDER/${OIDC_VERSION}/g" /etc/traefik/traefik.yml
   echo "traefik.yml updated with latest plugin versions"
-  echo "{{PODMAN_API_ROUTING_B64}}" | base64 -d > /etc/traefik/dynamic/podman-api.yml
-  echo "podman-api.yml (mTLS-secured Podman API route) written"
+  # Only written when there is a base domain to bind the router to. Traefik ties
+  # tls.options (and so RequireAndVerifyClientCert) to a router's SNI, so there
+  # is no way to require a client certificate on a catch-all route — the
+  # host-less variant this replaces published the Podman API unauthenticated on
+  # 443. Removed rather than left stale: a route file from an earlier run would
+  # outlive the config that stopped generating it.
+  if [ -n "{{PODMAN_API_ROUTING_B64}}" ]; then
+    echo "{{PODMAN_API_ROUTING_B64}}" | base64 -d > /etc/traefik/dynamic/podman-api.yml
+    echo "podman-api.yml (mTLS-secured Podman API route) written"
+  else
+    rm -f /etc/traefik/dynamic/podman-api.yml
+    echo "podman-api.yml not written — no base domain, so the Podman API is not published"
+  fi
 
   # Metrics endpoint route — secured with same mTLS as Podman API
   if [ -n "{{METRICS_ROUTING_B64}}" ]; then
@@ -747,16 +758,20 @@ else
   echo "Exposed: 22 (SSH), 443 (Traefik HTTPS) — NOT enforced, no host firewall"
 fi
 echo "Internal: 8080 (Podman API), 8081/7422 (CrowdSec), 9100 (metrics), 8082 (Traefik Prometheus) — 127.0.0.1 only"
-echo "Security: Podman API secured with mTLS client certificate authentication"
 echo "WAF: CrowdSec AppSec enabled on all applications via Traefik plugin"
+# This line used to claim mTLS unconditionally, including on the runs that
+# published the Podman API with no client-certificate check at all — the
+# operator was told the opposite of what shipped.
 if [ -n "{{BASE_DOMAIN}}" ]; then
+  echo "Security: Podman API secured with mTLS client certificate authentication"
   echo "Podman API URL: https://podman-api.{{BASE_DOMAIN}}"
   echo "Traefik dashboard: https://traefik.{{BASE_DOMAIN}}/dashboard/"
   echo ""
   echo "NOTE: Let's Encrypt TLS certificates may take 30-60 seconds to obtain on first provision."
   echo "      HTTPS endpoints will return errors until certificates are ready."
 else
-  echo "Podman API URL: https://${WORKER_IP}"
+  echo "Security: Podman API NOT published — no base domain, so it cannot be given an mTLS router"
+  echo "Podman API URL: none (reachable only as http://127.0.0.1:8080 on the worker itself)"
 fi
 
 echo "=== Provisioning status ==="

@@ -1,58 +1,42 @@
 import { json } from '@sveltejs/kit';
+import type { RequestHandler } from './$types';
 import { db, sqlite } from '$lib/db';
 import { teams, teamMembers, users, applications, stacks } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
+import { AuthorizationError, requireUser, route } from '$lib/server/auth';
 
 /**
  * Resolve the caller's authority over a team.
  *
- * Admins are treated as owners, the way `requireTeamMember` in
- * `$lib/server/auth` already does everywhere else. Without that, a team with no
- * owner row — every team created by OIDC group sync — could not be renamed or
- * removed by anyone at all, including an operator.
+ * Admins are treated as owners, the way `requireTeam` in `$lib/server/auth`
+ * already does everywhere else. Without that, a team with no owner row — every
+ * team created by OIDC group sync — could not be renamed or removed by anyone
+ * at all, including an operator.
  */
 async function teamAuthority(
-  cookies: any,
+  event: { locals: App.Locals },
   teamId: string,
-): Promise<
-  | { ok: false; response: Response }
-  | { ok: true; team: typeof teams.$inferSelect; isOwner: boolean }
-> {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) {
-    return { ok: false, response: json({ error: 'Unauthorized' }, { status: 401 }) };
-  }
+): Promise<{ team: typeof teams.$inferSelect; isOwner: boolean }> {
+  const ctx = requireUser(event);
 
   const team = await db.select().from(teams).where(eq(teams.id, teamId)).get();
-  if (!team) {
-    return { ok: false, response: json({ error: 'Team not found' }, { status: 404 }) };
-  }
+  if (!team) throw new AuthorizationError('Team not found', 404);
 
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (user?.role === 'admin') {
-    return { ok: true, team, isOwner: true };
-  }
+  if (ctx.user.role === 'admin') return { team, isOwner: true };
 
   const membership = await db
     .select()
     .from(teamMembers)
-    .where(and(eq(teamMembers.teamId, team.id), eq(teamMembers.userId, userId)))
+    .where(and(eq(teamMembers.teamId, team.id), eq(teamMembers.userId, ctx.user.id)))
     .get();
 
-  if (!membership) {
-    return { ok: false, response: json({ error: 'Access denied' }, { status: 403 }) };
-  }
+  if (!membership) throw new AuthorizationError('Access denied', 403);
 
-  return { ok: true, team, isOwner: membership.role === 'owner' };
+  return { team, isOwner: membership.role === 'owner' };
 }
 
-export async function GET({ params, cookies }: { params: { id: string }; cookies: any }) {
-  const auth = await teamAuthority(cookies, params.id);
-  if (!auth.ok) return auth.response;
-  const team = auth.team;
+export const GET: RequestHandler = route(async (event) => {
+  const { team, isOwner } = await teamAuthority(event, event.params.id!);
 
   const members = await db.select({
     id: users.id,
@@ -70,30 +54,67 @@ export async function GET({ params, cookies }: { params: { id: string }; cookies
   return json({
     ...team,
     members: members.filter(m => m.username),
-    userRole: auth.isOwner ? 'owner' : 'member',
+    userRole: isOwner ? 'owner' : 'member',
   });
-}
+});
 
-export async function PATCH({ params, request, cookies }: { params: { id: string }; request: Request; cookies: any }) {
-  const auth = await teamAuthority(cookies, params.id);
-  if (!auth.ok) return auth.response;
-  if (!auth.isOwner) {
+export const PATCH: RequestHandler = route(async (event) => {
+  const teamId = event.params.id!;
+  const { isOwner } = await teamAuthority(event, teamId);
+  if (!isOwner) {
     return json({ error: 'Only owners can update team settings' }, { status: 403 });
   }
 
-  const body = await request.json();
-  const { name } = body;
+  const body = await event.request.json().catch(() => null);
+  const rawName = body?.name;
 
   const updates: any = { updatedAt: new Date() };
-  
-  if (name) {
+
+  if (rawName !== undefined) {
+    if (typeof rawName !== 'string') {
+      return json({ error: 'name must be a string' }, { status: 400 });
+    }
+    const name = rawName.trim();
+    if (!name) {
+      return json({ error: 'name cannot be empty' }, { status: 400 });
+    }
+    if (name.length > 100) {
+      return json({ error: 'name is too long (maximum 100 characters)' }, { status: 400 });
+    }
+
+    // Case-insensitive collision check, which `teams.name UNIQUE` does not give
+    // us: SQLite compares text case-sensitively without COLLATE NOCASE, so
+    // "Platform" and "platform" can both exist. OIDC group sync
+    // (`syncUserTeams`) keys its lookup on `name.toLowerCase()`, so a second
+    // team differing only in case makes the group claim resolve to whichever row
+    // the map happened to keep — a rename was enough to divert another team's
+    // OIDC members into a team of the caller's own.
+    const collision = await db
+      .select({ id: teams.id, name: teams.name })
+      .from(teams)
+      .all();
+    const clash = collision.find(
+      (t) => t.id !== teamId && t.name.toLowerCase() === name.toLowerCase(),
+    );
+    if (clash) {
+      return json(
+        {
+          error:
+            `Another team is already named "${clash.name}". Team names must differ by more ` +
+            `than capitalisation, because identity-provider group names are matched ` +
+            `case-insensitively.`,
+        },
+        { status: 409 },
+      );
+    }
+
     updates.name = name;
   }
 
-  await db.update(teams).set(updates).where(eq(teams.id, params.id));
+  await db.update(teams).set(updates).where(eq(teams.id, teamId));
 
   return json({ success: true });
-}
+});
 
 /**
  * Delete a team and everything that only exists because the team did.
@@ -113,13 +134,11 @@ export async function PATCH({ params, request, cookies }: { params: { id: string
  * Audit rows are unlinked rather than deleted. They are the record of what was
  * done to the team, which is precisely what you still want once it is gone.
  */
-export async function DELETE({ params, cookies }: { params: { id: string }; cookies: any }) {
-  const auth = await teamAuthority(cookies, params.id);
-  if (!auth.ok) return auth.response;
-  if (!auth.isOwner) {
+export const DELETE: RequestHandler = route(async (event) => {
+  const { team, isOwner } = await teamAuthority(event, event.params.id!);
+  if (!isOwner) {
     return json({ error: 'Only owners can delete team' }, { status: 403 });
   }
-  const team = auth.team;
 
   const ownedApps = await db
     .select({ id: applications.id, name: applications.name })
@@ -189,4 +208,4 @@ export async function DELETE({ params, cookies }: { params: { id: string }; cook
   }
 
   return json({ success: true });
-}
+});

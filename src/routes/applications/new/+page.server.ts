@@ -7,34 +7,18 @@ import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
 import { ALLOWED_DOMAINS_UNSUPPORTED } from '$lib/server/oidc';
 import { imageReferenceError } from '$lib/server/image-reference';
 import { checkApplicationQuota } from '$lib/server/quota';
-import { canWriteToTeam, getAuthUser, stackAcceptsTeam } from '$lib/server/auth';
+import {
+  canWriteToTeam,
+  currentUser as sessionUser,
+  requirePageUser,
+  stackAcceptsTeam,
+  userTeams as allUserTeams,
+} from '$lib/server/auth';
+import { encryptField } from '$lib/server/encryption';
 
-export const load = async ({ cookies }: { cookies: any }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId) throw redirect(303, '/login');
-
-  const userId = await validateSession(sessionId);
-  if (!userId) throw redirect(303, '/login');
-
-  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
-
-  let userTeams;
-  if (currentUser?.role === 'admin') {
-    userTeams = await db.select().from(teams).all();
-  } else {
-    const memberships = await db
-      .select()
-      .from(teamMembers)
-      .where(eq(teamMembers.userId, userId))
-      .all();
-    const teamIds = memberships.map((m) => m.teamId);
-    userTeams =
-      teamIds.length > 0
-        ? await db.select().from(teams).where(inArray(teams.id, teamIds)).all()
-        : [];
-  }
+export const load = async (event: { locals: App.Locals }) => {
+  const currentUser = requirePageUser(event).user;
+  const userTeams = await allUserTeams(event);
 
   const selection = await selectWorker();
   const allEligible = await getAllEligibleWorkers();
@@ -76,13 +60,13 @@ export const load = async ({ cookies }: { cookies: any }) => {
 };
 
 export const actions = {
-  default: async ({ request, cookies }: { request: Request; cookies: any }) => {
-    const ctx = await getAuthUser(cookies);
+  default: async (event: { request: Request; locals: App.Locals }) => {
+    const ctx = sessionUser(event);
     if (!ctx) {
       return fail(401, { error: 'Unauthorized' });
     }
     const userId = ctx.user.id;
-    const formData = await request.formData();
+    const formData = await event.request.formData();
 
     const name = formData.get('name')?.toString();
     const teamId = formData.get('teamId')?.toString();
@@ -313,7 +297,8 @@ export const actions = {
       rateLimitAvg,
       rateLimitBurst,
       authType,
-      authConfig,
+      // Encrypted at rest — see the same field in the edit action.
+      authConfig: encryptField(authConfig),
       replicas,
       healthcheck,
       gitRepo: gitRepo || null,

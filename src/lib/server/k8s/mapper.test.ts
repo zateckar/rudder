@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   DEFAULT_TAIL_LINES,
   MAX_TAIL_LINES,
+  applicationToDeployment,
   containerPortOf,
   containerToPod,
   imageReferenceOrBlank,
@@ -31,6 +32,83 @@ describe('parseTailLines', () => {
     expect(parseTailLines('')).toBe(DEFAULT_TAIL_LINES);
     expect(parseTailLines('0')).toBe(DEFAULT_TAIL_LINES);
     expect(parseTailLines('-5')).toBe(DEFAULT_TAIL_LINES);
+  });
+});
+
+describe('applicationToDeployment — environment', () => {
+  function deploymentWith(environment: string | null) {
+    return applicationToDeployment(
+      {
+        id: 'app-1',
+        name: 'shop',
+        type: 'single',
+        manifest: JSON.stringify({ image: 'nginx' }),
+        environment,
+        replicas: 1,
+        restartPolicy: 'always',
+        workerId: 'worker-1',
+        domain: 'shop.example.com',
+        description: null,
+        createdAt: new Date(0),
+        updatedAt: new Date(0),
+      },
+      'platform',
+      [],
+    );
+  }
+
+  const withSecret = JSON.stringify([
+    { key: 'LOG_LEVEL', value: 'debug', secret: false },
+    { key: 'DB_PASSWORD', value: 'hunter2', secret: true },
+  ]);
+
+  test('withholds the value of a secret-flagged variable', () => {
+    // /api/applications/[id]/export has always redacted these. This mapper
+    // ignored the flag, so `kubectl get deploy -o yaml` handed the plaintext to
+    // any team-scoped API key — the values the REST export hides.
+    const deployment = deploymentWith(withSecret);
+    const env = deployment.spec.template.spec.containers[0].env;
+
+    expect(JSON.stringify(deployment)).not.toContain('hunter2');
+    expect(env).toEqual([{ name: 'LOG_LEVEL', value: 'debug' }]);
+  });
+
+  test('reports the withheld names so the output is not silently short', () => {
+    const deployment = deploymentWith(withSecret);
+    expect(deployment.metadata.annotations['rudder.dev/withheld-env']).toBe('DB_PASSWORD');
+  });
+
+  test('withholds by omission, never by a placeholder value', () => {
+    // This endpoint is half of an apply loop: a `***REDACTED***` string would be
+    // read back by parseDeploymentBody on the next `kubectl apply` and stored as
+    // though it were the real value, replacing the secret with the marker.
+    const deployment = deploymentWith(withSecret);
+    expect(JSON.stringify(deployment)).not.toContain('REDACTED');
+  });
+
+  test('leaves a plain environment untouched', () => {
+    const deployment = deploymentWith(
+      JSON.stringify([{ key: 'LOG_LEVEL', value: 'debug', secret: false }]),
+    );
+    expect(deployment.spec.template.spec.containers[0].env).toEqual([
+      { name: 'LOG_LEVEL', value: 'debug' },
+    ]);
+    expect(deployment.metadata.annotations['rudder.dev/withheld-env']).toBeUndefined();
+  });
+
+  test('omits env entirely when every variable is secret', () => {
+    const deployment = deploymentWith(
+      JSON.stringify([{ key: 'DB_PASSWORD', value: 'hunter2', secret: true }]),
+    );
+    expect(deployment.spec.template.spec.containers[0].env).toBeUndefined();
+    expect(deployment.metadata.annotations['rudder.dev/withheld-env']).toBe('DB_PASSWORD');
+  });
+
+  test('tolerates an environment that is absent or unparseable', () => {
+    for (const environment of [null, '', 'not json']) {
+      const deployment = deploymentWith(environment);
+      expect(deployment.spec.template.spec.containers[0].env).toBeUndefined();
+    }
   });
 });
 

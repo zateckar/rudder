@@ -1,43 +1,20 @@
 import { redirect, fail } from '@sveltejs/kit';
-import { db, safeUserColumns } from '$lib/db';
-import { workers, users } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { db } from '$lib/db';
+import { workers } from '$lib/db/schema';
+import { domainFormatError } from '$lib/server/domains';
+import { currentUser, isAdmin, requirePageAdmin } from '$lib/server/auth';
 
-export const load = async ({ cookies }: { cookies: any }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId) throw redirect(303, '/login');
-
-  const userId = await validateSession(sessionId);
-  if (!userId) throw redirect(303, '/login');
-
-  const currentUser = await db.select(safeUserColumns).from(users).where(eq(users.id, userId)).get();
-  if (!currentUser || currentUser.role !== 'admin') {
-    throw redirect(303, '/dashboard');
-  }
-
-  return {
-    user: currentUser,
-  };
+export const load = async (event: { locals: App.Locals }) => {
+  return { user: requirePageAdmin(event).user };
 };
 
 export const actions = {
-  default: async ({ request, cookies }: { request: Request; cookies: any }) => {
-    const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
+  default: async (event: { request: Request; locals: App.Locals }) => {
+    const ctx = currentUser(event);
+    if (!ctx) return fail(401, { error: 'Unauthorized' });
+    if (!isAdmin(ctx)) return fail(403, { error: 'Admin access required' });
 
-    const sessionId = getSessionIdFromCookies(cookies);
-    if (!sessionId || !(await validateSession(sessionId))) {
-      return fail(401, { error: 'Unauthorized' });
-    }
-
-    const userId = await validateSession(sessionId);
-    const currentUser = await db.select().from(users).where(eq(users.id, userId!)).get();
-    if (!currentUser || currentUser.role !== 'admin') {
-      return fail(403, { error: 'Admin access required' });
-    }
-
-    const formData = await request.formData();
+    const formData = await event.request.formData();
     const name = formData.get('name')?.toString();
     const hostname = formData.get('hostname')?.toString();
     const sshPort = parseInt(formData.get('sshPort')?.toString() || '22');
@@ -46,6 +23,16 @@ export const actions = {
 
     if (!name || !hostname || !sshUser) {
       return fail(400, { error: 'Missing required fields' });
+    }
+
+    // The base domain is the stem of every hostname on this worker, and each one
+    // becomes a Traefik `Host()` rule — for applications, and for the worker's
+    // own auth/metrics/podman-api routers. A value carrying rule syntax would be
+    // interpolated into all of them; a merely malformed one makes Traefik reject
+    // the dynamic file whole, which takes every route on the worker down at once.
+    if (baseDomain) {
+      const badDomain = domainFormatError(baseDomain);
+      if (badDomain) return fail(400, { error: `Base domain: ${badDomain}` });
     }
 
     const workerId = crypto.randomUUID();

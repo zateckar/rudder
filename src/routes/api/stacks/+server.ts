@@ -1,83 +1,64 @@
 import { json } from '@sveltejs/kit';
+import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
-import { stacks, applications, teams, teamMembers, users } from '$lib/db/schema';
-import { eq, inArray } from 'drizzle-orm';
+import { stacks, applications, teams } from '$lib/db/schema';
+import { eq, inArray, count } from 'drizzle-orm';
+import { canWriteToTeam, requireUser, route, userTeams } from '$lib/server/auth';
 
 /** GET: List stacks for the user's teams */
-export async function GET({ cookies, url }: { cookies: any; url: URL }) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
+export const GET: RequestHandler = route(async (event) => {
+  requireUser(event);
 
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
+  const visible = await userTeams(event);
+  const urlTeam = event.url.searchParams.get('team');
 
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
-
-  let teamIds: string[];
-  const urlTeam = url.searchParams.get('team');
-
-  if (currentUser?.role === 'admin') {
-    if (urlTeam && urlTeam !== 'all') {
-      teamIds = [urlTeam];
-    } else {
-      const allTeams = await db.select().from(teams).all();
-      teamIds = allTeams.map(t => t.id);
-    }
-  } else {
-    const memberships = await db.select().from(teamMembers).where(eq(teamMembers.userId, userId)).all();
-    const userTeamIds = memberships.map(m => m.teamId);
-    if (urlTeam && urlTeam !== 'all') {
-      teamIds = userTeamIds.includes(urlTeam) ? [urlTeam] : [];
-    } else {
-      teamIds = userTeamIds;
-    }
-  }
+  const teamIds =
+    urlTeam && urlTeam !== 'all'
+      ? visible.filter((t) => t.id === urlTeam).map((t) => t.id)
+      : visible.map((t) => t.id);
 
   if (teamIds.length === 0) return json([]);
 
   const allStacks = await db.select().from(stacks).where(inArray(stacks.teamId, teamIds)).all();
+  if (allStacks.length === 0) return json([]);
 
-  // Get app counts and team names
-  const result = [];
-  for (const stack of allStacks) {
-    const apps = await db.select().from(applications).where(eq(applications.stackId, stack.id)).all();
-    const team = stack.teamId ? await db.select().from(teams).where(eq(teams.id, stack.teamId)).get() : null;
-    result.push({
+  // Two queries, not two per stack: this ran a full `SELECT *` of every
+  // application in a stack just to take `.length`, and re-fetched the owning
+  // team row for each one.
+  const counts = await db
+    .select({ stackId: applications.stackId, n: count() })
+    .from(applications)
+    .where(inArray(applications.stackId, allStacks.map((s) => s.id)))
+    .groupBy(applications.stackId)
+    .all();
+  const countByStack = new Map(counts.map((c) => [c.stackId, c.n]));
+  const teamName = new Map(visible.map((t) => [t.id, t.name]));
+
+  return json(
+    allStacks.map((stack) => ({
       ...stack,
-      appCount: apps.length,
-      teamName: team?.name ?? 'Unknown',
-    });
-  }
-
-  return json(result);
-}
+      appCount: countByStack.get(stack.id) ?? 0,
+      teamName: (stack.teamId && teamName.get(stack.teamId)) || 'Unknown',
+    })),
+  );
+});
 
 /** POST: Create a stack */
-export async function POST({ request, cookies }: { request: Request; cookies: any }) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
+export const POST: RequestHandler = route(async (event) => {
+  const ctx = requireUser(event);
 
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
-
-  const body = await request.json();
+  const body = await event.request.json();
   const { name, description, teamId } = body;
 
   if (!name || !teamId) {
     return json({ error: 'Name and team are required' }, { status: 400 });
   }
 
-  // Verify team membership
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (currentUser?.role !== 'admin') {
-    const membership = await db.select().from(teamMembers)
-      .where(eq(teamMembers.teamId, teamId))
-      .all();
-    if (!membership.find(m => m.userId === userId)) {
-      return json({ error: 'Not a member of this team' }, { status: 403 });
-    }
+  if (!(await canWriteToTeam(ctx, teamId))) {
+    return json({ error: 'Not a member of this team' }, { status: 403 });
   }
 
+  const userId = ctx.user.id;
   const now = new Date();
   const id = crypto.randomUUID();
 
@@ -92,4 +73,4 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
   });
 
   return json({ id, success: true });
-}
+});

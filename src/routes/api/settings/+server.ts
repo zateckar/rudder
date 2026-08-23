@@ -1,18 +1,12 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
-import { systemSettings, users } from '$lib/db/schema';
+import { systemSettings } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
+import { requireAdminUser, route } from '$lib/server/auth';
 
-export const GET: RequestHandler = async ({ cookies }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
-
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (!user || user.role !== 'admin') return json({ error: 'Admin access required' }, { status: 403 });
+export const GET: RequestHandler = route(async (event) => {
+  requireAdminUser(event);
 
   const allSettings = await db.select().from(systemSettings).all();
   const settings: Record<string, string> = {};
@@ -21,19 +15,12 @@ export const GET: RequestHandler = async ({ cookies }) => {
   }
 
   return json(settings);
-};
+});
 
-export const PUT: RequestHandler = async ({ request, cookies }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
+export const PUT: RequestHandler = route(async (event) => {
+  requireAdminUser(event);
 
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
-
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (!user || user.role !== 'admin') return json({ error: 'Admin access required' }, { status: 403 });
-
-  const body = await request.json();
+  const body = await event.request.json();
 
   for (const [key, value] of Object.entries(body)) {
     if (typeof value !== 'string') continue;
@@ -53,4 +40,4 @@ export const PUT: RequestHandler = async ({ request, cookies }) => {
   }
 
   return json({ success: true });
-};
+});

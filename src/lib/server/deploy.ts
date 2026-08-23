@@ -5,6 +5,7 @@ import { db } from '$lib/db';
 import { applications, workers, containers, teams, stacks, volumes, secrets, deployments } from '$lib/db/schema';
 import { and, eq, inArray, ne, or, desc } from 'drizzle-orm';
 import { getRestPodmanClient } from '$lib/server/podman-client';
+import type { ContainerInspect } from '$lib/server/podman';
 import {
   ManifestError,
   type DeploymentPlan,
@@ -17,7 +18,7 @@ import { generateTraefikLabelsForApp, type AppMiddlewareOptions } from '$lib/ser
 // exactly the same rate limit, auth mode and health check.
 import { buildMiddlewareOpts } from '$lib/server/traefik-config';
 import { ALLOWED_DOMAINS_UNSUPPORTED } from '$lib/server/oidc';
-import { decrypt } from '$lib/server/encryption';
+import { decrypt, decryptField } from '$lib/server/encryption';
 import { ALIAS_LABEL, ensureAppNetwork, teardownAppNetwork } from '$lib/server/networks';
 import { env } from '$lib/server/env';
 import { MountPolicyError, realizeMounts, type MountIntent } from '$lib/server/mounts';
@@ -358,8 +359,25 @@ type PodmanRestClient = ReturnType<typeof getRestPodmanClient>;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/**
+ * The one Podman call `verifyGeneration` makes.
+ *
+ * Narrowed from the whole client so the wait can be exercised without a worker:
+ * this is the part of a blue/green deploy that decides whether the new version
+ * is allowed to take traffic, and it had no tests at all.
+ */
+export interface VerificationSource {
+  getContainer: (id: string) => Promise<ContainerInspect>;
+}
+
+/** Time, injected. See `verifyGeneration`. */
+export interface VerificationClock {
+  now: () => number;
+  wait: (ms: number) => Promise<void>;
+}
+
 /** A container this deploy created — enough to verify it, or to undo it. */
-interface CreatedContainer {
+export interface CreatedContainer {
   /** `containers.id`, the database row. */
   rowId: string;
   /** Podman's container id. */
@@ -389,15 +407,23 @@ interface CreatedContainer {
  * `RestartCount` is watched throughout, because `restart: always` turns a crash
  * loop into a container that is running again by the next poll.
  */
-async function verifyGeneration(
-  client: PodmanRestClient,
-  created: CreatedContainer[],
+export async function verifyGeneration(
+  client: VerificationSource,
+  created: readonly CreatedContainer[],
   timeoutMs: number,
+  /**
+   * Injected so the wait is testable. The production path passes the real
+   * timers; a test passes stubs and drives the clock itself, the same way
+   * `applyToContainers` takes its Podman call as a function rather than a
+   * client — see deploy/lifecycle.ts for why this repository does that instead
+   * of mocking.
+   */
+  clock: VerificationClock = { now: () => Date.now(), wait: sleep },
 ): Promise<void> {
   if (created.length === 0) return;
 
-  const deadline = Date.now() + timeoutMs;
-  const settledBy = Date.now() + SETTLE_MS;
+  const deadline = clock.now() + timeoutMs;
+  const settledBy = clock.now() + SETTLE_MS;
   const baselineRestarts = new Map<string, number>();
   const waiting = new Map(created.map((c) => [c.containerId, c.name]));
 
@@ -437,20 +463,20 @@ async function verifyGeneration(
         continue;
       }
       // No health check defined: accept once it has simply stayed up.
-      if (!health && Date.now() >= settledBy) {
+      if (!health && clock.now() >= settledBy) {
         waiting.delete(id);
       }
     }
 
     if (waiting.size === 0) break;
-    if (Date.now() >= deadline) {
+    if (clock.now() >= deadline) {
       throw new Error(
         `Timed out after ${Math.round(timeoutMs / 1000)}s waiting for ` +
         `${[...waiting.values()].join(', ')} to report healthy. ` +
         `The previous version is still serving.`,
       );
     }
-    await sleep(HEALTH_POLL_MS);
+    await clock.wait(HEALTH_POLL_MS);
   }
 }
 
@@ -758,7 +784,8 @@ async function deployApplication(
   // deploy an app whose access restriction has quietly evaporated.
   if (app.authType === 'oidc' && app.authConfig) {
     try {
-      const cfg = JSON.parse(app.authConfig);
+      // Encrypted at rest; `decryptField` returns legacy plaintext unchanged.
+      const cfg = JSON.parse(decryptField(app.authConfig) ?? '');
       if (Array.isArray(cfg.allowedUserDomains) && cfg.allowedUserDomains.length > 0) {
         return { success: false, message: ALLOWED_DOMAINS_UNSUPPORTED, statusCode: 400 };
       }

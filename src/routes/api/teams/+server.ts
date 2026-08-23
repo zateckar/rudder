@@ -1,7 +1,10 @@
 import { json } from '@sveltejs/kit';
+import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { teams, teamMembers, users } from '$lib/db/schema';
 import { eq, inArray } from 'drizzle-orm';
+import { requireUser, route, userTeams } from '$lib/server/auth';
+import { parseJsonBody, schemas } from '$lib/server/validation';
 
 function slugify(text: string): string {
   return text
@@ -10,80 +13,51 @@ function slugify(text: string): string {
     .replace(/(^-|-$)/g, '');
 }
 
-export async function GET({ cookies }: { cookies: any }) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId || !(await validateSession(sessionId))) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
+export const GET: RequestHandler = route(async (event) => {
+  requireUser(event);
 
-  const userId = await validateSession(sessionId);
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  // This used to validate the session twice in a row — once inside an `if` that
+  // discarded the result, then again to keep it.
+  const allTeams = await userTeams(event);
+  if (allTeams.length === 0) return json([]);
 
-  const currentUser = await db.select().from(users).where(eq(users.id, userId)).get();
-  
-  let allTeams;
-  
-  if (currentUser?.role === 'admin') {
-    allTeams = await db.select().from(teams).all();
-  } else {
-    const memberships = await db.select().from(teamMembers).where(eq(teamMembers.userId, userId)).all();
-    const teamIds = memberships.map(m => m.teamId);
-    
-    if (teamIds.length === 0) {
-      return json([]);
-    }
-    
-    allTeams = await db.select().from(teams).where(inArray(teams.id, teamIds)).all();
-  }
-
-  const teamsWithMembers = await Promise.all(
-    allTeams.map(async (team) => {
-      const members = await db.select({
-        id: users.id,
-        username: users.username,
-        email: users.email,
-        fullName: users.fullName,
-        role: teamMembers.role,
-        joinedAt: teamMembers.joinedAt,
-      })
-        .from(teamMembers)
-        .leftJoin(users, eq(teamMembers.userId, users.id))
-        .where(eq(teamMembers.teamId, team.id))
-        .all();
-
-      return {
-        ...team,
-        members: members.filter(m => m.username),
-      };
+  // One query for every team's members, not one query per team. `AppLayout`
+  // calls this on every page load, so the N+1 ran on every navigation.
+  const memberRows = await db
+    .select({
+      teamId: teamMembers.teamId,
+      id: users.id,
+      username: users.username,
+      email: users.email,
+      fullName: users.fullName,
+      role: teamMembers.role,
+      joinedAt: teamMembers.joinedAt,
     })
+    .from(teamMembers)
+    .leftJoin(users, eq(teamMembers.userId, users.id))
+    .where(inArray(teamMembers.teamId, allTeams.map((t) => t.id)))
+    .all();
+
+  const byTeam = new Map<string, typeof memberRows>();
+  for (const row of memberRows) {
+    if (!row.username) continue; // membership pointing at a deleted user
+    const bucket = byTeam.get(row.teamId) ?? [];
+    bucket.push(row);
+    byTeam.set(row.teamId, bucket);
+  }
+
+  return json(
+    allTeams.map((team) => ({
+      ...team,
+      members: (byTeam.get(team.id) ?? []).map(({ teamId: _t, ...member }) => member),
+    })),
   );
+});
 
-  return json(teamsWithMembers);
-}
+export const POST: RequestHandler = route(async (event) => {
+  const userId = requireUser(event).user.id;
 
-export async function POST({ request, cookies }: { request: Request; cookies: any }) {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
-  const sessionId = getSessionIdFromCookies(cookies);
-  if (!sessionId || !(await validateSession(sessionId))) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  const userId = await validateSession(sessionId);
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  const body = await request.json();
-  const { name, description } = body;
-
-  if (!name) {
-    return json({ error: 'Team name is required' }, { status: 400 });
-  }
+  const { name } = await parseJsonBody(event.request, schemas.createTeam);
 
   const slug = slugify(name);
   
@@ -112,4 +86,4 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
   });
 
   return json({ id: teamId, name, slug });
-}
+});

@@ -50,19 +50,41 @@ const securityHeaders: Handle = async ({ event, resolve }) => {
 
 const authentication: Handle = async ({ event, resolve }) => {
   let userId: string | null = null;
-  let teamId: string | null = null;
-  
+
+  // Resolved once, here, and read from `locals` everywhere downstream.
+  //
+  // This used to set `locals.userId` and `locals.userRole` and stop there, and
+  // almost nothing read them: 56 route files instead re-ran this same session
+  // validation and user lookup for themselves via an inline
+  // `await import('$lib/auth')`. A single application page load performed three
+  // session validations and three user reads as a result. `locals.auth` now
+  // carries the whole context so the helpers in $lib/server/auth are pure
+  // reads.
   const sessionId = getSessionIdFromCookies(event.cookies);
   if (sessionId) {
     userId = await validateSession(sessionId);
     if (userId) {
-      event.locals.userId = userId;
       const user = await db.select().from(users).where(eq(users.id, userId)).get();
       if (user) {
+        event.locals.userId = userId;
         event.locals.userRole = user.role;
+        event.locals.auth = {
+          user: {
+            id: user.id,
+            username: user.username,
+            email: user.email,
+            role: user.role as 'admin' | 'member',
+            fullName: user.fullName,
+          },
+          sessionUserId: userId,
+        };
+      } else {
+        // A session pointing at a user that no longer exists is not a session.
+        userId = null;
       }
     }
   }
+  event.locals.auth ??= null;
 
   // Bearer token auth via API keys (for K8s-compatible API and programmatic access)
   if (!userId) {

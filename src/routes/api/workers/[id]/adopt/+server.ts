@@ -8,31 +8,24 @@
  * them, which is not a per-team operation.
  */
 import { json } from '@sveltejs/kit';
-import { requireAdmin } from '$lib/server/auth';
+import type { RequestHandler } from './$types';
+import { requireAdminUser, route } from '$lib/server/auth';
 import { adoptContainers, listAdoptableContainers, type AdoptRequest } from '$lib/server/app-discovery';
 
-export async function GET({ params, cookies }: { params: { id: string }; cookies: any }) {
-  await requireAdmin(cookies);
+export const GET: RequestHandler = route(async (event) => {
+  requireAdminUser(event);
   try {
-    return json({ containers: await listAdoptableContainers(params.id) });
+    return json({ containers: await listAdoptableContainers(event.params.id!) });
   } catch (e: any) {
     console.error('[adopt] Could not list adoptable containers:', e);
     return json({ error: e.message }, { status: 502 });
   }
-}
+});
 
-export async function POST({
-  params,
-  request,
-  cookies,
-}: {
-  params: { id: string };
-  request: Request;
-  cookies: any;
-}) {
-  const ctx = await requireAdmin(cookies);
+export const POST: RequestHandler = route(async (event) => {
+  const ctx = requireAdminUser(event);
 
-  const body = await request.json().catch(() => null);
+  const body = await event.request.json().catch(() => null);
   const raw = body?.containers;
   if (!Array.isArray(raw) || raw.length === 0) {
     return json({ error: 'Name at least one container to adopt' }, { status: 400 });
@@ -55,7 +48,7 @@ export async function POST({
   }
 
   try {
-    const result = await adoptContainers(params.id, requests, ctx.user?.id ?? null);
+    const result = await adoptContainers(event.params.id!, requests, ctx.user?.id ?? null);
     return json({
       success: result.adopted.length > 0,
       adopted: result.adopted,
@@ -68,4 +61,4 @@ export async function POST({
     console.error('[adopt] Adoption failed:', e);
     return json({ error: e.message }, { status: 500 });
   }
-}
+});

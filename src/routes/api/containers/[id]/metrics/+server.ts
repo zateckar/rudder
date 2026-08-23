@@ -2,7 +2,9 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { containerMetrics } from '$lib/db/schema';
 import { eq, and, asc, sql } from 'drizzle-orm';
-import { authErrorResponse, requireContainerScope } from '$lib/server/auth';
+import type { RequestHandler } from './$types';
+import { requireContainerScoped, route } from '$lib/server/auth';
+import { formatBytes } from '$lib/format';
 
 const RANGES: Record<string, number> = {
   '1h':  1  * 60 * 60 * 1000,
@@ -12,29 +14,9 @@ const RANGES: Record<string, number> = {
   '30d': 30 * 24 * 60 * 60 * 1000,
 };
 
-function formatBytes(b: number): string {
-  if (b === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(b) / Math.log(k));
-  return `${(b / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
-}
-
-export async function GET({
-  params,
-  url,
-  cookies,
-}: {
-  params: { id: string };
-  url: URL;
-  cookies: any;
-}) {
-  let dbContainer;
-  try {
-    ({ container: dbContainer } = await requireContainerScope(cookies, params.id));
-  } catch (error) {
-    return authErrorResponse(error);
-  }
+export const GET: RequestHandler = route(async ({ params, url, locals }) => {
+  const containerId = params.id!;
+  const { container: dbContainer } = await requireContainerScoped({ locals }, containerId);
 
   const rangeParam = url.searchParams.get('range') ?? '1h';
   const fromParam = url.searchParams.get('from');
@@ -58,7 +40,7 @@ export async function GET({
     .from(containerMetrics)
     .where(
       and(
-        eq(containerMetrics.containerId, params.id),
+        eq(containerMetrics.containerId, containerId),
         sql`${containerMetrics.collectedAt} >= ${Math.floor(fromMs / 1000)}`
       )
     )
@@ -88,7 +70,7 @@ export async function GET({
   }));
 
   return json({
-    containerId: params.id,
+    containerId,
     containerName: dbContainer.name,
     range: rangeParam,
     from: fromMs,
@@ -102,4 +84,4 @@ export async function GET({
       memMaxBytes: Math.max(...points.map(p => p.memUsageBytes)),
     } : null,
   });
-}
+});

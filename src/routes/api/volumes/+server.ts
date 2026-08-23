@@ -1,86 +1,55 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
-import { volumes, users, teamMembers } from '$lib/db/schema';
-import { eq, or } from 'drizzle-orm';
+import { volumes, teamMembers } from '$lib/db/schema';
+import { eq, inArray } from 'drizzle-orm';
+import { isTeamMember, requireUser, route } from '$lib/server/auth';
+import { parseJsonBody, schemas } from '$lib/server/validation';
 
-export const GET: RequestHandler = async ({ cookies, url }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
+export const GET: RequestHandler = route(async (event) => {
+  const ctx = requireUser(event);
+  const teamId = event.url.searchParams.get('teamId');
 
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
-  
-  // Get user's teams
-  const userTeams = await db.select().from(teamMembers).where(eq(teamMembers.userId, userId)).all();
-  const teamIds = userTeams.map(t => t.teamId);
-
-  // Filter by team if specified
-  const teamId = url.searchParams.get('teamId');
-  
-  let allVolumes;
-  if (user?.role === 'admin') {
-    // Admin sees all volumes
-    allVolumes = teamId 
+  if (ctx.user.role === 'admin') {
+    const rows = teamId
       ? await db.select().from(volumes).where(eq(volumes.teamId, teamId)).all()
       : await db.select().from(volumes).all();
-  } else {
-    // Regular users see only their team's volumes
-    if (teamId) {
-      if (!teamIds.includes(teamId)) {
-        return json({ error: 'Access denied to this team' }, { status: 403 });
-      }
-      allVolumes = await db.select().from(volumes).where(eq(volumes.teamId, teamId)).all();
-    } else {
-      allVolumes = await db.select().from(volumes).all();
-      allVolumes = allVolumes.filter(v => v.teamId && teamIds.includes(v.teamId));
-    }
+    return json(rows);
   }
 
-  return json(allVolumes);
-};
+  const memberships = await db
+    .select({ teamId: teamMembers.teamId })
+    .from(teamMembers)
+    .where(eq(teamMembers.userId, ctx.user.id))
+    .all();
+  const teamIds = memberships.map((t) => t.teamId);
 
-export const POST: RequestHandler = async ({ request, cookies }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-  
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  const body = await request.json();
-  const { name, teamId, workerId, containerPath, sizeLimit } = body;
-
-  if (!name || !containerPath) {
-    return json({ error: 'Name and containerPath are required' }, { status: 400 });
-  }
-
-  // Every volume must have an owning team. A teamless volume is invisible in the
-  // listing (which filters on membership) but was readable, editable and
-  // deletable by every authenticated user, because the per-volume checks skip
-  // membership when there is no team to check against.
-  if (!teamId) {
-    return json({ error: 'teamId is required' }, { status: 400 });
-  }
-
-  // Verify user has access to the team
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (user?.role !== 'admin') {
-    const { and } = await import('drizzle-orm');
-    const membership = await db.select().from(teamMembers)
-      .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, userId)))
-      .get();
-
-    if (!membership) {
+  if (teamId) {
+    if (!teamIds.includes(teamId)) {
       return json({ error: 'Access denied to this team' }, { status: 403 });
     }
+    return json(await db.select().from(volumes).where(eq(volumes.teamId, teamId)).all());
+  }
+
+  // Filtered in SQL, not afterwards: this used to `SELECT *` every volume in the
+  // installation and drop the ones the caller could not see in JavaScript.
+  if (teamIds.length === 0) return json([]);
+  return json(await db.select().from(volumes).where(inArray(volumes.teamId, teamIds)).all());
+});
+
+export const POST: RequestHandler = route(async (event) => {
+  const ctx = requireUser(event);
+
+  // `schemas.createVolume` states the same rules the hand-written checks did —
+  // including that an owning team is required, which is what stops a teamless
+  // volume being reachable by every authenticated user.
+  const { name, teamId, workerId, containerPath, sizeLimit } = await parseJsonBody(
+    event.request,
+    schemas.createVolume,
+  );
+
+  if (ctx.user.role !== 'admin' && !(await isTeamMember(ctx.user.id, teamId))) {
+    return json({ error: 'Access denied to this team' }, { status: 403 });
   }
 
   const volumeId = crypto.randomUUID();
@@ -99,4 +68,4 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 
   const created = await db.select().from(volumes).where(eq(volumes.id, volumeId)).get();
   return json(created, { status: 201 });
-};
+});

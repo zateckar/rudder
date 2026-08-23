@@ -1,18 +1,12 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
-import { workerPings, users } from '$lib/db/schema';
+import { workerPings } from '$lib/db/schema';
 import { eq, and, gte, desc } from 'drizzle-orm';
+import { requireAdminUser, route } from '$lib/server/auth';
 
-export const GET: RequestHandler = async ({ params, url, cookies }) => {
-  const { getSessionIdFromCookies, validateSession } = await import('$lib/auth');
-
-  const sessionId = getSessionIdFromCookies(cookies);
-  const userId = sessionId ? await validateSession(sessionId) : null;
-  if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
-
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (!user || user.role !== 'admin') return json({ error: 'Admin access required' }, { status: 403 });
+export const GET: RequestHandler = route(async ({ params, url, locals }) => {
+  requireAdminUser({ locals });
 
   const hours = parseInt(url.searchParams.get('hours') || '24');
   const since = new Date(Date.now() - hours * 3600 * 1000);
@@ -20,7 +14,7 @@ export const GET: RequestHandler = async ({ params, url, cookies }) => {
   const pings = await db.select()
     .from(workerPings)
     .where(and(
-      eq(workerPings.workerId, params.id),
+      eq(workerPings.workerId, params.id!),
       gte(workerPings.pingedAt, since)
     ))
     .orderBy(desc(workerPings.pingedAt))
@@ -41,4 +35,4 @@ export const GET: RequestHandler = async ({ params, url, cookies }) => {
     })),
     summary: { total, online, uptimePercent, avgLatency },
   });
-};
+});

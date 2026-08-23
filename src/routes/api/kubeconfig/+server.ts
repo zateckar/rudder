@@ -12,30 +12,19 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { apiKeys, teams } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { requireAuth, requireAdmin, requireTeamOwner, authErrorResponse } from '$lib/server/auth';
+import type { RequestHandler } from './$types';
+import { requireUser, requireTeamOwnership, route } from '$lib/server/auth';
 import { hashKey } from '$lib/server/encryption';
 import { randomBytes } from 'crypto';
 
-export async function POST({
-  request,
-  cookies,
-  url,
-}: {
-  request: Request;
-  cookies: any;
-  url: URL;
-}) {
+export const POST: RequestHandler = route(async (event) => {
+  const { request, url } = event;
+
   // This endpoint mints an API key, so it must apply exactly the same rules as
   // POST /api/api-keys: a global (teamId: null) key reaches every team through
   // the k8s API and is admin-only, and a team key is an owner-level grant.
   // Plain membership is not enough — otherwise this route is a way around them.
-  let ctx;
-  try {
-    ctx = await requireAuth(cookies);
-  } catch (error) {
-    return authErrorResponse(error);
-  }
-  const user = ctx.user;
+  const user = requireUser(event).user;
 
   const body = await request.json().catch(() => ({}));
   const teamId: string | null = body.teamId || null;
@@ -52,16 +41,13 @@ export async function POST({
       .get();
     if (!team) return json({ error: 'Team not found' }, { status: 404 });
 
-    try {
-      await requireTeamOwner(cookies, teamId);
-    } catch (error) {
-      return authErrorResponse(error);
-    }
+    await requireTeamOwnership(event, teamId);
     teamSlug = team.slug;
   } else {
-    try {
-      await requireAdmin(cookies);
-    } catch {
+    // Checked inline rather than through `requireAdminUser`, only so the message
+    // can name the alternative — the generic "Admin access required" leaves a
+    // team owner with no idea that passing `teamId` would have worked.
+    if (user.role !== 'admin') {
       return json(
         {
           error:
@@ -123,4 +109,4 @@ users:
     serverUrl,
     namespace: teamSlug,
   });
-}
+});

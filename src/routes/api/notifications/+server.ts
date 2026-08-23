@@ -16,14 +16,10 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { notificationChannels } from '$lib/db/schema';
-import { authErrorResponse, requireAdmin, type AuthContext } from '$lib/server/auth';
+import { requireAdminUser, route } from '$lib/server/auth';
 
-export const GET: RequestHandler = async ({ cookies }) => {
-  try {
-    await requireAdmin(cookies);
-  } catch (error) {
-    return authErrorResponse(error);
-  }
+export const GET: RequestHandler = route(async (event) => {
+  requireAdminUser(event);
 
   const rows = await db.select().from(notificationChannels).all();
 
@@ -34,18 +30,12 @@ export const GET: RequestHandler = async ({ cookies }) => {
   }));
 
   return json(result);
-};
+});
 
-export const POST: RequestHandler = async ({ request, cookies }) => {
-  let ctx: AuthContext;
-  try {
-    ctx = await requireAdmin(cookies);
-  } catch (error) {
-    return authErrorResponse(error);
-  }
-  const userId = ctx.user.id;
+export const POST: RequestHandler = route(async (event) => {
+  const userId = requireAdminUser(event).user.id;
 
-  const body = await request.json();
+  const body = await event.request.json();
   const { name, type, config, teamId } = body;
 
   if (!name || !type || !config) {
@@ -85,4 +75,4 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
   });
 
   return json({ id, name, type }, { status: 201 });
-};
+});

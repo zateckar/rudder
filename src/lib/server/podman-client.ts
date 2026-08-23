@@ -89,3 +89,28 @@ export function getRestPodmanClient(
       `or set ALLOW_INSECURE_PODMAN=true to allow unauthenticated Podman API access.`,
   );
 }
+
+/**
+ * Run `fn` against a worker's Podman API and always dispose of the client.
+ *
+ * Every client carries a keep-alive HTTPS agent. One that is dropped rather
+ * than destroyed holds its TLS sockets to the worker open for the life of the
+ * process, and route handlers were doing this by hand on every exit path — 30
+ * call sites, each an opportunity to miss one. At least one did:
+ * `GET /api/containers/[id]` destroyed the client after a successful inspect
+ * and not at all when the inspect threw, which is exactly the case where a
+ * worker is misbehaving and the request is most likely to be retried.
+ *
+ * Use this instead of calling `getRestPodmanClient` directly from a route.
+ */
+export async function withPodman<T>(
+  worker: typeof workers.$inferSelect,
+  fn: (client: PodmanClient) => Promise<T>,
+): Promise<T> {
+  const client = getRestPodmanClient(worker);
+  try {
+    return await fn(client);
+  } finally {
+    client.destroy();
+  }
+}
