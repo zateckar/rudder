@@ -70,6 +70,14 @@ RUN mkdir -p /app/data && chown rudder:rudder /app/data
 # header rather than append to whatever the client sent.
 ENV PROTOCOL_HEADER=X-Forwarded-Proto
 
+# The port EXPOSE advertises has to be the one the server actually binds.
+# `server.js` reads PORT and falls back to 7244 — the dev-server port — so
+# without this the image listened on 7244 while declaring 3000, and a plain
+# `docker run -p 3000:3000` reached nothing. It worked only because
+# docker-compose.yml sets PORT=3000 itself, which made the image depend on its
+# own compose file to be correct.
+ENV PORT=3000
+
 # Switch to non-root user
 USER rudder
 
