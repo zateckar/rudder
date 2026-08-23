@@ -30,11 +30,28 @@ function tokensMatch(presented: string, expected: string): boolean {
   return timingSafeEqual(a, b);
 }
 
+/**
+ * The worker's credential, from whichever header it could use.
+ *
+ * `Authorization: Bearer` is the normal case. But a control plane published
+ * behind a proxy that demands HTTP Basic leaves that header spoken for — the
+ * outer layer has to be satisfied first or the request never arrives — so the
+ * worker moves its own token to `X-Rudder-Config-Token` and sends Basic in
+ * `Authorization`. Both are accepted: workers provisioned before this only know
+ * the Bearer form, and a control plane is upgraded before its workers are.
+ */
+function presentedToken(request: Request): string {
+  const header = request.headers.get('x-rudder-config-token');
+  if (header?.trim()) return header.trim();
+
+  const auth = request.headers.get('authorization') ?? '';
+  return auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+}
+
 export const GET: RequestHandler = async ({ params, request, setHeaders }) => {
   setHeaders({ 'Cache-Control': 'no-store' });
 
-  const auth = request.headers.get('authorization') ?? '';
-  const presented = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+  const presented = presentedToken(request);
   if (!presented) return json({ error: 'Unauthorized' }, { status: 401 });
 
   const worker = await db.select().from(workers).where(eq(workers.id, params.id)).get();

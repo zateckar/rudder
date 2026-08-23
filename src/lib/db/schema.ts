@@ -105,8 +105,43 @@ export const workers = sqliteTable('workers', {
   routingMode: text('routing_mode', { enum: ['labels', 'http'] }).notNull().default('labels'),
   /** Bearer token the worker presents to the config endpoint, encrypted at rest. */
   configToken: text('config_token'),
+  /**
+   * HTTP Basic credentials for whatever sits in front of the control plane.
+   *
+   * Some deployments publish Rudder behind a proxy that demands its own
+   * authentication. That proxy answers the worker's routing fetch with a 401
+   * before Rudder ever sees it, which is indistinguishable from Rudder
+   * rejecting the bearer token unless you read `WWW-Authenticate`.
+   *
+   * When set, the worker sends these as `Authorization: Basic` and moves its own
+   * credential to `X-Rudder-Config-Token` — the two cannot share one header, and
+   * the outer layer is the one that must be satisfied first.
+   *
+   * The password is encrypted at rest and never serialised to the browser.
+   */
+  configBasicUser: text('config_basic_user'),
+  configBasicPassword: text('config_basic_password'),
   /** Last time this worker successfully fetched its routing configuration. */
   configFetchedAt: integer('config_fetched_at', { mode: 'timestamp' }),
+  /**
+   * Outcome of the worker's last routing-fetch *attempt*, reported by the worker
+   * over the metrics endpoint.
+   *
+   * Distinct from `configFetchedAt`, which only ever records success. A worker
+   * that is failing to fetch looks exactly like one that was never provisioned
+   * for it — both leave `configFetchedAt` null — and the two need opposite
+   * remedies. These columns are what tells them apart:
+   *
+   * - `configFetchStatus` — HTTP status the worker saw, or 0 when it could not
+   *   reach the control plane at all.
+   * - `configFetchDetail` — one of `ok`, `no-routes`, `transport`, `http`,
+   *   `not-a-document`, `no-token`.
+   *
+   * Null on labels-mode workers and on any worker that has not reported yet.
+   */
+  configFetchStatus: integer('config_fetch_status'),
+  configFetchDetail: text('config_fetch_detail'),
+  configFetchAttemptAt: integer('config_fetch_attempt_at', { mode: 'timestamp' }),
 });
 
 export const applications = sqliteTable('applications', {

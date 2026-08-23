@@ -4,6 +4,7 @@ import {
   generateOidcSecret,
   isValidCallbackPath,
   isValidOidcSecret,
+  normalizeIssuerUrl,
   normalizeOidcSecret,
   oidcCallbackHost,
   oidcCallbackUrl,
@@ -67,6 +68,58 @@ describe('normalizeOidcSecret', () => {
       expect(result.rotated).toBe(true);
       expect(result.secret).toHaveLength(32);
     }
+  });
+});
+
+describe('normalizeIssuerUrl', () => {
+  test('strips the discovery path the plugin appends for itself', () => {
+    // Found in production: a worker whose OIDC had never once worked. The
+    // middleware loads and Traefik reports it healthy; the plugin only requests
+    // the document on the first request that reaches it, and gets a 404 for
+    // `…/.well-known/openid-configuration/.well-known/openid-configuration`.
+    expect(
+      normalizeIssuerUrl('https://identity.example.com/realms/standard/.well-known/openid-configuration'),
+    ).toBe('https://identity.example.com/realms/standard');
+  });
+
+  test('leaves an issuer alone', () => {
+    expect(normalizeIssuerUrl('https://identity.example.com/realms/standard')).toBe(
+      'https://identity.example.com/realms/standard',
+    );
+    expect(normalizeIssuerUrl('https://accounts.google.com')).toBe('https://accounts.google.com');
+  });
+
+  test('drops trailing slashes, before and after the suffix', () => {
+    for (const input of [
+      'https://idp.example.com/realms/x/',
+      'https://idp.example.com/realms/x///',
+      'https://idp.example.com/realms/x/.well-known/openid-configuration/',
+    ]) {
+      expect(normalizeIssuerUrl(input)).toBe('https://idp.example.com/realms/x');
+    }
+  });
+
+  test('matches the suffix case-insensitively', () => {
+    expect(normalizeIssuerUrl('https://idp.example.com/x/.Well-Known/OpenID-Configuration')).toBe(
+      'https://idp.example.com/x',
+    );
+  });
+
+  test('trims surrounding whitespace from a pasted value', () => {
+    expect(normalizeIssuerUrl('  https://idp.example.com/realms/x  ')).toBe(
+      'https://idp.example.com/realms/x',
+    );
+  });
+
+  test('returns null for nothing, so the column clears rather than storing ""', () => {
+    for (const input of [null, undefined, '', '   ']) {
+      expect(normalizeIssuerUrl(input)).toBeNull();
+    }
+  });
+
+  test('does not strip a path that merely contains the suffix elsewhere', () => {
+    const url = 'https://idp.example.com/.well-known/openid-configuration/realms/x';
+    expect(normalizeIssuerUrl(url)).toBe(url);
   });
 });
 

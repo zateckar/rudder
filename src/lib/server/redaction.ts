@@ -83,6 +83,11 @@ const SECRET_OUTPUT_KEYS = [
   'CLIENT_CERT_B64',
   'BOUNCER_KEY',
   'CONFIG_TOKEN',
+  'WORKER_TOKEN',
+  // Credentials for a proxy in front of the control plane. Not Rudder's own
+  // secret, which makes it more sensitive rather than less: it is likely shared
+  // with other services behind the same proxy.
+  'CONFIG_BASIC_PASS',
 ];
 
 /**

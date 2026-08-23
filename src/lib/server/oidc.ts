@@ -23,6 +23,40 @@ export const ALLOWED_DOMAINS_UNSUPPORTED =
 /** Path component of the shared callback URL, when a worker names no other. */
 export const OIDC_CALLBACK_PATH = '/oidc/callback';
 
+/** The path an OIDC provider serves its discovery document from. */
+const DISCOVERY_SUFFIX = '/.well-known/openid-configuration';
+
+/**
+ * Reduce a provider URL to the issuer the plugin actually wants.
+ *
+ * `Provider.Url` is the *issuer* — the plugin appends `DISCOVERY_SUFFIX` to it
+ * itself. Handing it the discovery URL therefore makes it request the path
+ * twice and the provider answers 404, which the plugin only discovers on the
+ * first request that reaches the middleware. Traefik reports the middleware as
+ * loaded, the worker looks healthy, and every login fails:
+ *
+ *     [INFO]  Provider Url: https://idp.example.com/realms/x/.well-known/openid-configuration
+ *     [ERROR] Error getting oidc discovery: HTTP error - Status code: 404 Not Found
+ *
+ * Pasting the discovery URL is the obvious mistake to make — it is the one URL
+ * a provider's own documentation puts in front of you, and until this function
+ * existed every field label here asked for it by name. Stripping the suffix is
+ * unambiguous: there is exactly one issuer it could have come from, and no
+ * legitimate issuer ends in it.
+ */
+export function normalizeIssuerUrl(url: string | null | undefined): string | null {
+  if (typeof url !== 'string') return null;
+  let value = url.trim();
+  if (!value) return null;
+
+  value = value.replace(/\/+$/, '');
+  if (value.toLowerCase().endsWith(DISCOVERY_SUFFIX)) {
+    value = value.slice(0, -DISCOVERY_SUFFIX.length).replace(/\/+$/, '');
+  }
+
+  return value || null;
+}
+
 /**
  * Rejected with this wherever a callback path is saved.
  *

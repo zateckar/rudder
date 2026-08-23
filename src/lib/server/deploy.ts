@@ -753,6 +753,44 @@ async function deployApplication(
   // manifests both have their host ports allocated.
   const blueGreen = supportsBlueGreen(worker) && !declaresFixedHostPorts(app);
 
+  // A blue/green deploy onto a worker that has never taken a configuration from
+  // us cannot do anything except waste resources.
+  //
+  // In http routing mode containers are created without `traefik.*` labels —
+  // routing comes from the fetched document — so a generation the worker never
+  // learns about is not reachable by anything. The cutover then fails to
+  // converge, the previous generation is put back into service, and the new one
+  // is left running and unroutable. Repeat that per deploy and the generations
+  // accumulate without bound: seen in production at g3 with every one of them
+  // dead weight holding ports, memory and disk.
+  //
+  // Refusing costs nothing — the deploy could not have worked — and it says
+  // which of the two very different problems this is, because a worker that has
+  // never fetched is usually not a Rudder fault at all.
+  if (blueGreen && !worker.configFetchedAt) {
+    const seen = worker.configFetchStatus;
+    const detail = worker.configFetchDetail;
+    const because =
+      seen == null
+        ? 'It has not reported a fetch attempt yet.'
+        : seen === 0
+          ? 'Its last attempt could not reach the control plane at all.'
+          : detail === 'proxy-auth'
+            ? `Its last attempt was answered ${seen} by something in front of the control plane that demands its ` +
+              `own credentials — the routing endpoint has to be reachable with only its bearer token.`
+            : `Its last attempt was answered ${seen}.`;
+
+    return {
+      success: false,
+      message:
+        `Worker "${worker.name}" has never fetched its routing configuration, so a deploy would create ` +
+        `containers that nothing can route to and leave the current ones serving. ${because} ` +
+        `Fix the worker's routing fetch first — its Settings tab shows the last attempt — or switch it back ` +
+        `to container labels to deploy in the meantime.`,
+      statusCode: 409,
+    };
+  }
+
   // Containers already deployed for this application. On the legacy path they
   // are removed before anything new is created; on the blue/green path they go
   // on serving until the new generation is verified.
@@ -1065,18 +1103,47 @@ async function deployApplication(
           // The worker has not fetched since the cutover, so its Traefik is
           // still working from the configuration that names the old
           // generation. Put that generation back into service rather than
-          // reaping it: both versions then serve, which is untidy but keeps
-          // the application up, where removing the one the worker is actually
-          // routing to would take it down. The next deploy supersedes both.
+          // reaping it: removing the one the worker is actually routing to
+          // would take the application down.
+          //
+          // The new generation is then discarded rather than left running.
+          // Not converging is precisely the statement that the worker never
+          // learned about it, so it is serving nothing — and in http mode it
+          // carries no labels either, so nothing else can reach it. Leaving it
+          // up was how a worker with a broken fetch accumulated a generation
+          // per deploy, each one holding ports and memory and serving no
+          // traffic at all. Rolling it back bounds that at zero.
           console.warn(
             `[deploy] Worker ${worker.name} did not fetch routing configuration within ` +
             `${Math.round(CUTOVER_CONVERGENCE_TIMEOUT_MS / 1000)}s of cutover; ` +
-            `keeping generation ${superseded[0].generation} in service alongside ${generation}.`,
+            `generation ${superseded[0].generation} stays in service and ${generation} is discarded.`,
           );
           await db
             .update(containers)
             .set({ state: 'active', updatedAt: new Date() })
             .where(inArray(containers.id, superseded.map((c) => c.id)));
+          await discardGeneration(podmanClient, createdContainers);
+
+          await db.update(deployments)
+            .set({
+              status: 'failed',
+              finishedAt: new Date(),
+              notes:
+                `Worker "${worker.name}" did not fetch its routing configuration within ` +
+                `${Math.round(CUTOVER_CONVERGENCE_TIMEOUT_MS / 1000)}s of cutover, so the new generation was ` +
+                `never routed and has been removed. Generation ${superseded[0].generation} is still serving. ` +
+                `Fix the worker's routing fetch — its Settings tab shows the last attempt — and deploy again.`,
+            })
+            .where(eq(deployments.id, deploymentId));
+
+          return {
+            success: false,
+            message:
+              `Deployed, but worker "${worker.name}" never fetched the new routing configuration, so the new ` +
+              `containers were never reachable and have been removed. The previous version is still serving. ` +
+              `Fix the worker's routing fetch — its Settings tab shows the last attempt — then deploy again.`,
+            statusCode: 409,
+          };
         } else {
           // Traffic is on the new generation. The old containers are still
           // finishing whatever they had in flight when the routing changed —
@@ -1315,8 +1382,13 @@ async function rollbackWithClient(
       .where(inArray(containers.id, current.map((c) => c.id)));
   }
 
+  // Nothing is created here — the retained generation already exists — so a
+  // failure to converge cannot accumulate containers the way a deploy can. What
+  // it can do is report a rollback that has not actually taken effect.
+  let converged = true;
+
   if (current.length > 0) {
-    const converged = await waitForConfigConvergence(worker.id, cutoverAt);
+    converged = await waitForConfigConvergence(worker.id, cutoverAt);
     if (!converged) {
       // Same reasoning as a deploy that cannot confirm its cutover: keep both
       // generations serving rather than remove the one the worker is using.
@@ -1346,6 +1418,17 @@ async function rollbackWithClient(
   }
 
   await db.update(applications).set({ updatedAt: new Date() }).where(eq(applications.id, applicationId));
+
+  if (!converged) {
+    return {
+      success: false,
+      message:
+        `The retained version was started, but worker "${worker.name}" has not fetched the routing change, so ` +
+        `traffic may still be on the version you rolled back from. Both are running. Fix the worker's routing ` +
+        `fetch — its Settings tab shows the last attempt — and the rollback takes effect on its next fetch.`,
+      statusCode: 409,
+    };
+  }
 
   return { success: true, message: 'Rolled back to the retained version' };
 }

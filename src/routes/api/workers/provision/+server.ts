@@ -3,7 +3,7 @@ import { db } from '$lib/db';
 import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { executeSSHCommand, testSSHConnection } from '$lib/server/ssh';
-import { generateProvisioningScript } from '$lib/server/provisioning';
+import { generateProvisioningScript, type ProvisioningOptions } from '$lib/server/provisioning';
 import { env } from '$lib/server/env';
 import { randomBytes } from 'crypto';
 import { withLock, LockError } from '$lib/server/locks';
@@ -51,6 +51,86 @@ function parseCertsFromOutput(stdout: string): {
   }
 
   return result;
+}
+
+/** Outcome of the synchronous routing fetch provisioning performs, if it ran. */
+interface RoutingFetchState {
+  code: number;
+  ok: boolean;
+  detail: string;
+}
+
+/**
+ * Read the `ROUTING_FETCH_STATE=` marker the provisioning script emits in http
+ * routing mode. Absent for labels-mode workers and for workers provisioned by
+ * an older script, both of which are "nothing to report" rather than a failure.
+ */
+function parseRoutingFetchState(stdout: string): RoutingFetchState | null {
+  const match = stdout.match(/^ROUTING_FETCH_STATE=(.+)$/m);
+  if (!match?.[1]) return null;
+  try {
+    const parsed = JSON.parse(match[1].trim());
+    return {
+      code: Number(parsed.routing_fetch_code) || 0,
+      ok: Number(parsed.routing_fetch_ok) === 1,
+      detail: typeof parsed.routing_fetch_detail === 'string' ? parsed.routing_fetch_detail : 'unknown',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Say what a failed routing fetch means and what to do about it.
+ *
+ * Each of these needs a different fix and they are indistinguishable from the
+ * control plane, which is the whole reason the worker reports the status.
+ */
+function describeRoutingFetchFailure(state: RoutingFetchState, endpoint: string): string {
+  const prefix = 'Provisioned, but the worker could not fetch its routing configuration';
+
+  if (state.detail === 'transport' || state.code === 0) {
+    return (
+      `${prefix}: it could not reach ${endpoint} at all. Check DNS, egress from the worker, and that the ` +
+      `control plane's TLS certificate is trusted there. Applications stay on their existing routes until ` +
+      `the fetch succeeds — do not redeploy them yet.`
+    );
+  }
+  // Checked before the plain 401 branch: both are 401, and this one is not a
+  // Rudder problem at all — the request never reached it.
+  if (state.detail === 'proxy-auth') {
+    return (
+      `${prefix}: ${endpoint} is behind something that demands its own credentials, which answered ` +
+      `${state.code} before the request reached Rudder. Either exempt the routing endpoint at that proxy — it ` +
+      `carries a per-worker bearer token of its own and needs no other authentication — or set the proxy's ` +
+      `Basic credentials under Control-plane Basic authentication in the worker's Settings tab and provision ` +
+      `again.`
+    );
+  }
+  if (state.code === 401) {
+    return (
+      `${prefix}: the control plane answered 401. The worker's token does not match the stored one. ` +
+      `Re-provision to reissue it, and do not switch the routing mode afterwards — that used to rotate the ` +
+      `token without delivering it. Applications stay on their existing routes until the fetch succeeds.`
+    );
+  }
+  if (state.code === 409) {
+    return (
+      `${prefix}: the control plane answered 409, meaning it has this worker in labels routing mode. ` +
+      `Switch it to control-plane routing and provision again.`
+    );
+  }
+  if (state.detail === 'not-a-document') {
+    return (
+      `${prefix}: ${endpoint} answered ${state.code} with something that is not a routing document — ` +
+      `usually a login redirect or a proxy error page in front of the control plane. The endpoint must be ` +
+      `reachable without authentication other than the bearer token.`
+    );
+  }
+  return (
+    `${prefix}: the control plane answered ${state.code} (${state.detail}). Applications stay on their ` +
+    `existing routes until the fetch succeeds.`
+  );
 }
 
 export const POST: RequestHandler = route(async (event) => {
@@ -162,7 +242,7 @@ export const POST: RequestHandler = route(async (event) => {
           // plane, so provisioning has to plant an endpoint and a credential.
           // Refuse rather than provision a worker that will quietly serve
           // nothing because it cannot reach us.
-          let routingConfig: { endpoint: string; token: string } | undefined;
+          let routingConfig: ProvisioningOptions['routingConfig'];
           if (worker.routingMode === 'http') {
             const unreachable = checkPublicUrlReachable();
             if (unreachable) {
@@ -191,6 +271,11 @@ export const POST: RequestHandler = route(async (event) => {
             routingConfig = {
               endpoint: configEndpointUrl(worker.id, env.PUBLIC_URL),
               token: workerToken,
+              // Credentials for a proxy in front of the control plane, if the
+              // deployment has one. Read fresh from the database on every run,
+              // so changing them in the UI and re-provisioning is all it takes.
+              basicUser: worker.configBasicUser,
+              basicPassword: decryptField(worker.configBasicPassword),
             };
           }
 
@@ -269,6 +354,33 @@ export const POST: RequestHandler = route(async (event) => {
             provisionedAt: new Date(),
             lastSeenAt: new Date(),
           }).where(eq(workers.id, workerId));
+
+          // A failed routing fetch is reported, not buried in the log tail.
+          //
+          // The script warns and carries on by design — the worker keeps serving
+          // whatever it already had, which is the right behaviour — but the
+          // response used to say "Worker provisioned successfully" regardless.
+          // An operator who then redeploys, which is the documented next step,
+          // drops the container labels that were the only thing still routing.
+          const routingFetch = parseRoutingFetchState(result.stdout);
+          if (routingFetch && !routingFetch.ok) {
+            const endpoint = configEndpointUrl(worker.id, env.PUBLIC_URL);
+            await db
+              .update(workers)
+              .set({
+                configFetchStatus: routingFetch.code,
+                configFetchDetail: routingFetch.detail,
+                configFetchAttemptAt: new Date(),
+              })
+              .where(eq(workers.id, workerId));
+
+            return json({
+              success: true,
+              routingFetchFailed: true,
+              message: describeRoutingFetchFailure(routingFetch, endpoint),
+              mtlsEnabled: hasCerts,
+            });
+          }
 
           // Provisioning no longer imports anything. Containers already on the
           // machine are offered for adoption on the worker's page, where a person

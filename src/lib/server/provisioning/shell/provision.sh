@@ -684,18 +684,40 @@ if [ -n "{{CONFIG_ENDPOINT}}" ]; then
 CONFIG_ENDPOINT={{CONFIG_ENDPOINT}}
 CONFIG_TOKEN={{CONFIG_TOKEN}}
 RCEOF
+  # Only written when configured, so clearing the credentials in Rudder and
+  # re-provisioning actually removes them from the worker — the file is
+  # rewritten whole on every run, and the fetch script treats absence as "no
+  # proxy authentication" rather than "empty username".
+  if [ -n "{{CONFIG_BASIC_USER}}" ]; then
+    cat >> /etc/rudder/traefik-config.env <<RCBEOF
+CONFIG_BASIC_USER={{CONFIG_BASIC_USER}}
+CONFIG_BASIC_PASS={{CONFIG_BASIC_PASS}}
+RCBEOF
+  fi
   chmod 600 /etc/rudder/traefik-config.env
   umask 022
 
   systemctl enable --now rudder-traefik-config.timer
   # Fetch once synchronously so the worker has its routes before this script
   # reports success, rather than up to a timer period later.
+  #
+  # The outcome is echoed as a parseable marker, not only as prose. Provisioning
+  # used to print a WARNING here and go on to report "Worker provisioned
+  # successfully" — so a worker that could not fetch a single route looked
+  # identical to one that was fully working, and the operator's next move
+  # (redeploy the applications, dropping their labels) took the applications
+  # off the air with nothing to replace them.
   if /usr/local/bin/rudder-traefik-config.sh; then
     echo "Routing configuration fetched from control plane"
   else
     echo "WARNING: could not fetch routing configuration from {{CONFIG_ENDPOINT}}"
     echo "WARNING: the worker will retry every 10s; applications stay on their"
     echo "WARNING: existing routes until the fetch succeeds."
+  fi
+  if [ -r /var/lib/rudder/routing-fetch.json ]; then
+    echo "ROUTING_FETCH_STATE=$(tr -d '\n' < /var/lib/rudder/routing-fetch.json)"
+  else
+    echo "ROUTING_FETCH_STATE={\"routing_fetch_code\":0,\"routing_fetch_ok\":0,\"routing_fetch_detail\":\"no-state\"}"
   fi
 else
   # labels routing mode: routing comes from container labels via the docker

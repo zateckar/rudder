@@ -9,6 +9,7 @@ import {
   generateOidcSecret,
   isValidCallbackPath,
   isValidOidcSecret,
+  normalizeIssuerUrl,
   oidcCallbackHost,
   oidcCallbackUrl,
   resolveCallbackPath,
@@ -78,7 +79,10 @@ export const PUT: RequestHandler = route(async (event) => {
 
   const updates: Record<string, any> = {
     oidcEnabled: !!oidcEnabled,
-    oidcProviderUrl: oidcProviderUrl || null,
+    // Stored as the issuer. A pasted discovery URL is corrected rather than
+    // refused — it is unambiguous what was meant — and the response carries the
+    // stored value back so the form shows what was actually saved.
+    oidcProviderUrl: normalizeIssuerUrl(oidcProviderUrl),
     oidcClientId: oidcClientId || null,
     // Blank clears it back to the default rather than storing an empty path.
     oidcCallbackPath: oidcCallbackPath || null,

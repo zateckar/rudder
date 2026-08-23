@@ -567,7 +567,10 @@ spec:
             <div class="form-group">
               <label for="oidcProviderURL">Provider URL <span class="required">*</span></label>
               <input type="url" id="oidcProviderURL" placeholder="https://accounts.google.com" bind:value={oidcProviderURL} required />
-              <p class="help-text">OIDC discovery endpoint (e.g. Google, Azure AD, Okta, Keycloak)</p>
+              <p class="help-text">
+                The provider's <strong>issuer</strong> URL, not the discovery document — Traefik appends
+                <code>/.well-known/openid-configuration</code> itself.
+              </p>
             </div>
             <div class="form-group">
               <label for="oidcCallbackURL">Callback Path</label>

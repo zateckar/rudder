@@ -47,6 +47,12 @@
   let collectMsg = $state('');
   let provisioning = $state(false);
   let provisionMsg = $state('');
+  /**
+   * A provisioning run that succeeded but left the worker unable to fetch its
+   * routing. Separate from `provisionMsg`, which renders as button text and has
+   * room for one word — which is why this used to go unsaid entirely.
+   */
+  let provisionWarning = $state('');
   let showProvisionModal = $state(false);
   /**
    * On by default: re-provisioning should patch. Off is for environments with
@@ -98,8 +104,57 @@
   const configFetchedAt = $derived(
     routingFetchCleared ? null : (data.worker.configFetchedAt ?? null),
   );
+  // The worker's last fetch *attempt*, reported over the metrics endpoint.
+  // Without it a failing worker and a never-provisioned one look the same, and
+  // the remedy for each is the opposite of the other's.
+  const fetchStatus = $derived(routingFetchCleared ? null : (data.worker.configFetchStatus ?? null));
+  const fetchDetail = $derived(routingFetchCleared ? null : (data.worker.configFetchDetail ?? null));
+  const fetchAttemptAt = $derived(
+    routingFetchCleared ? null : (data.worker.configFetchAttemptAt ?? null),
+  );
+  const fetchFailing = $derived(fetchStatus != null && fetchDetail !== 'ok' && fetchDetail !== 'no-routes');
+
+  /** What a failed fetch means, in the terms the operator has to act on. */
+  const fetchFailureHint = $derived.by(() => {
+    if (!fetchFailing) return '';
+    if (fetchDetail === 'transport' || fetchStatus === 0) {
+      return 'The worker cannot reach the control plane at all — check DNS, egress and TLS trust from the worker.';
+    }
+    // Before the plain 401: same status, and the request never reached Rudder.
+    if (fetchDetail === 'proxy-auth') {
+      return basicUser
+        ? 'A proxy in front of the control plane rejected the Basic credentials configured below. Check them, then re-provision — the worker only picks up a change at provisioning time.'
+        : 'Something in front of the control plane is demanding its own credentials, so the request never reaches Rudder. Either exempt this endpoint at that proxy, or set its Basic credentials below and re-provision.';
+    }
+    if (fetchStatus === 401) {
+      return 'The worker’s token does not match the stored one. Re-provision to reissue it, and do not switch routing mode afterwards.';
+    }
+    if (fetchStatus === 409) {
+      return 'The control plane has this worker in labels mode. Switch it to control-plane routing, then provision.';
+    }
+    if (fetchStatus === 503) {
+      return 'The control plane could not build this worker’s configuration. Check its logs for a generation failure.';
+    }
+    if (fetchDetail === 'not-a-document') {
+      return 'The endpoint answered with something that is not a routing document — usually a login redirect or a proxy error page in front of the control plane.';
+    }
+    if (fetchDetail === 'no-token') {
+      return 'The worker has no config token. Re-provision to issue one.';
+    }
+    return 'Applications stay on their existing routes until the fetch succeeds.';
+  });
   let routingSaving = $state(false);
   let routingMsg = $state('');
+
+  // ── Control-plane Basic auth ──────────────────────────────────────
+  // For deployments that publish Rudder behind a proxy of their own. Loaded
+  // with the rest of the Settings tab rather than seeded from the page payload:
+  // the password never leaves the server, only a flag saying one is stored.
+  let basicUser = $state('');
+  let basicPassword = $state('');
+  let basicPasswordSet = $state(false);
+  let basicSaving = $state(false);
+  let basicMsg = $state('');
 
   // ── Adoption ──────────────────────────────────────────────────────────────
   //
@@ -467,7 +522,7 @@
     if (tab === 'networks' && !networksLoaded && !networksLoading) loadNetworks();
     if (tab === 'traefik' && !traefikLoading) loadTraefik();
     if (tab === 'crowdsec' && !crowdsecLoading) loadCrowdsec();
-    if (tab === 'settings' && !oidcLoaded) loadOidcSettings();
+    if (tab === 'settings' && !oidcLoaded) { loadOidcSettings(); loadConfigAuth(); }
     if (tab === 'terminal') {
       if (terminalSshKey) {
         initTerminal();
@@ -505,6 +560,7 @@
     showProvisionModal = false;
     provisioning = true;
     provisionMsg = '';
+    provisionWarning = '';
     try {
       const res = await fetch('/api/workers/provision', {
         method: 'POST',
@@ -513,7 +569,15 @@
       });
       const body = await res.json();
       if (body.success) {
-        provisionMsg = 'Provisioned!';
+        // Provisioning can succeed while the worker still cannot fetch a single
+        // route. Saying only "Provisioned!" invites the next step — redeploying
+        // the applications — which drops the labels that are still routing them.
+        if (body.routingFetchFailed) {
+          provisionMsg = 'Provisioned ⚠';
+          provisionWarning = body.message;
+        } else {
+          provisionMsg = 'Provisioned!';
+        }
         setTimeout(() => invalidateAll(), 1500);
       } else {
         provisionMsg = body.error || 'Failed';
@@ -588,13 +652,21 @@
       oidcClientSecretSet = data.oidcClientSecretSet;
       oidcEncryptionKeySet = data.oidcEncryptionKeySet;
       oidcAppliedAt = data.oidcAppliedAt ?? null;
+      // The server stores the issuer, so a pasted discovery URL comes back
+      // shortened. Show what was saved rather than what was typed.
+      const providerUrlBefore = oidcProviderUrl;
+      oidcProviderUrl = data.oidcProviderUrl ?? oidcProviderUrl;
+      const providerUrlTrimmed = providerUrlBefore !== oidcProviderUrl;
       oidcCallbackPath = data.oidcCallbackPath ?? oidcCallbackPath;
       oidcCallbackHost = data.callbackHost ?? oidcCallbackHost;
       oidcCallbackUrl = data.callbackUrl ?? oidcCallbackUrl;
       oidcClientSecret = '';
-      oidcSaveMsg = routingMode === 'http'
+      const trimmedNote = providerUrlTrimmed
+        ? 'Provider URL shortened to the issuer — the plugin appends the discovery path itself. '
+        : '';
+      oidcSaveMsg = trimmedNote + (routingMode === 'http'
         ? 'Saved. The worker picks this up on its next fetch — within about ten seconds.'
-        : 'Saved. Now click “Apply to Traefik” — deployments stay blocked until the config reaches the worker.';
+        : 'Saved. Now click “Apply to Traefik” — deployments stay blocked until the config reaches the worker.');
     } catch (e: any) {
       oidcSaveMsg = 'Error: ' + e.message;
     } finally {
@@ -641,6 +713,63 @@
       routingMsg = 'Error: ' + e.message;
     } finally {
       routingSaving = false;
+    }
+  }
+
+  async function loadConfigAuth() {
+    try {
+      const res = await fetch(`/api/workers/${workerId}/config-auth`);
+      if (!res.ok) return;
+      const body = await res.json();
+      basicUser = body.configBasicUser ?? '';
+      basicPasswordSet = body.configBasicPasswordSet ?? false;
+    } catch { /* ignore */ }
+  }
+
+  async function saveConfigAuth() {
+    basicSaving = true;
+    basicMsg = '';
+    try {
+      const res = await fetch(`/api/workers/${workerId}/config-auth`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ configBasicUser: basicUser, configBasicPassword: basicPassword }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || 'Save failed');
+      basicUser = body.configBasicUser ?? '';
+      basicPasswordSet = body.configBasicPasswordSet ?? false;
+      basicPassword = '';
+      basicMsg = body.message || 'Saved.';
+    } catch (e: any) {
+      basicMsg = 'Error: ' + e.message;
+    } finally {
+      basicSaving = false;
+    }
+  }
+
+  async function clearConfigAuth() {
+    const ok = await confirmAction({
+      title: 'Remove control-plane credentials?',
+      body: 'The worker keeps presenting the old ones until it is re-provisioned.',
+      confirmLabel: 'Remove',
+      danger: true,
+    });
+    if (!ok) return;
+    basicSaving = true;
+    basicMsg = '';
+    try {
+      const res = await fetch(`/api/workers/${workerId}/config-auth`, { method: 'DELETE' });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || 'Delete failed');
+      basicUser = '';
+      basicPassword = '';
+      basicPasswordSet = false;
+      basicMsg = body.message || 'Removed.';
+    } catch (e: any) {
+      basicMsg = 'Error: ' + e.message;
+    } finally {
+      basicSaving = false;
     }
   }
 
@@ -1034,6 +1163,14 @@
       <button class="btn-tiny btn-delete" onclick={deleteWorker} title="Delete this worker">Delete</button>
     {/snippet}
   </PageHeader>
+
+  {#if provisionWarning}
+    <div class="provision-warning" role="alert">
+      <strong>Routing configuration was not fetched.</strong>
+      <p>{provisionWarning}</p>
+      <button class="btn-tiny" onclick={() => provisionWarning = ''}>Dismiss</button>
+    </div>
+  {/if}
 
   <!-- Quick stats -->
   <div class="stat-row">
@@ -1889,11 +2026,25 @@
             outage still comes back serving.
           </p>
           {#if routingMode === 'http'}
-            <p class="routing-status" class:is-stale={!configFetchedAt || Date.now() - new Date(configFetchedAt).getTime() > 60000}>
-              {#if configFetchedAt}
+            <p class="routing-status"
+               class:is-stale={fetchFailing || !configFetchedAt || Date.now() - new Date(configFetchedAt).getTime() > 60000}>
+              {#if fetchFailing}
+                {#if fetchStatus === 0}
+                  Fetch failing — the worker cannot reach the control plane{fetchAttemptAt ? ` (last tried ${new Date(fetchAttemptAt).toLocaleString()})` : ''}.
+                {:else}
+                  Fetch failing — HTTP {fetchStatus}{fetchAttemptAt ? ` as of ${new Date(fetchAttemptAt).toLocaleString()}` : ''}.
+                {/if}
+                {fetchFailureHint}
+                {#if configFetchedAt}
+                  Last successful fetch {new Date(configFetchedAt).toLocaleString()}.
+                {:else}
+                  It has never fetched successfully, so its applications are still served by whatever routed them before the switch.
+                {/if}
+              {:else if configFetchedAt}
                 Last fetched {new Date(configFetchedAt).toLocaleString()}
               {:else}
-                Never fetched — re-provision the worker to install the fetch timer.
+                No fetch reported yet. If the worker has not been provisioned since the switch, re-provision it to
+                install the fetch timer; otherwise it reports its next attempt within a metrics cycle.
               {/if}
             </p>
           {/if}
@@ -1922,6 +2073,47 @@
       {#if routingMsg}
         <p class="settings-msg" class:is-error={routingMsg.startsWith('Error')}>{routingMsg}</p>
       {/if}
+
+      <div class="subsection">
+        <h4>Control-plane Basic authentication</h4>
+        <p class="oidc-intro">
+          Only needed when Rudder is published behind a proxy that demands its own HTTP Basic credentials. That
+          proxy answers this worker's fetch with <code class="mono-inline">401</code> before Rudder sees it, so the
+          worker's own token never gets checked and re-provisioning cannot help. Leave blank if there is no such
+          proxy — exempting <code class="mono-inline">/api/workers/*/traefik-config</code> at the proxy is the
+          better fix where you control it, because it keeps one credential in play instead of two.
+        </p>
+
+        <div class="form-row-2">
+          <div class="form-field">
+            <label for="basicUser">Username</label>
+            <input type="text" id="basicUser" autocomplete="off"
+              placeholder="none" bind:value={basicUser} />
+          </div>
+          <div class="form-field">
+            <label for="basicPassword">Password</label>
+            <input type="password" id="basicPassword" autocomplete="new-password"
+              placeholder={basicPasswordSet ? '••••• (saved — paste to replace)' : 'proxy password'}
+              bind:value={basicPassword} />
+            {#if basicPasswordSet && !basicPassword}
+              <p class="field-hint">A password is saved. Leave blank to keep it.</p>
+            {/if}
+          </div>
+        </div>
+
+        <div class="form-actions">
+          <button class="btn btn-primary" onclick={saveConfigAuth} disabled={basicSaving}>
+            {basicSaving ? 'Saving…' : 'Save credentials'}
+          </button>
+          {#if basicUser || basicPasswordSet}
+            <button class="btn btn-outline-danger" onclick={clearConfigAuth} disabled={basicSaving}>Remove</button>
+          {/if}
+        </div>
+
+        {#if basicMsg}
+          <p class="settings-msg" class:is-error={basicMsg.startsWith('Error')}>{basicMsg}</p>
+        {/if}
+      </div>
     </div>
 
     <div class="section">
@@ -1997,7 +2189,12 @@
               <input type="url" id="oidcProviderUrl"
                 placeholder="https://accounts.google.com"
                 bind:value={oidcProviderUrl} />
-              <p class="field-hint">OIDC discovery endpoint (Google, Azure AD, Okta, Keycloak, etc.)</p>
+              <p class="field-hint">
+                The provider's <strong>issuer</strong> URL — not the discovery document. Traefik appends
+                <code class="mono-inline">/.well-known/openid-configuration</code> itself, so a URL ending in that
+                path is shortened on save. For Keycloak this is
+                <code class="mono-inline">https://host/realms/&lt;realm&gt;</code>.
+              </p>
             </div>
 
             <div class="form-row-2">
@@ -2617,8 +2814,20 @@
   .routing-mode h4 { margin: 0 0 8px; font-size: 13px; color: var(--text-primary); display: flex; align-items: center; gap: 8px; }
   .routing-mode p { margin: 0 0 6px; }
   .routing-badge { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 10px; background: var(--accent, #4a9eff); color: #fff; font-weight: 600; }
-  .routing-status { font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); }
+  .routing-status { font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); line-height: 1.5; }
   .routing-status.is-stale { color: var(--warning, #e0a030); }
+  .provision-warning {
+    margin: 12px 0;
+    padding: 12px 14px;
+    border-radius: 6px;
+    background: rgba(224, 160, 48, 0.08);
+    border: 1px solid rgba(224, 160, 48, 0.28);
+    color: var(--text-primary);
+    font-size: 0.87rem;
+  }
+  .provision-warning p { margin: 6px 0 10px; line-height: 1.5; }
+  .subsection { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border, rgba(255,255,255,0.08)); }
+  .subsection h4 { margin: 0 0 6px; font-size: 0.95rem; }
   .mono-inline { font-family: var(--font-mono); font-size: 12px; background: var(--bg-overlay, rgba(0,0,0,0.2)); padding: 2px 6px; border-radius: 4px; display: inline-block; margin-top: 4px; word-break: break-all; }
   .req { color: var(--red, #f87171); }
   .form-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding-top: 4px; }

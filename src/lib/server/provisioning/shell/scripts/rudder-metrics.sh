@@ -47,7 +47,24 @@ if [ -r /var/lib/rudder/updates.json ]; then
   esac
 fi
 
+# Routing-fetch state, produced by rudder-traefik-config.sh on every run.
+#
+# This is the only way the control plane learns that a worker is failing to
+# fetch: the config endpoint cannot report its own 401s, and a worker that
+# cannot authenticate to it has no other channel. Carried here because the
+# metrics endpoint authenticates the other way round — Rudder presents a client
+# certificate to the worker — so it keeps working when the config token does
+# not. Absent on labels-mode workers and on any worker whose fetch has never
+# run, which stays distinct from "fetched and failed".
+routing_state=""
+if [ -r /var/lib/rudder/routing-fetch.json ]; then
+  routing_cached=$(tr -d '{}\n' < /var/lib/rudder/routing-fetch.json)
+  case "$routing_cached" in
+    *routing_fetch_code*) routing_state=",${routing_cached}" ;;
+  esac
+fi
+
 cat > /tmp/rudder-metrics.json << JSONEOF
-{"cpu_percent":${cpu_percent:-0},"cpu_cores":${cpu_cores:-1},"mem_total":${mem_total:-0},"mem_free":${mem_free:-0},"mem_available":${mem_available:-0},"mem_used":${mem_used:-0},"mem_percent":${mem_percent:-0},"disk_total":${disk_total:-0},"disk_used":${disk_used:-0},"disk_available":${disk_available:-0},"disk_percent":${disk_percent:-0},"net_rx_bytes":${net_rx:-0},"net_tx_bytes":${net_tx:-0}${patch_state}}
+{"cpu_percent":${cpu_percent:-0},"cpu_cores":${cpu_cores:-1},"mem_total":${mem_total:-0},"mem_free":${mem_free:-0},"mem_available":${mem_available:-0},"mem_used":${mem_used:-0},"mem_percent":${mem_percent:-0},"disk_total":${disk_total:-0},"disk_used":${disk_used:-0},"disk_available":${disk_available:-0},"disk_percent":${disk_percent:-0},"net_rx_bytes":${net_rx:-0},"net_tx_bytes":${net_tx:-0}${patch_state}${routing_state}}
 JSONEOF
 chmod 644 /tmp/rudder-metrics.json

@@ -366,6 +366,23 @@ async function persistSweep(sweep: WorkerSweep, now: Date): Promise<void> {
         updatesPending = httpStats.updatesPending ?? null;
         updatesSecurity = httpStats.updatesSecurity ?? null;
         rebootRequired = httpStats.rebootRequired ?? null;
+
+        // Current state, not a time series: what matters is whether this worker
+        // is fetching right now and why not. Written only when the worker
+        // actually reported it, so a labels-mode worker keeps nulls rather than
+        // having a stale http-mode verdict blanked or preserved by accident.
+        if (httpStats.routingFetchCode != null) {
+          await db
+            .update(workers)
+            .set({
+              configFetchStatus: httpStats.routingFetchCode,
+              configFetchDetail: httpStats.routingFetchDetail ?? null,
+              configFetchAttemptAt: httpStats.routingFetchAt
+                ? new Date(httpStats.routingFetchAt * 1000)
+                : null,
+            })
+            .where(eq(workers.id, worker.id));
+        }
       }
     } catch (e) {
       console.warn(`[metrics] HTTP host stats failed for ${worker.name}:`, (e as any).message || e);

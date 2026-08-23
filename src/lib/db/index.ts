@@ -528,6 +528,11 @@ for (const col of [
   `ALTER TABLE containers ADD COLUMN spec_hash TEXT;`,
   `ALTER TABLE applications ADD COLUMN health_timeout_seconds INTEGER;`,
   `ALTER TABLE applications ADD COLUMN retain_previous_minutes INTEGER NOT NULL DEFAULT 0;`,
+  `ALTER TABLE workers ADD COLUMN config_fetch_status INTEGER;`,
+  `ALTER TABLE workers ADD COLUMN config_fetch_detail TEXT;`,
+  `ALTER TABLE workers ADD COLUMN config_fetch_attempt_at INTEGER;`,
+  `ALTER TABLE workers ADD COLUMN config_basic_user TEXT;`,
+  `ALTER TABLE workers ADD COLUMN config_basic_password TEXT;`,
 ]) {
   try { sqlite.run(col); } catch { /* Column already exists */ }
 }
@@ -698,16 +703,18 @@ import {
 /**
  * Worker columns safe to serialise to the browser.
  * Excludes: podmanCaCert, podmanClientCert, podmanClientKey,
- *           crowdsecBouncerKey, oidcClientSecret, oidcEncryptionKey, configToken.
+ *           crowdsecBouncerKey, oidcClientSecret, oidcEncryptionKey,
+ *           configToken, configBasicPassword.
  *
  * routingMode and configFetchedAt are deliberately included — the worker page
- * shows both.
+ * shows both. So is `configBasicUser`: a username is not a credential and the
+ * settings form has to show which one is configured. Only the password leaves.
  */
 export const safeWorkerColumns = (() => {
   const {
     podmanCaCert: _a, podmanClientCert: _b, podmanClientKey: _c,
     crowdsecBouncerKey: _d, oidcClientSecret: _e, oidcEncryptionKey: _f,
-    configToken: _g,
+    configToken: _g, configBasicPassword: _h,
     ...cols
   } = getTableColumns(_workersTable);
   return cols;

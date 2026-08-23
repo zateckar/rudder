@@ -107,6 +107,11 @@ export async function getHostStatsHttp(worker: MetricsWorker): Promise<HostStats
       updatesPending: stats.updates_pending ?? null,
       updatesSecurity: stats.updates_security ?? null,
       rebootRequired: stats.reboot_required ?? null,
+      // Absent unless the worker's routing fetch has run at least once.
+      routingFetchCode: stats.routing_fetch_code ?? null,
+      routingFetchOk: stats.routing_fetch_ok ?? null,
+      routingFetchAt: stats.routing_fetch_at ?? null,
+      routingFetchDetail: stats.routing_fetch_detail ?? null,
     };
   } catch (e: any) {
     // Suppress expected startup errors (404, 502) - these are normal on newly provisioned workers

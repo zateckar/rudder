@@ -138,6 +138,15 @@ describe('generateTraefikLabelsForApp — per-app OIDC plugin config', () => {
     });
   }
 
+  test('reduces a discovery URL to the issuer, as the worker-level config does', () => {
+    // Per-app OIDC is stored as an opaque JSON blob rather than a column, so
+    // this render is the only place the value can be corrected.
+    const labels = oidcLabels({
+      providerURL: 'https://idp.example.com/realms/x/.well-known/openid-configuration',
+    });
+    expect(labels[`${prefix}.Provider.Url`]).toBe('https://idp.example.com/realms/x');
+  });
+
   test('uses the traefik-oidc-auth key path and PascalCase options', () => {
     const labels = oidcLabels();
     expect(labels[`${prefix}.Provider.Url`]).toBe('https://idp.example.com');
@@ -269,6 +278,24 @@ describe('renderGlobalOidcConfig', () => {
     expect(String(mw.Secret)).toHaveLength(32);
   });
 
+  test('reduces a stored discovery URL to the issuer', () => {
+    // Rows written before the field was validated still hold discovery URLs,
+    // and the plugin appends the path itself — so shipping one verbatim gives
+    // the provider a doubled path and a 404 on the first login attempt. Fixed
+    // here as well as on save so a re-provision repairs an existing worker.
+    const doc = Bun.YAML.parse(
+      renderGlobalOidcConfig('apps.example.com', {
+        providerURL: 'https://idp.example.com/realms/x/.well-known/openid-configuration',
+        clientID: 'rudder-worker',
+        clientSecret: 's3cr3t',
+        secret: 'a'.repeat(32),
+      }),
+    ) as any;
+    expect(doc.http.middlewares['global-oidc'].plugin['traefik-oidc-auth'].Provider.Url).toBe(
+      'https://idp.example.com/realms/x',
+    );
+  });
+
   test('booleans deserialise as booleans, not strings', () => {
     expect(typeof mw.Provider.UsePkce).toBe('boolean');
     expect(typeof mw.SessionCookie.Secure).toBe('boolean');
@@ -367,6 +394,52 @@ describe('generateProvisioningScript', () => {
     test('is kept out of a world-readable file', () => {
       const labels = generateProvisioningScript('worker-1', { workerToken: 'deadbeef' });
       expect(labels).toContain('chmod 600 /etc/rudder/worker.env');
+    });
+  });
+
+  describe('control-plane Basic credentials', () => {
+    const withBasic = (basicUser?: string | null, basicPassword?: string | null) =>
+      generateProvisioningScript('worker-1', {
+        workerToken: 'deadbeef',
+        routingConfig: {
+          endpoint: 'https://rudder.example.com/x',
+          token: 'deadbeef',
+          basicUser,
+          basicPassword,
+        },
+      });
+
+    test('are written to the fetch environment when configured', () => {
+      const script = withBasic('proxyuser', 'proxypass');
+      expect(script).toContain("CONFIG_BASIC_USER='proxyuser'");
+      expect(script).toContain("CONFIG_BASIC_PASS='proxypass'");
+    });
+
+    test('are shell-quoted, because the file they land in is sourced', () => {
+      // Unquoted, a password like this leaves an unmatched double quote in
+      // traefik-config.env; `. "$ENV_FILE"` then fails and the worker stops
+      // fetching entirely, for a reason that shows up nowhere near the field
+      // it was typed into.
+      const script = withBasic('user2', 'pa"ss\\word');
+      expect(script).toContain(`CONFIG_BASIC_PASS='pa"ss\\word'`);
+    });
+
+    test('a single quote in the password is escaped, not terminated', () => {
+      const script = withBasic('user2', "it's");
+      expect(script).toContain(`CONFIG_BASIC_PASS='it'\\''s'`);
+    });
+
+    test('are absent entirely when not configured', () => {
+      // Not "written as empty": the fetch script branches on the username being
+      // set, and an empty one would send `Authorization: Basic :` instead of the
+      // bearer token — turning a working worker into a 401.
+      const script = withBasic(null, null);
+      expect(script).not.toContain('CONFIG_BASIC_USER=proxyuser');
+      expect(script).toContain('if [ -n "" ]; then');
+    });
+
+    test('land in the same 600 file as the token', () => {
+      expect(withBasic('u', 'p')).toContain('chmod 600 /etc/rudder/traefik-config.env');
     });
   });
 

@@ -34,6 +34,20 @@ export interface HostStats {
   updatesPending?: number | null;
   updatesSecurity?: number | null;
   rebootRequired?: number | null;
+  /**
+   * Outcome of the worker's last routing-configuration fetch, for workers in
+   * `http` routing mode. Null on labels-mode workers and on any worker whose
+   * fetch timer has never run.
+   *
+   * `routingFetchCode` is the HTTP status the worker saw, or 0 when it could not
+   * reach the control plane at all. Carried over this endpoint rather than the
+   * config endpoint because a worker whose token is rejected cannot report
+   * through the thing that is rejecting it.
+   */
+  routingFetchCode?: number | null;
+  routingFetchOk?: number | null;
+  routingFetchAt?: number | null;
+  routingFetchDetail?: string | null;
 }
 
 /**

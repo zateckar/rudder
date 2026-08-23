@@ -42,9 +42,11 @@ export const load = async ({ params, locals }: { params: { id: string }; locals:
     ? Math.round(pings.filter(p => p.latencyMs != null).reduce((s, p) => s + (p.latencyMs || 0), 0) / pings.filter(p => p.latencyMs != null).length)
     : null;
 
-  // configToken is a bearer credential for this worker's routing configuration —
-  // never serialise it to the browser.
-  const { podmanCaCert: _a, podmanClientCert: _b, podmanClientKey: _c, crowdsecBouncerKey: _d, oidcClientSecret: _e, oidcEncryptionKey: _f, configToken: _g, ...safeWorker } = worker;
+  // configToken is a bearer credential for this worker's routing configuration,
+  // and configBasicPassword belongs to a proxy in front of the control plane —
+  // never serialise either to the browser. The settings form needs to know only
+  // whether a password exists, which is what `configBasicPasswordSet` says.
+  const { podmanCaCert: _a, podmanClientCert: _b, podmanClientKey: _c, crowdsecBouncerKey: _d, oidcClientSecret: _e, oidcEncryptionKey: _f, configToken: _g, configBasicPassword: _h, ...safeWorker } = worker;
   // For the adoption panel: the operator picks which team owns an adopted
   // container. Rudder no longer creates a team from a container label.
   const allTeams = await db.select({ id: teams.id, name: teams.name }).from(teams).all();
