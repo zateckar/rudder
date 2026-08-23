@@ -14,7 +14,14 @@
  * provider's transformation, done here instead of there. A test runs both over
  * one fixture and compares.
  */
-import { generateTraefikLabelsForApp, renderGlobalOidcConfig, type AppMiddlewareOptions } from './provisioning';
+import {
+  generateTraefikLabelsForApp,
+  renderGlobalOidcConfig,
+  usableTokenHeaders,
+  usesGlobalOidc,
+  type AppMiddlewareOptions,
+  type AppTokenForwarding,
+} from './provisioning';
 import { normalizeOidcSecret } from './oidc';
 import { domainFormatError } from './domains';
 import { decryptField } from './encryption';
@@ -216,6 +223,18 @@ export function buildMiddlewareOpts(app: any): AppMiddlewareOptions | undefined 
     hasOpts = true;
   }
 
+  // Not gated on authType: whether the worker's middleware is on this router at
+  // all is `usesGlobalOidc`'s decision, and duplicating it here is how the
+  // reference and the definition would come to disagree.
+  const tokenHeaders = usableTokenHeaders({
+    idTokenHeader: app.oidcIdTokenHeader,
+    accessTokenHeader: app.oidcAccessTokenHeader,
+  });
+  if (tokenHeaders) {
+    opts.tokenHeaders = tokenHeaders;
+    hasOpts = true;
+  }
+
   // Extract health check path for Traefik routing
   if (app.healthcheck) {
     try {
@@ -240,6 +259,29 @@ export interface RouteGroup {
   ports: number[];
   /** Compose services carry no per-app middleware, matching the deploy path. */
   middlewareOpts?: AppMiddlewareOptions;
+}
+
+/**
+ * The applications on a worker that need their own copy of the OIDC middleware.
+ *
+ * Derived from the same `RouteGroup`s the routers are generated from, and
+ * filtered by the same `usesGlobalOidc` those routers use, so the set of
+ * middlewares defined is exactly the set referenced. An application that is
+ * public, or that runs its own per-app OIDC, asks for nothing here even if it
+ * has header names saved — there is no worker session for it to describe.
+ */
+export function tokenForwardingApps(
+  groups: readonly RouteGroup[],
+  globalOidcEnabled: boolean,
+): AppTokenForwarding[] {
+  const apps: AppTokenForwarding[] = [];
+  for (const group of groups) {
+    if (!usesGlobalOidc(globalOidcEnabled, group.middlewareOpts)) continue;
+    const tokens = usableTokenHeaders(group.middlewareOpts?.tokenHeaders);
+    if (!tokens) continue;
+    apps.push({ routerBase: group.routerBase, ...tokens });
+  }
+  return apps;
 }
 
 /** Merge `source` into `target`, later definitions winning per key. */
@@ -320,19 +362,22 @@ export function assembleWorkerConfig(
  * with no routes still has its protective middlewares. Worker OIDC *is*
  * included, so changing it no longer needs a manual push.
  */
-export async function buildWorkerDynamicConfig(workerId: string): Promise<ServedConfig> {
+/**
+ * The routed groups on a worker, in a stable order.
+ *
+ * Split out of `buildWorkerDynamicConfig` because the SSH push that maintains
+ * `global-oidc.yml` on a `labels`-mode worker needs the same list, and reaching
+ * it through a second query would be a second definition of "which applications
+ * are routed here" to keep in step.
+ */
+export async function routeGroupsForWorker(workerId: string): Promise<RouteGroup[]> {
   // Imported lazily so the pure generators above stay usable from tests and
   // from modules that must not open the database.
-  const [{ db }, { applications, containers, workers }, { and, eq }, { decryptField, encryptField }] =
-    await Promise.all([
-      import('$lib/db'),
-      import('$lib/db/schema'),
-      import('drizzle-orm'),
-      import('./encryption'),
-    ]);
-
-  const worker = await db.select().from(workers).where(eq(workers.id, workerId)).get();
-  if (!worker) throw new Error(`Worker ${workerId} not found`);
+  const [{ db }, { applications, containers }, { and, eq }] = await Promise.all([
+    import('$lib/db'),
+    import('$lib/db/schema'),
+    import('drizzle-orm'),
+  ]);
 
   // `state = 'active'` is what makes blue/green work: generation N+1 is created
   // as `pending` and is therefore invisible here until the deploy has verified
@@ -352,7 +397,7 @@ export async function buildWorkerDynamicConfig(workerId: string): Promise<Served
     )
     .all();
 
-  const byRouter = new Map<string, RouteGroup & { app: any }>();
+  const byRouter = new Map<string, RouteGroup>();
   for (const { app, container } of rows) {
     if (!container.routerName || !container.domain || !container.exposedPort) continue;
     const existing = byRouter.get(container.routerName);
@@ -361,7 +406,6 @@ export async function buildWorkerDynamicConfig(workerId: string): Promise<Served
       continue;
     }
     byRouter.set(container.routerName, {
-      app,
       routerBase: container.routerName,
       domain: container.domain,
       ports: [container.exposedPort],
@@ -377,12 +421,27 @@ export async function buildWorkerDynamicConfig(workerId: string): Promise<Served
     });
   }
 
+  return [...byRouter.values()].sort((a, b) => a.routerBase.localeCompare(b.routerBase));
+}
+
+export async function buildWorkerDynamicConfig(workerId: string): Promise<ServedConfig> {
+  const [{ db }, { workers }, { eq }, { decryptField, encryptField }] = await Promise.all([
+    import('$lib/db'),
+    import('$lib/db/schema'),
+    import('drizzle-orm'),
+    import('./encryption'),
+  ]);
+
+  const worker = await db.select().from(workers).where(eq(workers.id, workerId)).get();
+  if (!worker) throw new Error(`Worker ${workerId} not found`);
+
+  const groups = await routeGroupsForWorker(workerId);
+
   const globalOidcConfigured = !!(
     worker.oidcEnabled && worker.oidcProviderUrl && worker.oidcClientId &&
     worker.oidcClientSecret && worker.baseDomain
   );
 
-  const groups = [...byRouter.values()].sort((a, b) => a.routerBase.localeCompare(b.routerBase));
   let globalOidcMiddleware: DynamicConfig | null = null;
 
   // Worker OIDC travels with the routes rather than being pushed over SSH, so
@@ -399,13 +458,19 @@ export async function buildWorkerDynamicConfig(workerId: string): Promise<Served
     }
     if (clientSecret) {
       globalOidcMiddleware = Bun.YAML.parse(
-        renderGlobalOidcConfig(worker.baseDomain!, {
-          providerURL: worker.oidcProviderUrl!,
-          clientID: worker.oidcClientId!,
-          clientSecret,
-          secret,
-          callbackPath: worker.oidcCallbackPath,
-        }),
+        renderGlobalOidcConfig(
+          worker.baseDomain!,
+          {
+            providerURL: worker.oidcProviderUrl!,
+            clientID: worker.oidcClientId!,
+            clientSecret,
+            secret,
+            callbackPath: worker.oidcCallbackPath,
+          },
+          // The per-application copies travel with the routers that reference
+          // them, which is why token forwarding needs no push in this mode.
+          tokenForwardingApps(groups, globalOidcConfigured),
+        ),
       ) as DynamicConfig;
     }
   }

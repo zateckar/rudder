@@ -71,6 +71,10 @@
   let oidcCallbackURL = $state('/oidc/callback');
   let oidcAllowedUsers = $state('');
   let oidcExcludedURLs = $state('');
+  // Worker-level OIDC only: names of the headers the shared middleware should
+  // deliver this application's tokens under. Empty means "do not send it".
+  let oidcIdTokenHeader = $state('');
+  let oidcAccessTokenHeader = $state('');
 
   let authConfigJson = $derived(authType === 'oidc' ? JSON.stringify({
     providerURL: oidcProviderURL,
@@ -123,6 +127,8 @@
       rateLimitAvg = app.rateLimitAvg ? String(app.rateLimitAvg) : '';
       rateLimitBurst = app.rateLimitBurst ? String(app.rateLimitBurst) : '';
       authType = app.authType || 'global';
+      oidcIdTokenHeader = app.oidcIdTokenHeader ?? '';
+      oidcAccessTokenHeader = app.oidcAccessTokenHeader ?? '';
       if (app.authConfig) {
         try {
           const cfg = JSON.parse(app.authConfig);
@@ -430,6 +436,8 @@
       <input type="hidden" name="rateLimitBurst" value={rateLimitBurst} />
       <input type="hidden" name="authType" value={authType} />
       <input type="hidden" name="authConfig" value={authConfigJson} />
+      <input type="hidden" name="oidcIdTokenHeader" value={oidcIdTokenHeader} />
+      <input type="hidden" name="oidcAccessTokenHeader" value={oidcAccessTokenHeader} />
 
       <h3 class="subsection-title">Rate Limiting</h3>
       <div class="form-row">
@@ -503,6 +511,38 @@
             <p class="help-text">Comma-separated paths that should not require authentication</p>
           </div>
         </div>
+      {/if}
+
+      {#if authType === 'global'}
+        <h3 class="subsection-title">Token Forwarding</h3>
+        <p class="help-text">
+          Every signed-in request already arrives with
+          <code>X-Forwarded-User</code>, <code>X-Forwarded-Email</code>,
+          <code>X-Forwarded-Preferred-Username</code> and <code>X-Forwarded-Groups</code>,
+          which is enough for applications that support proxy or trusted-header login.
+          Name a header below only if this application verifies the JWT itself or needs the
+          access token to call an API — the tokens are a kilobyte or two on every request.
+        </p>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="oidcIdTokenHeader">ID Token Header</label>
+            <input type="text" id="oidcIdTokenHeader" placeholder="e.g. X-Auth-Request-Id-Token (empty = not sent)" bind:value={oidcIdTokenHeader} />
+            <p class="help-text">
+              The signed JWT identifying the user. Use <code>Authorization</code> to have it sent as
+              <code>Bearer &lt;token&gt;</code> — but not if this application uses that header for its own API tokens.
+            </p>
+          </div>
+          <div class="form-group">
+            <label for="oidcAccessTokenHeader">Access Token Header</label>
+            <input type="text" id="oidcAccessTokenHeader" placeholder="e.g. X-Auth-Request-Access-Token (empty = not sent)" bind:value={oidcAccessTokenHeader} />
+            <p class="help-text">The token for calling APIs on the user's behalf. Sent verbatim, with no scheme prefix.</p>
+          </div>
+        </div>
+        <p class="help-text">
+          Verify the JWT against your provider's JWKS — do not trust it unchecked. Every application on this
+          worker shares one identity-provider client, so a token minted for one is valid for all of them:
+          the <code>aud</code> claim proves the worker, not this application.
+        </p>
       {/if}
     </div>
 

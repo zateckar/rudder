@@ -161,6 +161,18 @@ export const applications = sqliteTable('applications', {
   rateLimitBurst: integer('rate_limit_burst'),
   authType: text('auth_type', { enum: ['none', 'oidc', 'global'] }).notNull().default('global'),
   authConfig: text('auth_config'),
+  /**
+   * Header names the worker-level OIDC middleware delivers this application's
+   * OAuth tokens under. Null means the token is not forwarded — the name is the
+   * switch, because a token is only useful to an application that already knows
+   * what to look for.
+   *
+   * Not secret, unlike `authConfig`: these are names, not credentials. The
+   * tokens themselves are minted per session by the identity provider and never
+   * stored here.
+   */
+  oidcIdTokenHeader: text('oidc_id_token_header'),
+  oidcAccessTokenHeader: text('oidc_access_token_header'),
   replicas: integer('replicas').notNull().default(1),
   gitRepo: text('git_repo'),
   gitBranch: text('git_branch'),

@@ -5,6 +5,13 @@ import { eq } from 'drizzle-orm';
 import type { RequestHandler } from './$types';
 import { requireTeam, route } from '$lib/server/auth';
 import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
+import { normalizeTokenHeader, tokenHeaderNameError } from '$lib/server/oidc';
+
+/** A token header name from an imported file, or null if it is unusable. */
+function importedTokenHeader(raw: unknown): string | null {
+  const name = normalizeTokenHeader(typeof raw === 'string' ? raw : null);
+  return name && !tokenHeaderNameError(name) ? name : null;
+}
 
 export const POST: RequestHandler = route(async (event) => {
   const body = await event.request.json();
@@ -73,6 +80,11 @@ export const POST: RequestHandler = route(async (event) => {
     // Default to the worker's global auth rather than 'none': an imported
     // config should never silently end up less protected than a new app.
     authType: config.authType === 'none' || config.authType === 'oidc' ? config.authType : 'global',
+    // Dropped rather than rejected if unusable: an imported file naming a header
+    // this installation will not send is worth an application without token
+    // forwarding, not a failed import.
+    oidcIdTokenHeader: importedTokenHeader(config.oidcIdTokenHeader),
+    oidcAccessTokenHeader: importedTokenHeader(config.oidcAccessTokenHeader),
     healthcheck: config.healthcheck || null,
     replicas: config.replicas || 1,
     gitRepo: config.gitRepo || null,

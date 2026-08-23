@@ -105,6 +105,8 @@ sqlite.run(`
     rate_limit_burst INTEGER,
     auth_type TEXT NOT NULL DEFAULT 'global',
     auth_config TEXT,
+    oidc_id_token_header TEXT,
+    oidc_access_token_header TEXT,
     replicas INTEGER NOT NULL DEFAULT 1,
     git_repo TEXT,
     git_branch TEXT,
@@ -533,6 +535,8 @@ for (const col of [
   `ALTER TABLE workers ADD COLUMN config_fetch_attempt_at INTEGER;`,
   `ALTER TABLE workers ADD COLUMN config_basic_user TEXT;`,
   `ALTER TABLE workers ADD COLUMN config_basic_password TEXT;`,
+  `ALTER TABLE applications ADD COLUMN oidc_id_token_header TEXT;`,
+  `ALTER TABLE applications ADD COLUMN oidc_access_token_header TEXT;`,
 ]) {
   try { sqlite.run(col); } catch { /* Column already exists */ }
 }

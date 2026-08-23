@@ -6,6 +6,7 @@ import {
   isPlainPathPrefix,
   renderGlobalOidcConfig,
   type AppMiddlewareOptions,
+  type AppTokenForwarding,
 } from './index';
 
 const OIDC_CONFIG: NonNullable<AppMiddlewareOptions['authConfig']> = {
@@ -340,6 +341,205 @@ describe('renderGlobalOidcConfig', () => {
   });
 });
 
+describe('identity headers', () => {
+  const oidcConfig = {
+    providerURL: 'https://idp.example.com',
+    clientID: 'rudder-worker',
+    clientSecret: 's3cr3t',
+    secret: 'a'.repeat(32),
+  };
+
+  function headersOf(middleware: string, apps: AppTokenForwarding[] = []): any[] {
+    const doc = Bun.YAML.parse(
+      renderGlobalOidcConfig('apps.example.com', oidcConfig, apps),
+    ) as any;
+    return doc.http.middlewares[middleware]?.plugin['traefik-oidc-auth'].Headers;
+  }
+
+  test('every application under worker OIDC gets the identity headers', () => {
+    const names = headersOf('global-oidc').map((h) => h.Name);
+    expect(names).toEqual([
+      'X-Forwarded-User',
+      'X-Forwarded-Email',
+      'X-Forwarded-Preferred-Username',
+      'X-Forwarded-Groups',
+    ]);
+  });
+
+  test('never sets Authorization on its own', () => {
+    // An application that uses that header for its own API tokens would find
+    // them replaced on every request. It has to be asked for by name.
+    expect(headersOf('global-oidc').map((h) => h.Name)).not.toContain('Authorization');
+  });
+
+  test('wraps every template so Traefik passes it to the plugin verbatim', () => {
+    // Traefik runs dynamic configuration files through text/template before
+    // parsing them. An unescaped {{ .claims.email }} is evaluated by Traefik,
+    // against a context with no claims, and the plugin receives "".
+    for (const header of headersOf('global-oidc')) {
+      const value = header.Value ?? header.Values;
+      expect(value).toStartWith('{{`');
+      expect(value).toEndWith('`}}');
+      // A backtick inside would close the raw string literal early and turn the
+      // rest into Traefik template syntax.
+      expect(value.slice(3, -3)).not.toContain('`');
+    }
+  });
+
+  test('a claim the provider did not send renders empty, not "<no value>"', () => {
+    // Go prints a missing map key as `<no value>`, and an application would
+    // create an account named that.
+    for (const header of headersOf('global-oidc')) {
+      expect(header.Value ?? header.Values).toContain('{{ with ');
+    }
+  });
+
+  test('groups use Values, so an empty list deletes the header', () => {
+    const groups = headersOf('global-oidc').find((h) => h.Name === 'X-Forwarded-Groups');
+    // The plugin deletes a header whose Values render to an empty array; with
+    // `Value` it would be set to the empty string and any client-supplied
+    // leftover under that name would merely be blanked, not removed.
+    expect(groups.Value).toBeUndefined();
+    expect(groups.Values).toContain('mapToJsonArray');
+    expect(groups.Values).toContain('[]');
+  });
+});
+
+describe('token forwarding', () => {
+  const oidcConfig = {
+    providerURL: 'https://idp.example.com',
+    clientID: 'rudder-worker',
+    clientSecret: 's3cr3t',
+    secret: 'a'.repeat(32),
+  };
+
+  function render(apps: AppTokenForwarding[]): any {
+    return Bun.YAML.parse(renderGlobalOidcConfig('apps.example.com', oidcConfig, apps));
+  }
+
+  test('defines nothing extra when no application asked for its tokens', () => {
+    expect(Object.keys(render([]).http.middlewares)).toEqual(['global-oidc']);
+  });
+
+  test('gives an application that asked a copy of the whole middleware', () => {
+    const doc = render([{ routerBase: 'shop', idTokenHeader: 'X-Auth-Request-Id-Token' }]);
+    const shared = doc.http.middlewares['global-oidc'].plugin['traefik-oidc-auth'];
+    const copy = doc.http.middlewares['shop-oidc-tokens'].plugin['traefik-oidc-auth'];
+
+    // Same client, same Secret, same cookie: the copy accepts the session any
+    // other application on the worker established.
+    expect(copy.Secret).toBe(shared.Secret);
+    expect(copy.Provider).toEqual(shared.Provider);
+    expect(copy.CallbackUri).toBe(shared.CallbackUri);
+    expect(copy.SessionCookie).toEqual(shared.SessionCookie);
+
+    // The headers are the only difference.
+    expect(copy.Headers).toEqual([
+      ...shared.Headers,
+      { Name: 'X-Auth-Request-Id-Token', Value: '{{`{{ .idToken }}`}}' },
+    ]);
+  });
+
+  test('sends only the tokens that were named', () => {
+    const doc = render([{ routerBase: 'shop', accessTokenHeader: 'X-Token' }]);
+    const headers = doc.http.middlewares['shop-oidc-tokens'].plugin['traefik-oidc-auth'].Headers;
+    const added = headers.filter((h: any) => !h.Name.startsWith('X-Forwarded-'));
+    expect(added).toEqual([{ Name: 'X-Token', Value: '{{`{{ .accessToken }}`}}' }]);
+  });
+
+  test('prefixes the scheme for Authorization and nothing else', () => {
+    const doc = render([
+      { routerBase: 'shop', idTokenHeader: 'Authorization', accessTokenHeader: 'X-Token' },
+    ]);
+    const headers = doc.http.middlewares['shop-oidc-tokens'].plugin['traefik-oidc-auth'].Headers;
+    const by = (name: string) => headers.find((h: any) => h.Name === name).Value;
+    expect(by('Authorization')).toBe('{{`Bearer {{ .idToken }}`}}');
+    expect(by('X-Token')).toBe('{{`{{ .accessToken }}`}}');
+  });
+
+  test('one copy per application, and only for the ones that asked', () => {
+    const doc = render([
+      { routerBase: 'shop', idTokenHeader: 'X-Id' },
+      { routerBase: 'blog', accessTokenHeader: 'X-Access' },
+    ]);
+    expect(Object.keys(doc.http.middlewares).sort()).toEqual([
+      'blog-oidc-tokens',
+      'global-oidc',
+      'shop-oidc-tokens',
+    ]);
+  });
+
+  test('drops a header name that would not survive as configuration', () => {
+    // These are rejected where they are saved, so reaching the renderer means a
+    // row written before that validation existed. An unusable `Name:` makes the
+    // plugin fail to build, which costs every application on the worker its
+    // routing — not just this one.
+    const doc = render([
+      { routerBase: 'shop', idTokenHeader: 'X-Bad"\nName: evil', accessTokenHeader: 'X-Good' },
+    ]);
+    const headers = doc.http.middlewares['shop-oidc-tokens'].plugin['traefik-oidc-auth'].Headers;
+    const added = headers.filter((h: any) => !h.Name.startsWith('X-Forwarded-'));
+    expect(added).toEqual([{ Name: 'X-Good', Value: '{{`{{ .accessToken }}`}}' }]);
+  });
+
+  test('an application whose names are all unusable gets no copy at all', () => {
+    // A middleware defined but never referenced is only clutter; the danger is
+    // the reverse, and `usesGlobalOidc` keeps the two decisions in one place.
+    const doc = render([{ routerBase: 'shop', idTokenHeader: 'Cookie' }]);
+    expect(Object.keys(doc.http.middlewares)).toEqual(['global-oidc']);
+  });
+
+  test('the router still names the middleware the renderer defined', () => {
+    const labels = generateTraefikLabelsForApp('shop', 'shop.example.com', 3000, true, {
+      tokenHeaders: { idTokenHeader: 'X-Id' },
+    }, true);
+    expect(labels['traefik.http.routers.shop-secure.middlewares']).toContain('shop-oidc-tokens@file');
+    expect(labels['traefik.http.routers.shop-secure.middlewares']).not.toContain('global-oidc@file');
+  });
+
+  test('an application that asked for nothing keeps the shared middleware', () => {
+    const labels = generateTraefikLabelsForApp('shop', 'shop.example.com', 3000, true, {}, true);
+    expect(labels['traefik.http.routers.shop-secure.middlewares']).toContain('global-oidc@file');
+    expect(labels['traefik.http.routers.shop-secure.middlewares']).not.toContain('-oidc-tokens');
+  });
+
+  test('a public application gets neither, however its headers are set', () => {
+    const labels = generateTraefikLabelsForApp('shop', 'shop.example.com', 3000, true, {
+      authType: 'none',
+      tokenHeaders: { idTokenHeader: 'X-Id' },
+    }, true);
+    expect(labels['traefik.http.routers.shop-secure.middlewares']).not.toContain('oidc');
+  });
+
+  test('per-application OIDC wins: there is no worker session to describe', () => {
+    const labels = generateTraefikLabelsForApp('shop', 'shop.example.com', 3000, true, {
+      authType: 'oidc',
+      authConfig: {
+        providerURL: 'https://idp.example.com',
+        clientID: 'c',
+        clientSecret: 's',
+        sessionEncryptionKey: 'a'.repeat(32),
+      },
+      tokenHeaders: { idTokenHeader: 'X-Id' },
+    }, true);
+    const chain = labels['traefik.http.routers.shop-secure.middlewares'];
+    expect(chain).toContain('shop-oidc@docker');
+    expect(chain).not.toContain('shop-oidc-tokens');
+    expect(chain).not.toContain('global-oidc@file');
+  });
+
+  test('the WebSocket router carries the same middleware as the main one', () => {
+    // Two request headers must not be a way to skip authentication — or, here,
+    // to reach the application without the identity the copy adds.
+    const labels = generateTraefikLabelsForApp('shop', 'shop.example.com', 3000, true, {
+      tokenHeaders: { idTokenHeader: 'X-Id' },
+    }, true);
+    expect(labels['traefik.http.routers.shop-secure-ws.middlewares']).toBe(
+      labels['traefik.http.routers.shop-secure.middlewares'],
+    );
+  });
+});
+
 describe('generateProvisioningScript', () => {
   const script = generateProvisioningScript('worker-1', {
     baseDomain: 'apps.example.com',
@@ -355,6 +555,31 @@ describe('generateProvisioningScript', () => {
 
   test('leaves no unsubstituted placeholder', () => {
     expect(script).not.toMatch(/\{\{[A-Z][A-Z0-9_]*\}\}/);
+  });
+
+  test('the global-oidc.yml it writes carries the per-application middlewares', () => {
+    // Provisioning records the worker as applied, so the file it writes has to
+    // contain every middleware the routers will name. Omitting them left a
+    // re-provisioned labels-mode worker 404ing its token-forwarding apps, with
+    // nothing to indicate the push was incomplete.
+    const withTokens = generateProvisioningScript('worker-1', {
+      baseDomain: 'apps.example.com',
+      oidcConfig: {
+        providerURL: 'https://idp.example.com',
+        clientID: 'rudder-worker',
+        clientSecret: 's3cr3t',
+        secret: 'a'.repeat(32),
+      },
+      oidcTokenApps: [{ routerBase: 'shop', idTokenHeader: 'X-Id' }],
+    });
+    const yml = (source: string) =>
+      Buffer.from(
+        source.match(/echo "([^"]*)" \| base64 -d > \/etc\/traefik\/dynamic\/global-oidc\.yml/)![1],
+        'base64',
+      ).toString();
+
+    expect(yml(withTokens)).toContain('shop-oidc-tokens:');
+    expect(yml(script)).not.toContain('-oidc-tokens:');
   });
 
   test('preserves Go template syntax used by podman commands', () => {

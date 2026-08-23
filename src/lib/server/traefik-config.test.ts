@@ -5,6 +5,7 @@ import {
   buildMiddlewareOpts,
   pruneEmptySections,
   assembleWorkerConfig,
+  tokenForwardingApps,
 } from './traefik-config';
 import { generateTraefikLabelsForApp } from './provisioning';
 import { encryptField } from './encryption';
@@ -436,5 +437,73 @@ describe('buildMiddlewareOpts', () => {
     const stored = encryptField(JSON.stringify({ clientSecret: 'super-secret' }))!;
     expect(stored).not.toContain('super-secret');
     expect(stored).not.toContain('clientSecret');
+  });
+
+  test('carries the token header names an application saved', () => {
+    expect(
+      buildMiddlewareOpts({ oidcIdTokenHeader: 'X-Id', oidcAccessTokenHeader: '  ' })?.tokenHeaders,
+    ).toEqual({ idTokenHeader: 'X-Id', accessTokenHeader: null });
+  });
+
+  test('an application that named no header is still an application with no settings', () => {
+    expect(buildMiddlewareOpts({ oidcIdTokenHeader: null, oidcAccessTokenHeader: '' })).toBeUndefined();
+  });
+});
+
+describe('tokenForwardingApps', () => {
+  const group = (routerBase: string, middlewareOpts: any) => ({
+    routerBase,
+    domain: `${routerBase}.example.com`,
+    ports: [3000],
+    middlewareOpts,
+  });
+
+  test('names the applications whose routers reference a copy of the middleware', () => {
+    const groups = [
+      group('shop', { tokenHeaders: { idTokenHeader: 'X-Id' } }),
+      group('blog', undefined),
+    ];
+    expect(tokenForwardingApps(groups, true)).toEqual([
+      { routerBase: 'shop', idTokenHeader: 'X-Id', accessTokenHeader: null },
+    ]);
+  });
+
+  test('nothing at all when the worker has no global OIDC', () => {
+    const groups = [group('shop', { tokenHeaders: { idTokenHeader: 'X-Id' } })];
+    expect(tokenForwardingApps(groups, false)).toEqual([]);
+  });
+
+  test('skips an application that is not routed through the worker middleware', () => {
+    // Defining a middleware nothing references is only clutter, but the two
+    // decisions have to be made by the same function — the dangerous direction
+    // is a router naming a middleware that was never defined.
+    const groups = [
+      group('public', { authType: 'none', tokenHeaders: { idTokenHeader: 'X-Id' } }),
+      group('own-idp', {
+        authType: 'oidc',
+        authConfig: OIDC,
+        tokenHeaders: { idTokenHeader: 'X-Id' },
+      }),
+      group('opted-out', { useGlobalAuth: false, tokenHeaders: { idTokenHeader: 'X-Id' } }),
+    ];
+    expect(tokenForwardingApps(groups, true)).toEqual([]);
+  });
+
+  test('every middleware a generated router names is one the renderer defines', () => {
+    // The invariant the whole design rests on: Traefik drops a router whose
+    // middleware is missing, so the application would 404 rather than 401.
+    const groups = [
+      group('shop', { tokenHeaders: { idTokenHeader: 'X-Id' } }),
+      group('blog', { tokenHeaders: { accessTokenHeader: 'X-Access' } }),
+      group('plain', undefined),
+    ];
+    const config = configForRouteGroups(groups, true);
+    const referenced = Object.values(config.http.routers)
+      .flatMap((r: any) => r.middlewares ?? [])
+      .filter((m: string) => m.endsWith('-oidc-tokens@file'));
+    const defined = tokenForwardingApps(groups, true).map((a) => `${a.routerBase}-oidc-tokens@file`);
+
+    expect(referenced.length).toBeGreaterThan(0);
+    expect([...new Set(referenced)].sort()).toEqual(defined.sort());
   });
 });

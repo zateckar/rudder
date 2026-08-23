@@ -4,7 +4,7 @@ import { applications, users, workers, teams, teamMembers, volumes } from '$lib/
 import { eq, inArray, or, isNull, and } from 'drizzle-orm';
 import { selectWorker, getAllWorkerResources, getAllEligibleWorkers } from '$lib/server/worker-selector';
 import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
-import { ALLOWED_DOMAINS_UNSUPPORTED } from '$lib/server/oidc';
+import { ALLOWED_DOMAINS_UNSUPPORTED, normalizeTokenHeader, tokenHeadersError } from '$lib/server/oidc';
 import { imageReferenceError } from '$lib/server/image-reference';
 import { checkApplicationQuota } from '$lib/server/quota';
 import {
@@ -245,6 +245,14 @@ export const actions = {
     const authType = (formData.get('authType')?.toString() || 'global') as 'none' | 'oidc' | 'global';
     const authConfig = authType === 'oidc' ? (formData.get('authConfig')?.toString() || null) : null;
 
+    // Header names for the worker-level middleware to deliver the OAuth tokens
+    // under; empty means the token is not forwarded. Same validation as the
+    // edit action — see `tokenHeadersError`.
+    const oidcIdTokenHeader = normalizeTokenHeader(formData.get('oidcIdTokenHeader')?.toString());
+    const oidcAccessTokenHeader = normalizeTokenHeader(formData.get('oidcAccessTokenHeader')?.toString());
+    const badTokenHeader = tokenHeadersError(oidcIdTokenHeader, oidcAccessTokenHeader);
+    if (badTokenHeader) return fail(400, { error: badTokenHeader });
+
     // Validate OIDC config if auth type is oidc
     if (authType === 'oidc' && authConfig) {
       try {
@@ -284,6 +292,8 @@ export const actions = {
       authType,
       // Encrypted at rest — see the same field in the edit action.
       authConfig: encryptField(authConfig),
+      oidcIdTokenHeader,
+      oidcAccessTokenHeader,
       replicas,
       healthcheck,
       gitRepo: gitRepo || null,

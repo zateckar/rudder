@@ -8,7 +8,7 @@ import {
   userTeams as allUserTeams,
 } from '$lib/server/auth';
 import { assertDomainAvailable } from '$lib/server/domains';
-import { ALLOWED_DOMAINS_UNSUPPORTED } from '$lib/server/oidc';
+import { ALLOWED_DOMAINS_UNSUPPORTED, normalizeTokenHeader, tokenHeadersError } from '$lib/server/oidc';
 import { DEFAULT_HEALTH_TIMEOUT_S } from '$lib/server/generations';
 import { imageReferenceError } from '$lib/server/image-reference';
 import { decryptField, encryptField } from '$lib/server/encryption';
@@ -276,6 +276,15 @@ export const actions = {
     const authType = (formData.get('authType')?.toString() || 'global') as 'none' | 'oidc' | 'global';
     const authConfig = authType === 'oidc' ? (formData.get('authConfig')?.toString() || null) : null;
 
+    // Kept whatever the auth type is, rather than cleared outside `global`:
+    // switching an application to public and back should not silently lose the
+    // header names, and the renderer already ignores them for an application
+    // whose router does not carry the worker's middleware.
+    const oidcIdTokenHeader = normalizeTokenHeader(formData.get('oidcIdTokenHeader')?.toString());
+    const oidcAccessTokenHeader = normalizeTokenHeader(formData.get('oidcAccessTokenHeader')?.toString());
+    const badTokenHeader = tokenHeadersError(oidcIdTokenHeader, oidcAccessTokenHeader);
+    if (badTokenHeader) return fail(400, { error: badTokenHeader });
+
     if (authType === 'oidc' && authConfig) {
       try {
         const cfg = JSON.parse(authConfig);
@@ -329,6 +338,8 @@ export const actions = {
         // `encryptField` is idempotent, so a re-save of a row that was written
         // before this does not double-encrypt.
         authConfig: encryptField(authConfig),
+        oidcIdTokenHeader,
+        oidcAccessTokenHeader,
         replicas,
         healthcheck,
         healthTimeoutSeconds,

@@ -6,6 +6,7 @@ import { eq } from 'drizzle-orm';
 import { executeSSHCommand } from '$lib/server/ssh';
 import { decryptField, encryptField } from '$lib/server/encryption';
 import { renderGlobalOidcConfig } from '$lib/server/provisioning';
+import { routeGroupsForWorker, tokenForwardingApps } from '$lib/server/traefik-config';
 import { normalizeOidcSecret, oidcCallbackHost, oidcCallbackUrl } from '$lib/server/oidc';
 import { requireWorker, route } from '$lib/server/auth';
 
@@ -43,13 +44,23 @@ export const POST: RequestHandler = route(async (event) => {
       .where(eq(workers.id, worker.id));
   }
 
-  const oidcYml = renderGlobalOidcConfig(worker.baseDomain, {
-    providerURL: worker.oidcProviderUrl,
-    clientID: worker.oidcClientId,
-    clientSecret,
-    secret,
-    callbackPath: worker.oidcCallbackPath,
-  });
+  // The per-application middlewares go in the same file. On an `http`-mode
+  // worker they arrive with the routers instead, but rendering them here too is
+  // harmless — a middleware nothing references costs nothing — and it means a
+  // worker switched between routing modes is never briefly missing them.
+  const tokenApps = tokenForwardingApps(await routeGroupsForWorker(worker.id), true);
+
+  const oidcYml = renderGlobalOidcConfig(
+    worker.baseDomain,
+    {
+      providerURL: worker.oidcProviderUrl,
+      clientID: worker.oidcClientId,
+      clientSecret,
+      secret,
+      callbackPath: worker.oidcCallbackPath,
+    },
+    tokenApps,
+  );
 
   // Write via stdin → sudo tee (avoids shell quoting issues with YAML content)
   const writeCmd = 'sudo tee /etc/traefik/dynamic/global-oidc.yml > /dev/null && echo "OIDC_APPLIED"';
@@ -84,6 +95,9 @@ export const POST: RequestHandler = route(async (event) => {
         `and that ${callbackUrl} is registered as a redirect URI with your identity provider.` +
         (rotated
           ? ' The session encryption key was rotated to the 32-character format the Traefik plugin requires — existing sessions were signed out.'
+          : '') +
+        (tokenApps.length
+          ? ` Token forwarding was included for ${tokenApps.length} application(s).`
           : ''),
     });
   } catch (e: any) {

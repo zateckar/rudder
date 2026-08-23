@@ -8,7 +8,9 @@ import {
   normalizeOidcSecret,
   oidcCallbackHost,
   oidcCallbackUrl,
+  normalizeTokenHeader,
   resolveCallbackPath,
+  tokenHeadersError,
 } from './oidc';
 
 describe('generateOidcSecret', () => {
@@ -172,5 +174,46 @@ describe('callback path validation', () => {
       expect(resolveCallbackPath(input)).toBe(OIDC_CALLBACK_PATH);
     }
     expect(resolveCallbackPath('/oauth2/callback')).toBe('/oauth2/callback');
+  });
+});
+
+describe('token header names', () => {
+  test('not naming a header is how a token is not forwarded', () => {
+    for (const input of [null, undefined, '', '   ']) {
+      expect(normalizeTokenHeader(input)).toBeNull();
+    }
+    expect(tokenHeadersError(null, null)).toBeNull();
+    expect(normalizeTokenHeader('  X-Token  ')).toBe('X-Token');
+  });
+
+  test('accepts the names an application would actually use', () => {
+    expect(tokenHeadersError('X-Auth-Request-Id-Token', 'X-Auth-Request-Access-Token')).toBeNull();
+    // The one name most applications already understand, and the reason the
+    // renderer special-cases the Bearer prefix.
+    expect(tokenHeadersError('Authorization', null)).toBeNull();
+  });
+
+  test('rejects anything that would not survive as YAML or as a header name', () => {
+    // The value becomes a `Name:` in generated middleware configuration, so a
+    // quote or a newline here would be a way to write arbitrary plugin config
+    // through a form field.
+    for (const bad of ['X Token', 'X:Token', 'X"Token', 'X\nName: evil', '1-Token', '-X', 'x'.repeat(65)]) {
+      expect(tokenHeadersError(bad, null)).not.toBeNull();
+    }
+  });
+
+  test('refuses to overwrite a header the proxy sets itself', () => {
+    // The identity headers are set by the same middleware and the later
+    // definition would win, replacing a username with a JWT.
+    for (const reserved of ['X-Forwarded-User', 'x-forwarded-email', 'X-Forwarded-For', 'Host', 'Cookie']) {
+      expect(tokenHeadersError(reserved, null)).not.toBeNull();
+      expect(tokenHeadersError(null, reserved)).not.toBeNull();
+    }
+  });
+
+  test('refuses the same name for both tokens', () => {
+    // Which token the application received would otherwise depend on the order
+    // the middleware happened to be rendered in.
+    expect(tokenHeadersError('X-Token', 'x-token')).not.toBeNull();
   });
 });

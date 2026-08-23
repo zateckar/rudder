@@ -4,6 +4,7 @@ import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { executeSSHCommand, testSSHConnection } from '$lib/server/ssh';
 import { generateProvisioningScript, type ProvisioningOptions } from '$lib/server/provisioning';
+import { routeGroupsForWorker, tokenForwardingApps } from '$lib/server/traefik-config';
 import { env } from '$lib/server/env';
 import { randomBytes } from 'crypto';
 import { withLock, LockError } from '$lib/server/locks';
@@ -279,10 +280,19 @@ export const POST: RequestHandler = route(async (event) => {
             };
           }
 
+          // The file this script writes is what `oidcAppliedAt` below claims is
+          // in place, so it has to carry the per-application token middlewares
+          // too — a re-provision that dropped them would leave those routers
+          // naming a middleware Traefik does not have.
+          const oidcTokenApps = workerOidcConfig
+            ? tokenForwardingApps(await routeGroupsForWorker(worker.id), true)
+            : [];
+
           const script = generateProvisioningScript(worker.name, {
             baseDomain: worker.baseDomain || undefined,
             bouncerKey,
             oidcConfig: workerOidcConfig,
+            oidcTokenApps,
             sshPort: worker.sshPort,
             routingConfig,
             workerToken,

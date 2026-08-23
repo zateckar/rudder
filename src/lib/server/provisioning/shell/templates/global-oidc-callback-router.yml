@@ -1,0 +1,16 @@
+    # The callback host needs a router of its own so Traefik terminates TLS for
+    # it and runs the middleware; the middleware answers the callback before
+    # anything reaches a backend, so the service is never used.
+    #
+    # One router however many middlewares renderGlobalOidcConfig produced: the
+    # per-application copies share this callback host, because they share the
+    # worker's IdP client registration.
+    global-oidc-callback:
+      rule: "Host(`auth.{{BASE_DOMAIN}}`)"
+      entrypoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      service: noop@internal
+      middlewares:
+        - global-oidc

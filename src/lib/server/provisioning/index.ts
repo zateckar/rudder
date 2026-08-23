@@ -1,5 +1,12 @@
 import { routerName } from '../domains';
-import { OIDC_CALLBACK_PATH, normalizeIssuerUrl, resolveCallbackPath } from '../oidc';
+import {
+  FORWARDED_IDENTITY_HEADERS,
+  OIDC_CALLBACK_PATH,
+  normalizeIssuerUrl,
+  normalizeTokenHeader,
+  resolveCallbackPath,
+  tokenHeaderNameError,
+} from '../oidc';
 
 // Shell assets imported as raw strings (Vite inlines at build time)
 import provisionShTemplate from './shell/provision.sh?raw';
@@ -10,6 +17,7 @@ import podmanApiRoutingTlsTemplate from './shell/templates/podman-api-routing-tl
 import metricsRoutingTemplate from './shell/templates/metrics-routing.yml?raw';
 import crowdsecMiddlewareTemplate from './shell/templates/crowdsec-middleware.yml?raw';
 import globalOidcMiddlewareTemplate from './shell/templates/global-oidc-middleware.yml?raw';
+import globalOidcCallbackRouterTemplate from './shell/templates/global-oidc-callback-router.yml?raw';
 import crowdsecAcquisTemplate from './shell/templates/crowdsec-acquis.yml?raw';
 import crowdsecAppsecAcquisTemplate from './shell/templates/crowdsec-appsec-acquis.yml?raw';
 import crowdsecConfigLocalTemplate from './shell/templates/crowdsec-config-local.yml?raw';
@@ -108,36 +116,245 @@ export interface GlobalOidcConfig {
   callbackPath?: string | null;
 }
 
+/** The middleware every application on a worker with global OIDC references. */
+export const GLOBAL_OIDC_MIDDLEWARE = 'global-oidc';
+
 /**
- * Render `/etc/traefik/dynamic/global-oidc.yml` for a worker.
+ * Header names an application wants its OAuth tokens delivered under.
  *
- * Single source of truth for the global OIDC middleware: used both when
- * provisioning a worker from scratch and when pushing a config change to a
- * running worker over SSH, so the two can never drift apart.
- *
- * The provider URL is normalised here rather than only where it is saved: rows
- * written before that validation existed still hold discovery URLs, and a
- * worker whose OIDC has silently never worked should start working on its next
- * provisioning run rather than waiting for someone to re-save the form.
+ * Both are optional and a missing one means "do not forward that token" — the
+ * name is the switch, because a token an application does not know the name of
+ * is only weight on every request.
  */
-export function renderGlobalOidcConfig(
+export interface AppTokenHeaders {
+  idTokenHeader?: string | null;
+  accessTokenHeader?: string | null;
+}
+
+/** The token headers worth generating for an application, or undefined. */
+export function usableTokenHeaders(
+  headers: AppTokenHeaders | null | undefined,
+): AppTokenHeaders | undefined {
+  if (!headers) return undefined;
+  const keep = (raw: string | null | undefined) => {
+    const name = normalizeTokenHeader(raw);
+    // Dropped rather than rendered. These names are validated where they are
+    // saved, so reaching here means a row written before that validation
+    // existed — and an unusable `Name:` would make the plugin fail to build,
+    // which costs every application on the worker its routing, not just this
+    // one.
+    if (name && tokenHeaderNameError(name)) {
+      console.warn(`[traefik] Ignoring unusable OIDC token header name "${name}".`);
+      return null;
+    }
+    return name;
+  };
+  const idTokenHeader = keep(headers.idTokenHeader);
+  const accessTokenHeader = keep(headers.accessTokenHeader);
+  if (!idTokenHeader && !accessTokenHeader) return undefined;
+  return { idTokenHeader, accessTokenHeader };
+}
+
+/**
+ * The middleware an application gets instead of the shared one when it asks for
+ * its tokens.
+ *
+ * A full copy of the worker's OIDC middleware, not an extra one in the chain:
+ * the plugin's `Headers` are part of its configuration, so per-application
+ * headers mean a per-application instance. It is the same client, the same
+ * `Secret` and the same session cookie, so it accepts the session any other
+ * application on the worker established — the only difference is what it adds
+ * to the request on the way through.
+ *
+ * `-oidc-tokens` rather than `-global-oidc` so it cannot collide with the
+ * `<app>-oidc` a per-application OIDC configuration generates: no application
+ * name produces both, because that path always appends `-oidc` last.
+ */
+export function appOidcMiddlewareName(appName: string): string {
+  return `${routerName(appName)}-oidc-tokens`;
+}
+
+/**
+ * Wrap a plugin template so it survives Traefik's own templating.
+ *
+ * Traefik runs every *dynamic* configuration file through Go's `text/template`
+ * before parsing it, and both files this renderer feeds are dynamic ones —
+ * `global-oidc.yml` on a labels-mode worker, `routes.yml` on an http-mode one.
+ * An unescaped `{{ .claims.email }}` is therefore evaluated by Traefik, against
+ * a context that has no `claims`, and the plugin receives the empty string it
+ * produced. Wrapping the expression in a raw string literal makes Traefik's
+ * pass emit it verbatim and leaves the evaluation to the plugin.
+ *
+ * The expression must not contain a backtick, which would close the literal.
+ * Nothing here interpolates one: header names are validated to letters, digits
+ * and hyphens, and the claim paths are constants.
+ */
+function pluginTemplate(expression: string): string {
+  return '{{`' + expression + '`}}';
+}
+
+/** A claim, or the empty string when the provider did not send it. */
+function claim(name: string): string {
+  return `{{ with .claims.${name} }}{{ . }}{{ end }}`;
+}
+
+/**
+ * The `Headers` block for one OIDC middleware, indented to sit under the
+ * plugin's configuration.
+ *
+ * The identity headers are unconditional: they are what makes an application
+ * able to log a user in without speaking OIDC itself, they are the same for
+ * every application on the worker, and they cost a few dozen bytes a request.
+ * Every value is guarded with `{{ with }}` so a claim the provider did not send
+ * renders as the empty string — Go prints a missing map key as `<no value>`,
+ * and an application would happily create an account named that.
+ *
+ * `Authorization` is never one of them. An application that uses that header
+ * for its own API tokens would find them replaced on every request, which is a
+ * failure the automatic set must not be able to cause; an application that
+ * wants a bearer token can ask for one by name.
+ */
+function oidcHeadersBlock(tokens?: AppTokenHeaders): string {
+  // Destructured from the shared constant rather than written out again: the
+  // same names are what `tokenHeaderNameError` refuses to let an application
+  // claim for a token, and a name that appeared in one list but not the other
+  // would let a token quietly overwrite an identity header.
+  const [USER, EMAIL, PREFERRED_USERNAME, GROUPS] = FORWARDED_IDENTITY_HEADERS;
+
+  const entries: Array<{ name: string; value?: string; values?: string }> = [
+    // preferred_username is what an IdP means by "the name this person logs in
+    // with"; sub is always present but is an opaque id, so it is the fallback
+    // rather than the first choice.
+    {
+      name: USER,
+      value: `{{ with .claims.preferred_username }}{{ . }}{{ else }}${claim('sub')}{{ end }}`,
+    },
+    { name: EMAIL, value: claim('email') },
+    { name: PREFERRED_USERNAME, value: claim('preferred_username') },
+    // `Values` rather than `Value`: it produces one header per group, the way
+    // oauth2-proxy does, and — unlike `Value` — the plugin *deletes* the header
+    // when the array is empty, so an application that receives no groups also
+    // receives no client-supplied leftovers under that name. The `{{ else }}`
+    // keeps it valid JSON when the provider sends no groups claim at all.
+    {
+      name: GROUPS,
+      values: '{{ with .claims.groups }}{{ . | mapToJsonArray }}{{ else }}[]{{ end }}',
+    },
+  ];
+
+  for (const [header, token] of [
+    [tokens?.idTokenHeader, '.idToken'],
+    [tokens?.accessTokenHeader, '.accessToken'],
+  ] as const) {
+    if (!header) continue;
+    // Only `Authorization` gets the scheme. Everywhere else the bare token is
+    // what an application expects to find, and a stray "Bearer " in front of it
+    // is a decode failure the operator has to guess at.
+    const bare = `{{ ${token} }}`;
+    entries.push({
+      name: header,
+      value: header.toLowerCase() === 'authorization' ? `Bearer ${bare}` : bare,
+    });
+  }
+
+  return entries
+    .map((entry) => {
+      const field = entry.values === undefined
+        ? `              Value: "${pluginTemplate(entry.value!)}"`
+        : `              Values: "${pluginTemplate(entry.values)}"`;
+      return `            - Name: "${entry.name}"\n${field}`;
+    })
+    .join('\n');
+}
+
+/**
+ * Render one `traefik-oidc-auth` middleware, indented under `http.middlewares`.
+ *
+ * The template is a fragment rather than a document because this runs more than
+ * once per worker: `Headers` is part of a middleware's configuration, so an
+ * application that wants different headers needs a different middleware, and
+ * the only difference between the copies is what they add to the request.
+ */
+function renderOidcMiddleware(
+  name: string,
   baseDomain: string,
   oidcConfig: GlobalOidcConfig,
+  tokens?: AppTokenHeaders,
 ): string {
   return replacePlaceholders(globalOidcMiddlewareTemplate, {
+    OIDC_MIDDLEWARE_NAME: name,
     BASE_DOMAIN: baseDomain,
     OIDC_PROVIDER_URL: normalizeIssuerUrl(oidcConfig.providerURL) ?? oidcConfig.providerURL,
     OIDC_CLIENT_ID: oidcConfig.clientID,
     OIDC_CLIENT_SECRET: oidcConfig.clientSecret,
     OIDC_SECRET: oidcConfig.secret,
     OIDC_CALLBACK_PATH: resolveCallbackPath(oidcConfig.callbackPath),
-  });
+    OIDC_HEADERS: oidcHeadersBlock(tokens),
+  }).trimEnd();
+}
+
+/** An application that wants its tokens, and the router it is reached through. */
+export interface AppTokenForwarding extends AppTokenHeaders {
+  /** The router base name — `appOidcMiddlewareName` derives the middleware from it. */
+  routerBase: string;
+}
+
+/**
+ * Render `/etc/traefik/dynamic/global-oidc.yml` for a worker.
+ *
+ * Single source of truth for the global OIDC middleware: used both when
+ * provisioning a worker from scratch and when pushing a config change to a
+ * running worker over SSH, so the two can never drift apart.  The same text is
+ * parsed and merged into the served routing document for `http`-mode workers,
+ * so the two routing modes cannot drift apart either.
+ *
+ * The provider URL is normalised here rather than only where it is saved: rows
+ * written before that validation existed still hold discovery URLs, and a
+ * worker whose OIDC has silently never worked should start working on its next
+ * provisioning run rather than waiting for someone to re-save the form.
+ *
+ * `tokenApps` adds one copy of the middleware per application that asked for
+ * its tokens. Passing none renders exactly what this function rendered before
+ * they existed, plus the identity headers.
+ */
+export function renderGlobalOidcConfig(
+  baseDomain: string,
+  oidcConfig: GlobalOidcConfig,
+  tokenApps: readonly AppTokenForwarding[] = [],
+): string {
+  const middlewares = [renderOidcMiddleware(GLOBAL_OIDC_MIDDLEWARE, baseDomain, oidcConfig)];
+
+  for (const app of tokenApps) {
+    const tokens = usableTokenHeaders(app);
+    if (!tokens) continue;
+    middlewares.push(
+      renderOidcMiddleware(appOidcMiddlewareName(app.routerBase), baseDomain, oidcConfig, tokens),
+    );
+  }
+
+  return [
+    'http:',
+    '  middlewares:',
+    ...middlewares,
+    '  routers:',
+    replacePlaceholders(globalOidcCallbackRouterTemplate, { BASE_DOMAIN: baseDomain }).trimEnd(),
+    '',
+  ].join('\n');
 }
 
 export interface ProvisioningOptions {
   baseDomain?: string;
   bouncerKey?: string;
   oidcConfig?: GlobalOidcConfig;
+  /**
+   * Applications on this worker that forward their OAuth tokens.
+   *
+   * Provisioning writes `global-oidc.yml` and records the worker as applied, so
+   * the file it writes has to contain every middleware the routers will name —
+   * otherwise a `labels`-mode worker comes back from a re-provision with its
+   * token-forwarding applications 404ing, and nothing says the push is stale.
+   */
+  oidcTokenApps?: readonly AppTokenForwarding[];
   /** SSH port to keep open in the host firewall alongside 22. */
   sshPort?: number;
   /**
@@ -190,6 +407,7 @@ export function generateProvisioningScript(
     baseDomain,
     bouncerKey: bouncerKeyParam,
     oidcConfig,
+    oidcTokenApps,
     sshPort,
     routingConfig,
     workerToken,
@@ -234,7 +452,7 @@ export function generateProvisioningScript(
     : '';
   const crowdsecMiddleware = replacePlaceholders(crowdsecMiddlewareTemplate, templateVars);
   const globalOidcMiddleware = (oidcConfig && baseDomain)
-    ? renderGlobalOidcConfig(baseDomain, oidcConfig)
+    ? renderGlobalOidcConfig(baseDomain, oidcConfig, oidcTokenApps)
     : '';
 
   // Render scripts/units that need variable substitution
@@ -331,6 +549,32 @@ export interface AppMiddlewareOptions {
   };
   healthCheckPath?: string;   // Traefik health check endpoint, e.g. /health
   useGlobalAuth?: boolean;    // whether to apply global OIDC auth (default: true if global OIDC is configured)
+  /**
+   * Header names for the OAuth tokens, when this application wants them.
+   *
+   * Only meaningful under worker-level OIDC — an application with its own
+   * per-app OIDC configuration is not routed through the worker's middleware,
+   * so there is nothing here to copy.
+   */
+  tokenHeaders?: AppTokenHeaders;
+}
+
+/**
+ * Does this application's router carry the worker's global OIDC middleware?
+ *
+ * Exported because two places have to agree on the answer: the labels that
+ * *reference* the middleware, and the renderer that *defines* the per-app copy
+ * of it. If they disagreed in the direction of "referenced but not defined",
+ * Traefik would drop the router and the application would 404.
+ */
+export function usesGlobalOidc(
+  globalOidcEnabled: boolean,
+  middlewareOpts?: AppMiddlewareOptions,
+): boolean {
+  if (!globalOidcEnabled) return false;
+  if (middlewareOpts?.authType === 'oidc' && middlewareOpts.authConfig) return false;
+  if (middlewareOpts?.authType === 'none') return false;
+  return middlewareOpts?.useGlobalAuth !== false;
 }
 
 /**
@@ -395,11 +639,15 @@ export function generateTraefikLabelsForApp(
 
   // Global OIDC auth (if enabled and not overridden by per-app OIDC or explicitly disabled)
   const hasPerAppOidc = middlewareOpts?.authType === 'oidc' && middlewareOpts.authConfig;
-  const isPublicApp = middlewareOpts?.authType === 'none';
-  const useGlobalAuth = middlewareOpts?.useGlobalAuth !== false;
 
-  if (globalOidcEnabled && !hasPerAppOidc && !isPublicApp && useGlobalAuth) {
-    middlewares.push('global-oidc@file');
+  if (usesGlobalOidc(globalOidcEnabled, middlewareOpts)) {
+    // The per-application copy when this application asked for its tokens, the
+    // shared one otherwise. Both are defined by `renderGlobalOidcConfig`, which
+    // is handed the same list of applications this decision is made from.
+    const tokens = usableTokenHeaders(middlewareOpts?.tokenHeaders);
+    middlewares.push(
+      tokens ? `${appOidcMiddlewareName(safeName)}@file` : `${GLOBAL_OIDC_MIDDLEWARE}@file`,
+    );
   }
 
   // Per-app OIDC auth (sevensolutions/traefik-oidc-auth plugin).

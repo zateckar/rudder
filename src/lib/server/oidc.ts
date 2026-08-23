@@ -23,6 +23,118 @@ export const ALLOWED_DOMAINS_UNSUPPORTED =
 /** Path component of the shared callback URL, when a worker names no other. */
 export const OIDC_CALLBACK_PATH = '/oidc/callback';
 
+/**
+ * Identity headers the worker-level middleware puts on every request it lets
+ * through to an application.  The names are oauth2-proxy's, because that is
+ * what applications with a "trusted header" / "reverse proxy" login mode
+ * already expect to read.
+ *
+ * An application may trust these for the same reason it may trust being
+ * reachable at all: the middleware runs in front of it and the plugin *sets*
+ * each name rather than appending to it, so a client that sends its own
+ * `X-Forwarded-Email` has it overwritten before the backend sees it.  That
+ * argument holds only while the request actually passes through the
+ * middleware — the worker-level configuration declares no
+ * `BypassAuthenticationRule`, and `IncludeWhen` defaults to `Authorized`, so
+ * there is no path through it that reaches an application with these headers
+ * unset and a client-supplied value intact.
+ */
+export const FORWARDED_IDENTITY_HEADERS = [
+  'X-Forwarded-User',
+  'X-Forwarded-Email',
+  'X-Forwarded-Preferred-Username',
+  'X-Forwarded-Groups',
+] as const;
+
+export const TOKEN_HEADER_INVALID =
+  'A token header name may contain only letters, digits and hyphens, must start with a letter, ' +
+  'and must be at most 64 characters — for example X-Auth-Request-Id-Token.';
+
+/**
+ * Names a token must not be delivered under.
+ *
+ * The identity headers are excluded because the middleware sets them itself and
+ * the later definition would win, silently replacing a username with a JWT. The
+ * rest are headers the proxy, the HTTP framing, or Traefik's own forwarded-header
+ * handling owns; overwriting one breaks the request rather than the login.
+ *
+ * `Authorization` is deliberately *not* here. It is the one name an application
+ * is most likely to already understand, and choosing it is the whole point of
+ * making the name configurable — `renderGlobalOidcConfig` prefixes the value
+ * with `Bearer ` when it is used.
+ */
+const RESERVED_TOKEN_HEADERS = new Set(
+  [
+    ...FORWARDED_IDENTITY_HEADERS,
+    'Host',
+    'Cookie',
+    'Connection',
+    'Content-Length',
+    'Transfer-Encoding',
+    'Upgrade',
+    'TE',
+    'Trailer',
+    'Proxy-Authorization',
+    'X-Forwarded-For',
+    'X-Forwarded-Proto',
+    'X-Forwarded-Host',
+    'X-Forwarded-Port',
+    'X-Forwarded-Uri',
+    'X-Forwarded-Method',
+    'X-Forwarded-Server',
+    'X-Real-Ip',
+  ].map((h) => h.toLowerCase()),
+);
+
+/** A stored token header name, trimmed, with "not set" collapsed to null. */
+export function normalizeTokenHeader(value: string | null | undefined): string | null {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  return trimmed || null;
+}
+
+/**
+ * Why `name` cannot be used to carry a token to an application, or null.
+ *
+ * The value becomes a YAML `Name:` in the generated middleware and then an HTTP
+ * header name, so the character set is checked here rather than escaped later:
+ * a name with a quote or a newline in it would be a way to write arbitrary
+ * plugin configuration through a form field.
+ */
+export function tokenHeaderNameError(name: string): string | null {
+  if (!/^[A-Za-z][A-Za-z0-9-]{0,63}$/.test(name)) return TOKEN_HEADER_INVALID;
+  if (RESERVED_TOKEN_HEADERS.has(name.toLowerCase())) {
+    return `"${name}" is set by the proxy itself and cannot be used to carry a token. Pick another name.`;
+  }
+  return null;
+}
+
+/**
+ * Validate an application's pair of token header names together.
+ *
+ * The two have to be checked as a pair because the same name for both would
+ * make the second definition overwrite the first, and which token an
+ * application then received would depend on the order the middleware happened
+ * to be rendered in.
+ */
+export function tokenHeadersError(
+  idTokenHeader: string | null | undefined,
+  accessTokenHeader: string | null | undefined,
+): string | null {
+  const id = normalizeTokenHeader(idTokenHeader);
+  const access = normalizeTokenHeader(accessTokenHeader);
+
+  for (const name of [id, access]) {
+    if (!name) continue;
+    const error = tokenHeaderNameError(name);
+    if (error) return error;
+  }
+
+  if (id && access && id.toLowerCase() === access.toLowerCase()) {
+    return 'The ID token and access token must be forwarded under different header names.';
+  }
+  return null;
+}
+
 /** The path an OIDC provider serves its discovery document from. */
 const DISCOVERY_SUFFIX = '/.well-known/openid-configuration';
 

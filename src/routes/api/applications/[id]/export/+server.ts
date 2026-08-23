@@ -41,6 +41,8 @@ export async function GET({ params, cookies }: { params: { id: string }; cookies
     rateLimitAvg: app.rateLimitAvg,
     rateLimitBurst: app.rateLimitBurst,
     authType: app.authType,
+    oidcIdTokenHeader: app.oidcIdTokenHeader,
+    oidcAccessTokenHeader: app.oidcAccessTokenHeader,
     healthcheck: app.healthcheck,
     replicas: app.replicas,
     gitRepo: app.gitRepo,

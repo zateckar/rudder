@@ -13,7 +13,12 @@ import {
   type PlannedRoute,
 } from '$lib/server/deploy/plan';
 import { desiredState, type DesiredApp } from '$lib/server/reconcile';
-import { generateTraefikLabelsForApp, type AppMiddlewareOptions } from '$lib/server/provisioning';
+import {
+  generateTraefikLabelsForApp,
+  usableTokenHeaders,
+  usesGlobalOidc,
+  type AppMiddlewareOptions,
+} from '$lib/server/provisioning';
 // Shared with the config generator so `labels` and `http` mode workers apply
 // exactly the same rate limit, auth mode and health check.
 import { buildMiddlewareOpts } from '$lib/server/traefik-config';
@@ -722,6 +727,35 @@ async function deployApplication(
   }
 
   const globalOidcEnabled = globalOidcConfigured;
+
+  // The per-application OIDC middleware that carries this application's tokens
+  // lives in the same pushed file, and is generated from the application row as
+  // it stood when the push happened. An edit since then means the file cannot
+  // contain it, the router would name a middleware Traefik does not have, and
+  // the application 404s — the same failure the check above exists to prevent,
+  // reached by editing rather than by never pushing.
+  //
+  // `http`-mode workers cannot get here: they fetch the middleware and the
+  // router together, so there is no window in which one exists without the other.
+  if (
+    !httpRouting &&
+    globalOidcConfigured &&
+    usesGlobalOidc(globalOidcEnabled, buildMiddlewareOpts(app)) &&
+    usableTokenHeaders({
+      idTokenHeader: app.oidcIdTokenHeader,
+      accessTokenHeader: app.oidcAccessTokenHeader,
+    }) &&
+    (!worker.oidcAppliedAt || worker.oidcAppliedAt < app.updatedAt)
+  ) {
+    return {
+      success: false,
+      message:
+        `"${app.name}" forwards its OIDC tokens, and the middleware that does it has not been pushed to ` +
+        `worker "${worker.name}" since the setting last changed. Open the worker's Settings tab and click ` +
+        `"Apply to Traefik", then deploy again. Deploying now would take the application offline.`,
+      statusCode: 409,
+    };
+  }
 
   // The Traefik OIDC plugin matches claim values by exact string equality, so
   // there is no way to express "any address at this domain". Fail rather than
