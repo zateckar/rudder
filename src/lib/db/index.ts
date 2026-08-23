@@ -720,6 +720,34 @@ export const safeWorkerColumns = (() => {
   return cols;
 })();
 
+/** A worker row reduced to `safeWorkerColumns`. */
+export type SafeWorker = Omit<
+  typeof _workersTable.$inferSelect,
+  'podmanCaCert' | 'podmanClientCert' | 'podmanClientKey'
+  | 'crowdsecBouncerKey' | 'oidcClientSecret' | 'oidcEncryptionKey'
+  | 'configToken' | 'configBasicPassword'
+>;
+
+/**
+ * Strip a worker row already in hand down to what a browser may see.
+ *
+ * `safeWorkerColumns` covers the case where the row is being selected. This
+ * covers the case where it is not — a helper that loaded full rows for its own
+ * server-side reasons and now wants to return part of them to a page.
+ *
+ * Driven off the same list rather than another hand-written destructure. There
+ * were three of those, and they had already drifted: the copy on the
+ * new-application page never learned about `configBasicPassword`, so it
+ * published one the moment that column existed.
+ */
+export function toSafeWorker(worker: typeof _workersTable.$inferSelect): SafeWorker {
+  const safe: Record<string, unknown> = {};
+  for (const key of Object.keys(safeWorkerColumns)) {
+    safe[key] = (worker as Record<string, unknown>)[key];
+  }
+  return safe as SafeWorker;
+}
+
 /**
  * User columns safe to serialise to the browser.
  * Excludes: passwordHash.

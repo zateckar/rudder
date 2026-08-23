@@ -72,7 +72,13 @@ export const load = async (event: { url: URL; locals: App.Locals }) => {
   if (currentUser?.role === 'admin') {
     try {
       workerResources = await getAllWorkerResources();
-    } catch {}
+    } catch (e) {
+      // Logged, not swallowed. An empty list here renders as "No metrics —
+      // worker may be offline or metrics not yet collected" against every
+      // worker on the installation, which reads as a fleet-wide outage and says
+      // nothing about the query that actually failed.
+      console.error('[dashboard] Could not load worker resources:', (e as any)?.message || e);
+    }
   }
 
   // Recent activity: last 10 audit log entries with user info.

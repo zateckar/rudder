@@ -3,7 +3,7 @@
  * Picks the worker with the most available CPU, memory, and disk capacity.
  * Returns null if all workers are over the utilization threshold (>85%).
  */
-import { db } from '$lib/db';
+import { db, safeWorkerColumns, toSafeWorker, type SafeWorker } from '$lib/db';
 import { workers, workerMetrics, workerPings } from '$lib/db/schema';
 import { eq, and, gte, desc } from 'drizzle-orm';
 
@@ -11,7 +11,20 @@ const UTILIZATION_THRESHOLD = 85; // percent
 const METRICS_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
 
 export interface WorkerResourceInfo {
-  worker: typeof workers.$inferSelect;
+  /**
+   * Reduced to what a browser may see.
+   *
+   * Every one of these lists is rendered on a page — the dashboard's capacity
+   * panel and the new-application worker picker — and both used to serialise
+   * the whole row, so an admin loading the dashboard received every worker's
+   * config token, OIDC client secret, session key, bouncer key and Podman
+   * client key. Encrypted at rest, so ciphertext rather than plaintext, but
+   * there is no reason for any of it to leave the server.
+   *
+   * `selectWorker` keeps the full row on its own `worker` field: it names a
+   * deploy target and the caller needs the credentials to reach it.
+   */
+  worker: SafeWorker;
   cpuPercent: number | null;
   memPercent: number | null;
   diskUsageBytes: number | null;
@@ -109,7 +122,7 @@ export async function selectWorker(): Promise<WorkerSelectionResult | null> {
     .map(w => {
       const m = latestMetrics.get(w.id);
       return {
-        worker: w,
+        worker: toSafeWorker(w),
         cpuPercent: m?.cpuPercent ?? null,
         memPercent: m?.memPercent ?? null,
         diskUsageBytes: m?.diskUsageBytes ?? null,
@@ -122,8 +135,13 @@ export async function selectWorker(): Promise<WorkerSelectionResult | null> {
   const best = resources[0];
   if (!best || best.score <= 0) return null;
 
+  // The winner is returned in full: this names a deploy target, and reaching it
+  // needs the Podman credentials the resource lists deliberately drop. Callers
+  // that hand it to a page are responsible for stripping it again.
+  const fullRows = new Map(eligibleWorkers.map((w) => [w.id, w]));
+
   return {
-    worker: best.worker,
+    worker: fullRows.get(best.worker.id)!,
     resources: best,
     allWorkerResources: resources,
   };
@@ -133,7 +151,9 @@ export async function selectWorker(): Promise<WorkerSelectionResult | null> {
  * Get resource info for all online workers (for dashboard display).
  */
 export async function getAllWorkerResources(): Promise<WorkerResourceInfo[]> {
-  const allWorkers = await db.select().from(workers).all();
+  // Only the safe columns are needed here — nothing on this path reaches a
+  // worker, it only describes one — so they are the only ones selected.
+  const allWorkers = await db.select(safeWorkerColumns).from(workers).all();
   const onlineIds = await getOnlineWorkerIds();
   const latestMetrics = await getLatestMetrics();
 
@@ -164,7 +184,7 @@ export async function getAllEligibleWorkers(): Promise<WorkerResourceInfo[]> {
     .map(w => {
       const m = latestMetrics.get(w.id);
       return {
-        worker: w,
+        worker: toSafeWorker(w),
         cpuPercent: m?.cpuPercent ?? null,
         memPercent: m?.memPercent ?? null,
         diskUsageBytes: m?.diskUsageBytes ?? null,

@@ -1,5 +1,5 @@
 import { redirect, fail } from '@sveltejs/kit';
-import { db, safeUserColumns } from '$lib/db';
+import { db, safeUserColumns, toSafeWorker } from '$lib/db';
 import { applications, users, workers, teams, teamMembers, volumes } from '$lib/db/schema';
 import { eq, inArray, or, isNull, and } from 'drizzle-orm';
 import { selectWorker, getAllWorkerResources, getAllEligibleWorkers } from '$lib/server/worker-selector';
@@ -36,18 +36,19 @@ export const load = async (event: { locals: App.Locals }) => {
         : await db.select().from(volumes).where(isNull(volumes.teamId)).all();
   }
 
-  const _stripWorker = (w: typeof workers.$inferSelect) => {
-    const { podmanCaCert: _a, podmanClientCert: _b, podmanClientKey: _c, crowdsecBouncerKey: _d, oidcClientSecret: _e, oidcEncryptionKey: _f, configToken: _g, ...safe } = w;
-    return safe;
-  };
+  // `toSafeWorker` rather than another hand-written destructure. The one that
+  // used to live here listed the secret columns by name and had already fallen
+  // behind: `configBasicPassword` was not in it, so it was published from the
+  // moment that column existed. `selection.resources` and `allEligible` now
+  // arrive stripped from the selector itself.
   return {
     user: currentUser,
     teams: userTeams,
     volumes: availableVolumes,
-    selectedWorker: selection?.worker ? _stripWorker(selection.worker) : null,
+    selectedWorker: selection?.worker ? toSafeWorker(selection.worker) : null,
     workerResources: selection?.resources ?? null,
     noWorkersAvailable: selection === null,
-    allWorkers: allEligible.map(info => ({ ...info, worker: _stripWorker(info.worker) })),
+    allWorkers: allEligible,
   };
 };
 

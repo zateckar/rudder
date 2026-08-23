@@ -31,6 +31,7 @@ import {
   teams,
   users,
   volumes,
+  workers,
 } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { createSession, hashPassword } from '$lib/auth';
@@ -332,6 +333,53 @@ describe('dashboard scoping', () => {
     expect((await dashboard(member)).workerResources).toEqual([]);
     // And an admin still gets the global view rather than an empty one.
     expect((await dashboard(admin)).teams.length).toBeGreaterThan(0);
+  });
+
+  test('worker resources carry no credential columns', async () => {
+    // The capacity panel needs an id, a name and three numbers. It used to be
+    // handed the whole row: an admin loading the dashboard received every
+    // worker's config token, OIDC client secret and session key, Podman client
+    // key, CrowdSec bouncer key and control-plane password. Encrypted at rest,
+    // so ciphertext rather than plaintext, and no reason at all to be there.
+    // Created here rather than in the shared fixture: the tests above assert on
+    // an empty worker list, and this one needs a row whose secret columns are
+    // actually populated for the assertion to mean anything.
+    await db.insert(workers).values({
+      id: crypto.randomUUID(),
+      name: 'boundary-worker',
+      hostname: 'boundary.example.com',
+      sshPort: 22,
+      sshUser: 'root',
+      status: 'online',
+      baseDomain: 'apps.example.com',
+      podmanApiUrl: 'https://podman-api.apps.example.com',
+      createdAt: new Date(),
+      podmanClientKey: 'client-key',
+      crowdsecBouncerKey: 'bouncer-key',
+      oidcClientSecret: 'oidc-secret',
+      oidcEncryptionKey: 'a'.repeat(32),
+      configToken: 'config-token',
+      configBasicPassword: 'proxy-password',
+    });
+
+    const resources = (await dashboard(admin)).workerResources;
+    expect(resources.length).toBeGreaterThan(0);
+
+    for (const entry of resources) {
+      for (const secret of [
+        'podmanClientKey',
+        'crowdsecBouncerKey',
+        'oidcClientSecret',
+        'oidcEncryptionKey',
+        'configToken',
+        'configBasicPassword',
+      ]) {
+        expect(entry.worker).not.toHaveProperty(secret);
+      }
+      // Still usable for what the panel actually renders.
+      expect(entry.worker.id).toBeTruthy();
+      expect(entry.worker).toHaveProperty('name');
+    }
   });
 });
 
