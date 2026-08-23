@@ -13,7 +13,7 @@
  * understood-but-empty one must withdraw.
  */
 import { describe, expect, test } from 'bun:test';
-import { resolveTeamNames } from './+server';
+import { resolveTeamNames } from '$lib/server/oidc-teams';
 
 describe('resolveTeamNames — the claim is already a list', () => {
   test('uses it as-is, no key or suffix needed', () => {

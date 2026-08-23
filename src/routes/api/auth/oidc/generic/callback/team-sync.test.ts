@@ -10,7 +10,7 @@ import { beforeAll, describe, expect, test } from 'bun:test';
 import { db } from '$lib/db';
 import { teamMembers, teams, users } from '$lib/db/schema';
 import { and, eq } from 'drizzle-orm';
-import { syncUserTeams } from './+server';
+import { syncUserTeams } from '$lib/server/oidc-teams';
 
 /** Team ids by name, so assertions can talk about names. */
 const teamIds = new Map<string, string>();

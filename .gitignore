@@ -5,6 +5,10 @@ node_modules/
 .svelte-kit/
 build/
 dist/
+# TypeScript's incremental-build cache. It was committed, so it carried one
+# machine's stale view of the project — still listing routes deleted months ago —
+# and churned on every build.
+tsconfig.tsbuildinfo
 
 # Environment & secrets
 .env
