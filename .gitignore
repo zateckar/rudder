@@ -68,3 +68,4 @@ temp/
 gsd-repo/*
 docs/*
 .planning/*
+.claude/*
