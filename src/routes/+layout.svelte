@@ -4,8 +4,15 @@
   import Toasts from '$lib/components/Toasts.svelte';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 
-  let { data, children }: { 
-    data: { user: { username: string; role: string; id: string } | null };
+  // Shared UI primitives — buttons, form controls, modals, tables. Loaded once
+  // here so pages carry only what is genuinely their own. See ui.css.
+  import '$lib/styles/ui.css';
+
+  let { data, children }: {
+    data: {
+      user: { username: string; role: string; id: string } | null;
+      teams: Array<{ id: string; name: string }>;
+    };
     children: any;
   } = $props();
   
@@ -21,7 +28,7 @@
 </script>
 
 {#if showLayout}
-  <AppLayout user={data.user} {activePage} pathname={$page.url.pathname}>
+  <AppLayout user={data.user} teams={data.teams} {activePage} pathname={$page.url.pathname}>
     {@render children()}
   </AppLayout>
 {:else}

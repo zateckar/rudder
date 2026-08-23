@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '$lib/components/PageHeader.svelte';
+  import { invalidateAll } from '$app/navigation';
 
   let { data } = $props();
   let showCreateForm = $state(false);
@@ -20,14 +22,15 @@
   <div class="toast {toast.type}">{toast.message}</div>
 {/if}
 
-<header>
-  <h1>Teams</h1>
-  {#if data.user?.role === 'admin'}
-    <button class="btn-primary" onclick={() => (showCreateForm = !showCreateForm)}>
-      {showCreateForm ? 'Cancel' : 'Create Team'}
-    </button>
-  {/if}
-</header>
+<PageHeader title="Teams">
+  {#snippet actions()}
+    {#if data.user?.role === 'admin'}
+      <button class="btn-primary" onclick={() => (showCreateForm = !showCreateForm)}>
+        {showCreateForm ? 'Cancel' : 'Create Team'}
+      </button>
+    {/if}
+  {/snippet}
+</PageHeader>
 
 {#if showCreateForm}
   <div class="create-form">
@@ -47,7 +50,7 @@
           if (res.ok) {
             showCreateForm = false;
             showMsg('success', 'Team created');
-            window.location.reload();
+            invalidateAll();
           } else {
             showMsg('error', body.error || 'Failed to create team');
           }
@@ -110,39 +113,15 @@
   }
   @keyframes slide-in { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
 
-  header {
-    display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;
-  }
-  header h1 { font-size: 28px; color: var(--text-primary); }
-
-  .btn-primary {
-    padding: 10px 20px; background: var(--accent); color: var(--text-inverse);
-    border-radius: var(--radius-md); font-weight: 500; border: none; cursor: pointer;
-    transition: background 0.15s;
-  }
-  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
-  .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
-
   .create-form {
     background: var(--bg-raised); padding: 24px; border-radius: var(--radius-lg);
     margin-bottom: 24px; border: 1px solid var(--border-subtle);
   }
-  .form-group { margin-bottom: 16px; }
-  .form-group label { display: block; margin-bottom: 6px; font-weight: 500; color: var(--text-secondary); }
-  .form-group input {
-    width: 100%; padding: 10px 12px; border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm); font-size: 14px; box-sizing: border-box;
-    background: var(--bg-input); color: var(--text-primary); transition: border-color 0.15s, box-shadow 0.15s;
+  /* Inside the create-team card, so no separator above the buttons. */
+  .form-actions {
+    margin-top: 20px;
   }
-  .form-group input:focus {
-    outline: none; border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-subtle);
-  }
-  .form-actions { margin-top: 20px; }
 
-  .empty-state {
-    background: var(--bg-raised); padding: 60px; border-radius: var(--radius-lg);
-    text-align: center; color: var(--text-secondary); border: 1px solid var(--border-subtle);
-  }
   .teams-grid {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px;
   }

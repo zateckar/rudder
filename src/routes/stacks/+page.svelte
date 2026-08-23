@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PageHeader from '$lib/components/PageHeader.svelte';
   import { browser } from '$app/environment';
   import { showToast } from '$lib/client/toast.svelte';
   import { confirmAction } from '$lib/client/dialog.svelte';
@@ -167,17 +168,13 @@
 
 <div class="stacks-page">
 
-<header>
-  <div class="header-top">
-    <div>
-      <h1>Application Stacks</h1>
-      <p class="subtitle">Group applications for bulk operations</p>
-    </div>
+<PageHeader title="Application Stacks" subtitle="Group applications for bulk operations">
+  {#snippet actions()}
     <button class="btn-primary" onclick={() => { showNewForm = !showNewForm; error = null; }}>
       {showNewForm ? 'Cancel' : '+ New Stack'}
     </button>
-  </div>
-</header>
+  {/snippet}
+</PageHeader>
 
 {#if error}
   <div class="alert alert-error">{error}</div>
@@ -219,9 +216,9 @@
   <!-- Stack list -->
   <div class="stacks-list">
     {#if loading}
-      <div class="empty-state">Loading stacks...</div>
+      <div class="empty-row">Loading stacks...</div>
     {:else if stacks.length === 0}
-      <div class="empty-state">No stacks yet. Create one to group your applications.</div>
+      <div class="empty-row">No stacks yet. Create one to group your applications.</div>
     {:else}
       {#each stacks as stack (stack.id)}
         <!-- A button, not a div with a click handler: selecting a stack was
@@ -265,9 +262,9 @@
   <!-- Stack detail -->
   <div class="stack-detail">
     {#if !selectedStack}
-      <div class="empty-state">Select a stack to view its applications</div>
+      <div class="empty-row">Select a stack to view its applications</div>
     {:else if loadingDetail}
-      <div class="empty-state">Loading...</div>
+      <div class="empty-row">Loading...</div>
     {:else if stackDetail}
       <div class="detail-header">
         <div>
@@ -302,7 +299,7 @@
       </div>
 
       {#if stackDetail.applications.length === 0}
-        <div class="empty-state">
+        <div class="empty-row">
           No applications in this stack yet. Assign applications from their edit page.
         </div>
       {:else}
@@ -354,35 +351,6 @@
 </div>
 
 <style>
-  header { margin-bottom: 24px; }
-  .header-top {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-  }
-  header h1 { font-size: 26px; color: var(--text-primary); margin: 0 0 6px; }
-  .subtitle { color: var(--text-secondary); font-size: 14px; margin: 0; }
-
-  .alert {
-    padding: 12px 16px;
-    border-radius: var(--radius-sm);
-    margin-bottom: 16px;
-    font-size: 14px;
-  }
-  .alert-error {
-    background: var(--red-subtle);
-    color: var(--red-text);
-    border: 1px solid var(--red);
-  }
-
-  .section {
-    background: var(--bg-raised);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-lg);
-    padding: 24px;
-    margin-bottom: 24px;
-  }
-
   .form-title {
     font-size: 14px;
     font-weight: 600;
@@ -391,48 +359,7 @@
   }
 
   .form-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
     margin-bottom: 12px;
-  }
-
-  .form-group {
-    margin-bottom: 12px;
-  }
-
-  .form-group label {
-    display: block;
-    margin-bottom: 5px;
-    font-weight: 500;
-    font-size: 12px;
-    color: var(--text-primary);
-  }
-
-  .form-group input[type='text'],
-  .form-group select {
-    width: 100%;
-    padding: 8px 10px;
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    background: var(--bg-input);
-    color: var(--text-primary);
-    box-sizing: border-box;
-    transition: border-color 0.15s;
-    font-family: var(--font-sans);
-  }
-
-  .form-group input:focus,
-  .form-group select:focus {
-    outline: none;
-    border-color: var(--border-focus);
-  }
-
-  .form-actions-inline {
-    display: flex;
-    gap: 8px;
-    margin-top: 8px;
   }
 
   .stacks-layout {
@@ -497,16 +424,6 @@
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-
-  .badge {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 10px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
   }
 
   .badge-team {
@@ -597,10 +514,6 @@
     color: var(--text-muted);
   }
 
-  .mono {
-    font-family: var(--font-mono);
-  }
-
   .stack-app-url {
     color: var(--accent-text);
     text-decoration: none;
@@ -622,34 +535,6 @@
     text-transform: uppercase;
     letter-spacing: 0.03em;
   }
-
-  .btn-primary {
-    padding: 8px 16px;
-    background: var(--accent);
-    color: var(--text-inverse);
-    border: none;
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background 0.15s;
-  }
-  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
-  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-
-  .btn-sm { padding: 6px 12px; font-size: 12px; }
-
-  .btn-ghost {
-    padding: 6px 12px;
-    background: transparent;
-    color: var(--text-secondary);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    font-size: 12px;
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-  .btn-ghost:hover { background: var(--bg-hover); color: var(--text-primary); }
 
   .btn-deploy {
     padding: 6px 12px;
@@ -679,43 +564,7 @@
   .btn-warning:hover:not(:disabled) { opacity: 0.9; }
   .btn-warning:disabled { opacity: 0.5; cursor: not-allowed; }
 
-  .btn-danger {
-    padding: 6px 12px;
-    background: var(--red);
-    color: white;
-    border: none;
-    border-radius: var(--radius-sm);
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: opacity 0.15s;
-  }
-  .btn-danger:hover:not(:disabled) { opacity: 0.9; }
-  .btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
-
-  .btn-icon {
-    background: transparent;
-    border: 1px solid var(--border-default);
-    color: var(--text-muted);
-    width: 28px;
-    height: 28px;
-    border-radius: var(--radius-sm);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    transition: all 0.12s;
-    flex-shrink: 0;
-  }
-  .btn-icon:hover { background: var(--bg-hover); color: var(--text-primary); }
   .btn-icon-danger:hover { background: var(--red-subtle); color: var(--red-text); border-color: var(--red); }
-
-  .empty-state {
-    text-align: center;
-    padding: 40px 16px;
-    color: var(--text-muted);
-    font-size: 13px;
-  }
 
   @media (max-width: 768px) {
     .stacks-layout {

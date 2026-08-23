@@ -7,50 +7,58 @@
   let {
     children,
     user,
+    teams = [],
     activePage,
     pathname,
   }: {
     children?: any;
     user?: { username: string; role: string; id: string } | null;
+    /** From the root layout load — see `+layout.server.ts`. */
+    teams?: Array<{ id: string; name: string }>;
     activePage: string;
     pathname?: string;
   } = $props();
 
-  let teams = $state<any[]>([]);
-  let selectedTeam = $state<string | null>(null);
+  /**
+   * Which team the rest of the app is scoped to.
+   *
+   * The URL is the source of truth, because every page load reads `?team=` on
+   * the server. `localStorage` only remembers the choice across a fresh visit
+   * that names no team.
+   *
+   * This used to fetch `/api/teams` in an `$effect` on every mount and pick the
+   * selection afterwards, which meant a second authenticated round trip per
+   * navigation and a sidebar that rendered without its selector until it
+   * landed.
+   */
+  const selectedTeam = $derived.by(() => {
+    if (teams.length === 0) return null;
+
+    const fromUrl = $page.url.searchParams.get('team');
+    if (fromUrl && (fromUrl === 'all' || teams.some((t) => t.id === fromUrl))) return fromUrl;
+
+    if (browser) {
+      const saved = localStorage.getItem('rudder_team_id');
+      if (saved && (saved === 'all' || teams.some((t) => t.id === saved))) return saved;
+    }
+    return teams[0].id;
+  });
 
   $effect(() => {
-    if (!browser) return;
-    fetch('/api/teams')
-      .then((r) => r.json())
-      .then((data) => {
-        teams = data;
-        if (data.length > 0) {
-          const urlTeam = $page.url.searchParams.get('team');
-          if (urlTeam && (urlTeam === 'all' || data.find((t: any) => t.id === urlTeam))) {
-            selectedTeam = urlTeam;
-          } else {
-            const saved = localStorage.getItem('rudder_team_id');
-            if (saved && (saved === 'all' || data.find((t: any) => t.id === saved))) {
-              selectedTeam = saved;
-            } else {
-              selectedTeam = data[0].id;
-            }
-          }
-          localStorage.setItem('rudder_team_id', selectedTeam!);
-        }
-      })
-      .catch(console.error);
+    if (browser && selectedTeam) localStorage.setItem('rudder_team_id', selectedTeam);
   });
 
   function updateTeam(e: Event) {
     const target = e.target as HTMLSelectElement;
-    if (target.value) {
-      localStorage.setItem('rudder_team_id', target.value);
-      const url = new URL(window.location.href);
-      url.searchParams.set('team', target.value);
-      window.location.href = url.toString();
-    }
+    if (!target.value) return;
+    localStorage.setItem('rudder_team_id', target.value);
+
+    // `goto`, not `window.location.href`: this is a same-app navigation, and a
+    // full document load discards the page and re-downloads every asset to
+    // change one query parameter.
+    const url = new URL($page.url);
+    url.searchParams.set('team', target.value);
+    goto(`${url.pathname}${url.search}`, { invalidateAll: true });
   }
 
   const isAdmin = $derived(user?.role === 'admin');

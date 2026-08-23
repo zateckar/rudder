@@ -1,4 +1,7 @@
 <script lang="ts">
+  import PageHeader from '$lib/components/PageHeader.svelte';
+  import { formatDateTime as formatDate } from '$lib/format';
+  import { invalidateAll } from '$app/navigation';
   import { browser } from '$app/environment';
   import { showToast } from '$lib/client/toast.svelte';
   import { confirmAction } from '$lib/client/dialog.svelte';
@@ -99,7 +102,7 @@
       if (!response.ok) {
         error = result.error || 'Failed to add member';
       } else {
-        window.location.reload();
+        invalidateAll();
       }
     } catch (e: any) {
       error = e.message;
@@ -123,7 +126,7 @@
       });
       
       if (response.ok) {
-        window.location.reload();
+        invalidateAll();
       } else {
         const result = await response.json();
         showToast('error', result.error || 'Failed to remove member');
@@ -252,29 +255,22 @@
     showCreateKey = false;
   }
 
-  function formatDate(d: string | Date | null | undefined) {
-    if (!d) return 'Never';
-    return new Date(d).toLocaleString();
-  }
-
   function isExpired(key: any) {
     if (!key.expiresAt) return false;
     return new Date(key.expiresAt) < new Date();
   }
 </script>
 
-<header>
-  <div class="header-left">
-    <a href="/teams" class="back-link">← Back to Teams</a>
-    <h1>{data.team.name}</h1>
+<PageHeader title={data.team.name} back={{ href: '/teams', label: 'Back to Teams' }}>
+  {#snippet meta()}
     <span class="slug">Slug: {data.team.slug}</span>
-  </div>
-  <div class="header-actions">
+  {/snippet}
+  {#snippet actions()}
     {#if data.userRole === 'owner'}
       <button class="btn-danger" onclick={deleteTeam}>Delete Team</button>
     {/if}
-  </div>
-</header>
+  {/snippet}
+</PageHeader>
 
 <div class="team-layout">
   <div class="members-section">
@@ -526,35 +522,6 @@
 </div>
 
 <style>
-  header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    margin-bottom: 24px;
-  }
-
-  .header-left {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .back-link {
-    font-size: 14px;
-    color: var(--text-secondary);
-    text-decoration: none;
-  }
-
-  .back-link:hover {
-    color: var(--accent);
-  }
-
-  header h1 {
-    font-size: 28px;
-    color: var(--text-primary);
-    margin: 0;
-  }
-
   .slug {
     font-size: 13px;
     color: var(--text-muted);
@@ -565,19 +532,6 @@
     display: grid;
     grid-template-columns: 1fr 300px;
     gap: 24px;
-  }
-
-  .section-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 20px;
-  }
-
-  .section-header h2 {
-    font-size: 20px;
-    color: var(--text-primary);
-    margin: 0;
   }
 
   .add-member-form {
@@ -594,51 +548,10 @@
     margin-bottom: 16px;
   }
 
-  .error-msg {
-    background: var(--red-subtle);
-    color: var(--red-text);
-    padding: 10px;
-    border-radius: var(--radius-sm);
-    margin-bottom: 16px;
-    font-size: 14px;
-    border: 1px solid var(--red);
-  }
-
   .form-row {
     display: grid;
     grid-template-columns: 2fr 1fr;
     gap: 16px;
-  }
-
-  .form-group {
-    margin-bottom: 16px;
-  }
-
-  .form-group label {
-    display: block;
-    margin-bottom: 6px;
-    font-weight: 500;
-    font-size: 14px;
-    color: var(--text-secondary);
-  }
-
-  .form-group input,
-  .form-group select {
-    width: 100%;
-    padding: 10px 12px;
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    font-size: 14px;
-    background: var(--bg-input);
-    color: var(--text-primary);
-    transition: border-color 0.15s, box-shadow 0.15s;
-  }
-
-  .form-group input:focus,
-  .form-group select:focus {
-    outline: none;
-    border-color: var(--border-focus);
-    box-shadow: 0 0 0 3px var(--accent-subtle);
   }
 
   .members-list {
@@ -755,35 +668,6 @@
 
   .info-row span:last-child {
     color: var(--text-primary);
-  }
-
-  .btn-primary,
-  .btn-danger {
-    padding: 8px 16px;
-    border-radius: var(--radius-sm);
-    font-size: 14px;
-    font-weight: 500;
-    border: none;
-    cursor: pointer;
-    transition: background 0.15s;
-  }
-
-  .btn-primary {
-    background: var(--accent);
-    color: var(--text-inverse);
-  }
-
-  .btn-primary:hover {
-    background: var(--accent-hover);
-  }
-
-  .btn-danger {
-    background: var(--red);
-    color: white;
-  }
-
-  .btn-danger:hover {
-    opacity: 0.9;
   }
 
   .btn-small {

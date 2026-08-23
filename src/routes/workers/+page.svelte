@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '$lib/components/PageHeader.svelte';
+  import { invalidateAll } from '$app/navigation';
   import SshKeyPrompt from '$lib/components/SshKeyPrompt.svelte';
   import { showToast } from '$lib/client/toast.svelte';
 
@@ -23,7 +25,7 @@
         body: JSON.stringify({ workerId, sshPrivateKey: sshKey }),
       });
       if (response.ok) {
-        window.location.reload();
+        invalidateAll();
       } else {
         const result = await response.json().catch(() => ({}));
         showToast('error', `Provisioning failed: ${result.error ?? `HTTP ${response.status}`}`);
@@ -36,10 +38,11 @@
   }
 </script>
 
-<header>
-  <h1>Workers</h1>
-  <a href="/workers/new" class="btn-primary">Add Worker</a>
-</header>
+<PageHeader title="Workers">
+  {#snippet actions()}
+    <a href="/workers/new" class="btn-primary">Add Worker</a>
+  {/snippet}
+</PageHeader>
 
 {#if data.workers.length === 0}
   <div class="empty-state">
@@ -102,61 +105,18 @@
 
 <style>
   /* Modal styles moved to SshKeyPrompt component */
-  header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 28px;
-  }
-
-  header h1 {
-    font-family: var(--font-sans);
-    font-size: 24px;
-    font-weight: 700;
-    color: var(--text-primary);
-    letter-spacing: -0.02em;
-  }
-
-  .btn-primary {
-    display: inline-flex;
-    align-items: center;
-    padding: 9px 20px;
-    background: var(--accent);
-    color: var(--bg-root);
-    border-radius: var(--radius-sm);
-    font-weight: 600;
-    font-size: 13px;
-    text-decoration: none;
-    transition: background 0.15s;
-  }
-
-  .btn-primary:hover {
-    background: var(--accent-hover);
-  }
-
-  .empty-state {
-    background: var(--bg-surface);
-    border: 1px dashed var(--border-default);
-    padding: 72px 40px;
-    border-radius: var(--radius-lg);
-    text-align: center;
-  }
-
   .empty-icon {
     width: 52px;
     height: 52px;
     border-radius: 50%;
     background: var(--accent-subtle);
     color: var(--accent);
-    font-size: 26px;
     line-height: 52px;
     margin: 0 auto 20px;
   }
 
   .empty-state p {
-    color: var(--text-muted);
     margin-bottom: 24px;
-    font-size: 14px;
   }
 
   .worker-list {
@@ -317,12 +277,6 @@
   }
 
   /* ── Status dot ──────────────────────────────── */
-  .status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
 
   .status-dot.online {
     background: var(--green);
@@ -344,7 +298,6 @@
   }
 
   .muted {
-    color: var(--text-muted);
     font-size: 12px;
     font-style: italic;
   }

@@ -378,7 +378,7 @@
 
 <div class="terminal-container" bind:this={containerRef}>
   <div class="terminal-header">
-    <div class="tabs">
+    <div class="term-tabs">
       <button class:active={activeTab === 'logs'} onclick={() => switchTab('logs')}>
         Logs {#if isStreaming}<span class="streaming-indicator"></span>{/if}
       </button>
@@ -569,12 +569,12 @@
     flex-shrink: 0;
   }
 
-  .tabs {
+  .term-tabs {
     display: flex;
     gap: 8px;
   }
 
-  .tabs button {
+  .term-tabs button {
     background: transparent;
     border: none;
     color: #888;
@@ -585,12 +585,12 @@
     font-weight: 500;
   }
 
-  .tabs button.active {
+  .term-tabs button.active {
     background: #444;
     color: white;
   }
 
-  .tabs button:hover:not(.active) {
+  .term-tabs button:hover:not(.active) {
     color: #ccc;
   }
 

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import Modal from './Modal.svelte';
 
   let {
     workerId,
@@ -81,9 +82,9 @@
   }
 </script>
 
-<div class="modal-overlay" onclick={oncancel} role="presentation">
-  <div class="modal" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
-    <h3>{title}</h3>
+<!-- Mounted only while it is wanted, so `open` is simply true; the caller
+     unmounts us when `onclose` fires. -->
+<Modal open {title} maxWidth="520px" onclose={oncancel}>
     <p class="modal-desc">{@html description}</p>
 
     {#if hasVaultKey}
@@ -121,42 +122,15 @@
         {loading ? 'Working…' : submitLabel}
       </button>
     </div>
-  </div>
-</div>
+</Modal>
 
 <style>
-  .modal-overlay {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 1000;
-    display: flex; align-items: center; justify-content: center;
-  }
-  .modal {
-    background: var(--bg-surface); border: 1px solid var(--border-default);
-    border-radius: var(--radius-lg); padding: 28px; max-width: 520px; width: 90%;
-    box-shadow: var(--shadow-lg);
-  }
-  .modal h3 { margin: 0 0 8px; font-size: 16px; color: var(--text-primary); }
   .modal-desc { font-size: 13px; color: var(--text-secondary); margin: 0 0 16px; line-height: 1.5; }
-  .form-group { margin-bottom: 12px; }
-  .form-group label { display: block; font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; }
   .form-group textarea {
     width: 100%; font-family: var(--font-mono); font-size: 12px;
     background: var(--bg-root); border: 1px solid var(--border-default);
     border-radius: var(--radius-sm); padding: 10px; color: var(--text-primary);
     resize: vertical; box-sizing: border-box;
-  }
-  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
-  .btn-secondary {
-    padding: 8px 16px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500;
-    background: var(--bg-raised); border: 1px solid var(--border-default); color: var(--text-secondary); cursor: pointer;
-  }
-  .btn-primary {
-    padding: 8px 16px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 600;
-    background: var(--accent); border: none; color: var(--bg-root); cursor: pointer;
-  }
-  .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
-  .error-msg {
-    background: var(--red-subtle); color: var(--red-text); padding: 8px 12px;
-    border-radius: var(--radius-sm); font-size: 12px; margin-bottom: 12px;
   }
   .vault-notice {
     display: flex; align-items: center; gap: 8px; padding: 8px 12px;

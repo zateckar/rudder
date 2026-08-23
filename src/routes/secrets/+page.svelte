@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PageHeader from '$lib/components/PageHeader.svelte';
   import { onMount } from 'svelte';
   import { showToast } from '$lib/client/toast.svelte';
   import { confirmAction } from '$lib/client/dialog.svelte';
@@ -129,12 +130,13 @@
   const MASK = '••••••••••••';
 </script>
 
-<header>
-  <h1>Secrets</h1>
-  <button class="btn-primary" onclick={() => { resetForm(); showForm = true; fScope = isAdmin ? 'global' : 'team'; }}>
-    + New Secret
-  </button>
-</header>
+<PageHeader title="Secrets">
+  {#snippet actions()}
+    <button class="btn-primary" onclick={() => { resetForm(); showForm = true; fScope = isAdmin ? 'global' : 'team'; }}>
+      + New Secret
+    </button>
+  {/snippet}
+</PageHeader>
 
 <p class="page-desc">
   Values delivered to containers at deploy time, as an environment variable or as a file in
@@ -235,7 +237,7 @@
             <td class="value-cell">
               <span class="val">{showValues[s.id] ? revealed[s.id] : MASK}</span>
               {#if s.revealable}
-                <button class="btn-icon" onclick={() => toggleValue(s.id)} disabled={revealing[s.id]} title={showValues[s.id] ? 'Hide' : 'Show'}>
+                <button class="btn-chip" onclick={() => toggleValue(s.id)} disabled={revealing[s.id]} title={showValues[s.id] ? 'Hide' : 'Show'}>
                   {revealing[s.id] ? '…' : showValues[s.id] ? 'Hide' : 'Show'}
                 </button>
               {:else}
@@ -254,8 +256,8 @@
             <td class="muted">{new Date(s.updatedAt).toLocaleDateString()}</td>
             <td class="actions">
               {#if s.revealable}
-                <button class="btn-icon" onclick={() => startEdit(s)} title="Edit">Edit</button>
-                <button class="btn-icon danger" onclick={() => deleteSecret(s.id)} title="Delete">Del</button>
+                <button class="btn-chip" onclick={() => startEdit(s)} title="Edit">Edit</button>
+                <button class="btn-chip danger" onclick={() => deleteSecret(s.id)} title="Delete">Del</button>
               {/if}
             </td>
           </tr>
@@ -296,17 +298,10 @@ const apiKey = process.env.API_KEY;</pre>
 </div>
 
 <style>
-  header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-  header h1 { font-size: 26px; font-weight: 700; color: var(--text-primary); margin: 0; }
-
   .page-desc { font-size: 13px; color: var(--text-muted); margin: 0 0 20px; max-width: 600px; line-height: 1.5; }
-
-  .muted { color: var(--text-muted); }
-  .small { font-size: 12px; }
 
   /* Table */
   .secrets-table { overflow-x: auto; margin-bottom: 20px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th {
     text-align: left; padding: 8px 10px; font-size: 10px; font-weight: 600;
     color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em;
@@ -320,22 +315,18 @@ const apiKey = process.env.API_KEY;</pre>
   .val { font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .actions { display: flex; gap: 4px; }
 
-  .badge {
-    display: inline-block; padding: 2px 8px; border-radius: 8px; font-size: 11px; font-weight: 600;
-    text-transform: uppercase; letter-spacing: 0.04em;
-  }
   .badge.global { background: var(--accent-subtle); color: var(--accent-text); }
   .badge.team { background: var(--bg-overlay); color: var(--text-muted); }
   .badge.file { background: var(--accent-subtle); color: var(--accent-text); }
   .badge.env { background: var(--bg-overlay); color: var(--text-muted); }
 
-  .btn-icon {
+  .btn-chip {
     padding: 3px 8px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm);
     font-size: 11px; background: var(--bg-overlay); color: var(--text-muted); cursor: pointer;
   }
-  .btn-icon:hover { background: var(--bg-hover); color: var(--text-primary); }
-  .btn-icon.danger { color: var(--red-text); }
-  .btn-icon.danger:hover { background: var(--red-subtle); }
+  .btn-chip:hover { background: var(--bg-hover); color: var(--text-primary); }
+  .btn-chip.danger { color: var(--red-text); }
+  .btn-chip.danger:hover { background: var(--red-subtle); }
 
   /* Form */
   .form-card {
@@ -344,29 +335,12 @@ const apiKey = process.env.API_KEY;</pre>
   }
   .form-card h3 { font-size: 14px; font-weight: 600; margin: 0 0 14px; color: var(--text-primary); }
   .form-error { background: var(--red-subtle); color: var(--red-text); border: 1px solid var(--red); padding: 8px 12px; border-radius: var(--radius-sm); margin-bottom: 12px; font-size: 13px; }
-  .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .form-group { margin-bottom: 12px; }
-  .form-group label { display: block; margin-bottom: 4px; font-size: 12px; font-weight: 500; color: var(--text-secondary); }
-  .form-group input, .form-group select {
-    width: 100%; padding: 8px 10px; border: 1px solid var(--border-default); border-radius: var(--radius-sm);
-    font-size: 13px; background: var(--bg-input); color: var(--text-primary); box-sizing: border-box;
-  }
-  .form-group input:focus, .form-group select:focus { outline: none; border-color: var(--border-focus); }
   .hint { display: block; font-size: 11px; color: var(--text-muted); margin-top: 3px; }
-  .form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
-
-  .btn-primary {
-    padding: 8px 16px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500;
-    background: var(--accent); color: var(--text-inverse); border: none; cursor: pointer;
+  /* No rule off the shared `.form-actions` separator — this row sits inside an
+  inline create form, not at the foot of a full-page one. */
+  .form-actions {
+    margin-top: 14px;
   }
-  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
-  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-
-  .btn-secondary {
-    padding: 8px 16px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500;
-    background: var(--bg-raised); color: var(--text-secondary); border: 1px solid var(--border-default); cursor: pointer;
-  }
-  .btn-secondary:hover { background: var(--bg-hover); }
 
   .empty { text-align: center; padding: 24px; }
   .empty p { color: var(--text-secondary); margin: 4px 0; }

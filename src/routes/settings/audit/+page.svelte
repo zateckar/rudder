@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PageHeader from '$lib/components/PageHeader.svelte';
   let { data } = $props();
 
   // Rows written before actions were classified hold the bare HTTP method.
@@ -19,16 +20,11 @@
   }
 </script>
 
-<header>
-  <div class="header-left">
-    <a href="/dashboard" class="back-link">← Back to Dashboard</a>
-    <h1>Audit Logs</h1>
-  </div>
-</header>
+<PageHeader title="Audit Logs" back={{ href: '/dashboard', label: 'Back to Dashboard' }} />
 
 <div class="audit-container">
   <div class="filters">
-    <p class="help-text">Showing the 100 most recent actions.</p>
+    <p class="subtitle">Showing the 100 most recent actions.</p>
   </div>
 
   <div class="logs-table-wrapper">
@@ -73,7 +69,7 @@
         {/each}
         {#if data.logs.length === 0}
           <tr>
-            <td colspan="5" class="empty-state">No audit logs found.</td>
+            <td colspan="5" class="empty-row">No audit logs found.</td>
           </tr>
         {/if}
       </tbody>
@@ -82,32 +78,6 @@
 </div>
 
 <style>
-  header {
-    margin-bottom: 24px;
-  }
-
-  .header-left {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .back-link {
-    font-size: 14px;
-    color: var(--text-secondary);
-    text-decoration: none;
-  }
-
-  .back-link:hover {
-    color: var(--accent);
-  }
-
-  header h1 {
-    font-size: 28px;
-    color: var(--text-primary);
-    margin: 0;
-  }
-
   .audit-container {
     background: var(--bg-raised);
     border-radius: var(--radius-lg);
@@ -119,12 +89,6 @@
     padding: 16px 24px;
     border-bottom: 1px solid var(--border-subtle);
     background: var(--bg-overlay);
-  }
-
-  .help-text {
-    color: var(--text-secondary);
-    font-size: 14px;
-    margin: 0;
   }
 
   .logs-table-wrapper {
@@ -225,7 +189,7 @@
   }
 
   /* Enough of the id to match a row against a resource, without a UUID
-     dominating the column. The full value is in the title attribute. */
+  dominating the column. The full value is in the title attribute. */
   .resource-id {
     display: block;
     font-family: var(--font-mono);
@@ -247,11 +211,5 @@
     word-break: break-all;
     display: block;
     border: 1px solid var(--border-subtle);
-  }
-
-  .empty-state {
-    text-align: center;
-    color: var(--text-muted);
-    padding: 40px !important;
   }
 </style>

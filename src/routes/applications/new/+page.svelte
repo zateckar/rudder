@@ -1,6 +1,12 @@
 <script lang="ts">
+  import PageHeader from '$lib/components/PageHeader.svelte';
+  import { formatBytes } from '$lib/format';
   import { enhance } from '$app/forms';
   import YamlEditor from '$lib/components/YamlEditor.svelte';
+  import EnvVarEditor from '$lib/components/form/EnvVarEditor.svelte';
+  import PortMappingEditor from '$lib/components/form/PortMappingEditor.svelte';
+  import VolumeMountEditor from '$lib/components/form/VolumeMountEditor.svelte';
+  import type { EnvVar, PortMapping, VolumeMount } from '$lib/components/form/types';
 
   let { data } = $props();
   let loading = $state(false);
@@ -21,10 +27,6 @@
   let workingDir = $state('');
   let memoryLimit = $state('');
   let cpuLimit = $state('');
-
-  interface EnvVar { key: string; value: string; secret: boolean }
-  interface PortMapping { containerPort: string; hostPort: string; protocol: string }
-  interface VolumeMount { volumeId: string; hostPath: string; containerPath: string; mode: string }
 
   let envVars = $state<EnvVar[]>([]);
   let ports = $state<PortMapping[]>([]);
@@ -70,27 +72,6 @@
     excludedURLs: oidcExcludedURLs ? oidcExcludedURLs.split(',').map((s: string) => s.trim()).filter(Boolean) : [],
   }) : '');
 
-  function addEnvVar() { envVars.push({ key: '', value: '', secret: false }); }
-  function removeEnvVar(i: number) { envVars.splice(i, 1); }
-  function addPort() { ports.push({ containerPort: '', hostPort: '', protocol: 'tcp' }); }
-  function removePort(i: number) { ports.splice(i, 1); }
-  function addVolume() { volumeMounts.push({ volumeId: '', hostPath: '', containerPath: '', mode: 'rw' }); }
-  function removeVolume(i: number) { volumeMounts.splice(i, 1); }
-
-  function onVolumeSelect(vol: VolumeMount, selectedId: string) {
-    vol.volumeId = selectedId;
-    if (selectedId) {
-      const regVol = data.volumes.find((v: { id: string }) => v.id === selectedId);
-      if (regVol) {
-        vol.hostPath = regVol.name;
-        vol.containerPath = regVol.containerPath;
-      }
-    } else {
-      vol.hostPath = '';
-      vol.containerPath = '';
-    }
-  }
-
   // Auto-selected worker
   let selectedWorker = $derived(data.selectedWorker);
   let previewDomain = $derived(
@@ -98,13 +79,6 @@
       ? `${appName}.${selectedWorker.baseDomain}`
       : null
   );
-
-  function formatBytes(bytes: number | null | undefined): string {
-    if (!bytes) return '—';
-    if (bytes < 1048576) return (bytes / 1024).toFixed(0) + ' KB';
-    if (bytes < 1073741824) return (bytes / 1048576).toFixed(0) + ' MB';
-    return (bytes / 1073741824).toFixed(1) + ' GB';
-  }
 
   const composeExample = `services:
   web:
@@ -276,9 +250,7 @@ spec:
   );
 </script>
 
-<header>
-  <h1>New Application</h1>
-</header>
+<PageHeader title="New Application" />
 
 <div class="form-container">
   <form
@@ -439,107 +411,11 @@ spec:
         <input type="hidden" name="gitDockerfile" value={sourceType === 'git' ? gitDockerfile : ''} />
       </div>
 
-      <!-- Environment Variables -->
-      <div class="form-section">
-        <div class="section-header">
-          <h2>Environment Variables</h2>
-          <button type="button" class="btn-add" onclick={addEnvVar}>+ Add Variable</button>
-        </div>
-        {#if envVars.length === 0}
-          <p class="empty-hint">No environment variables. Click "+ Add Variable" to add one.</p>
-        {:else}
-          <div class="kv-list">
-            {#each envVars as env, i (i)}
-              <div class="kv-row">
-                <input
-                  type="text"
-                  placeholder="VARIABLE_NAME"
-                  bind:value={env.key}
-                  class="kv-key"
-                />
-                <input
-                  type={env.secret ? 'password' : 'text'}
-                  placeholder="value"
-                  bind:value={env.value}
-                  class="kv-value"
-                />
-                <label class="secret-toggle" title="Mark as secret (masked)">
-                  <input type="checkbox" bind:checked={env.secret} />
-                  <span>🔒</span>
-                </label>
-                <button type="button" class="btn-remove" onclick={() => removeEnvVar(i)}>✕</button>
-              </div>
-            {/each}
-          </div>
-        {/if}
-      </div>
+      <EnvVarEditor bind:values={envVars} />
 
-      <!-- Port Mappings -->
-      <div class="form-section">
-        <div class="section-header">
-          <h2>Port Mappings</h2>
-          <button type="button" class="btn-add" onclick={addPort}>+ Add Port</button>
-        </div>
-        <p class="help-text">Map container ports to host ports so they are reachable from outside.</p>
-        {#if ports.length === 0}
-          <p class="empty-hint">No port mappings. The app will be accessible via Traefik only.</p>
-        {:else}
-          <div class="ports-header">
-            <span>Container Port</span>
-            <span>Host Port</span>
-            <span>Protocol</span>
-            <span></span>
-          </div>
-          {#each ports as port, i (i)}
-            <div class="port-row">
-              <input type="text" placeholder="80" bind:value={port.containerPort} />
-              <input type="text" placeholder="auto" bind:value={port.hostPort} />
-              <select bind:value={port.protocol}>
-                <option value="tcp">TCP</option>
-                <option value="udp">UDP</option>
-              </select>
-              <button type="button" class="btn-remove" onclick={() => removePort(i)}>✕</button>
-            </div>
-          {/each}
-        {/if}
-      </div>
+      <PortMappingEditor bind:values={ports} />
 
-      <!-- Volume Mounts -->
-      <div class="form-section">
-        <div class="section-header">
-          <h2>Volume Mounts</h2>
-          <button type="button" class="btn-add" onclick={addVolume}>+ Add Volume</button>
-        </div>
-        <p class="help-text">Select a registered volume or enter a host path manually.</p>
-        {#if volumeMounts.length === 0}
-          <p class="empty-hint">No volume mounts.</p>
-        {:else}
-          <div class="volumes-header">
-            <span>Volume</span>
-            <span>Host Path</span>
-            <span>Container Path</span>
-            <span>Mode</span>
-            <span></span>
-          </div>
-          {#each volumeMounts as vol, i (i)}
-            <div class="volume-row">
-              <select bind:value={vol.volumeId} onchange={(e) => onVolumeSelect(vol, (e.target as HTMLSelectElement).value)}>
-                <option value="">Custom</option>
-                {#each data.volumes as regVol}
-                  <option value={regVol.id}>{regVol.name}</option>
-                {/each}
-              </select>
-              <input type="text" placeholder="/data/myapp" bind:value={vol.hostPath} disabled={!!vol.volumeId} />
-              <input type="text" placeholder="/app/data" bind:value={vol.containerPath} disabled={!!vol.volumeId} />
-              <select bind:value={vol.mode}>
-                <option value="rw">Read/Write</option>
-                <option value="ro">Read Only</option>
-              </select>
-              <button type="button" class="btn-remove" onclick={() => removeVolume(i)}>✕</button>
-            </div>
-          {/each}
-        {/if}
-      </div>
+      <VolumeMountEditor bind:values={volumeMounts} volumes={data.volumes} />
 
       <!-- Resource Limits & Advanced -->
       <div class="form-section">
@@ -656,7 +532,7 @@ spec:
             {#each manifestErrors as err}
               <div class="validation-error">
                 <span class="error-line">Ln {err.line}:{err.column}</span>
-                <span class="error-msg">{err.message}</span>
+                <span class="error-text">{err.message}</span>
               </div>
             {/each}
           </div>
@@ -747,8 +623,8 @@ spec:
     </div>
 
     <div class="form-actions">
-      <a href="/applications" class="btn-secondary">Cancel</a>
-      <button type="submit" class="btn-primary" disabled={loading || data.noWorkersAvailable || !selectedWorker || manifestErrors.length > 0}>
+      <a href="/applications" class="btn-secondary btn-lg">Cancel</a>
+      <button type="submit" class="btn-primary btn-lg" disabled={loading || data.noWorkersAvailable || !selectedWorker || manifestErrors.length > 0}>
         {loading ? 'Creating…' : data.noWorkersAvailable ? 'No Workers Available' : 'Create Application'}
       </button>
     </div>
@@ -756,177 +632,16 @@ spec:
 </div>
 
 <style>
-  .source-toggle {
-    display: flex;
-    gap: 0;
-    margin-bottom: 16px;
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    overflow: hidden;
-    width: fit-content;
-  }
-
-  .source-btn {
-    padding: 8px 20px;
-    background: var(--bg-input);
-    color: var(--text-muted);
-    border: none;
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-
-  .source-btn:not(:last-child) {
-    border-right: 1px solid var(--border-default);
-  }
-
-  .source-btn.active {
-    background: var(--accent);
-    color: var(--text-inverse);
-  }
-
-  .source-btn:hover:not(.active) {
-    background: var(--bg-hover);
-  }
-
-  header h1 {
-    font-size: 28px;
-    font-weight: 700;
-    color: var(--text-primary);
-    letter-spacing: -0.02em;
-    margin-bottom: 24px;
-  }
-
-  .form-container {
-    background: var(--bg-raised);
-    padding: 30px;
-    border-radius: var(--radius-md);
-    border: 1px solid var(--border-subtle);
-  }
-
-  .form-section {
-    margin-bottom: 32px;
-    padding-bottom: 32px;
-    border-bottom: 1px solid var(--border-subtle);
-  }
-
-  .form-section:last-of-type {
-    border-bottom: none;
-  }
-
-  .form-section h2 {
-    font-size: 13px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    margin-bottom: 16px;
-    color: var(--text-muted);
-  }
-
-  .section-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 12px;
-  }
-
-  .section-header h2 {
-    margin-bottom: 0;
-  }
-
-  .form-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 16px;
-  }
-
-  .form-group {
-    margin-bottom: 16px;
-  }
-
-  .form-group label {
-    display: block;
-    margin-bottom: 6px;
-    font-weight: 500;
-    font-size: 13px;
-    color: var(--text-secondary);
-  }
-
-  .required {
-    color: var(--red);
-  }
-
-  .form-group input[type='text'],
-  .form-group select {
-    width: 100%;
-    padding: 9px 12px;
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    font-size: 14px;
-    background: var(--bg-input);
-    color: var(--text-primary);
-    box-sizing: border-box;
-    transition: border-color 0.15s, box-shadow 0.15s;
-  }
-
   .form-group input::placeholder,
   .form-group select::placeholder {
     color: var(--text-muted);
   }
 
-  .form-group select {
-    appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%239898a8' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 10px center;
-    padding-right: 28px;
-    cursor: pointer;
-  }
-
-  .form-group input:focus,
-  .form-group select:focus {
-    outline: none;
-    border-color: var(--border-focus);
-    box-shadow: 0 0 0 3px var(--accent-subtle);
-  }
-
   .help-text {
-    font-size: 12px;
-    color: var(--text-muted);
-    margin-top: 4px;
     margin-bottom: 8px;
   }
 
-  .validation-errors {
-    margin-top: 8px;
-    border: 1px solid var(--red);
-    border-radius: var(--radius-sm);
-    background: var(--red-subtle);
-    padding: 8px 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    max-height: 120px;
-    overflow-y: auto;
-  }
-
-  .validation-error {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    font-size: 12px;
-  }
-
-  .error-line {
-    font-family: var(--font-mono);
-    font-weight: 600;
-    color: var(--red-text);
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-
-  .error-msg {
+  .error-text {
     color: var(--text-secondary);
   }
 
@@ -941,12 +656,6 @@ spec:
     gap: 8px;
   }
 
-  .domain-label {
-    font-size: 13px;
-    color: var(--text-secondary);
-    font-weight: 500;
-  }
-
   .domain-value {
     font-family: var(--font-mono);
     font-size: 14px;
@@ -956,238 +665,11 @@ spec:
     border-radius: var(--radius-sm);
   }
 
-  .empty-hint {
-    font-size: 13px;
-    color: var(--text-muted);
-    font-style: italic;
-    padding: 8px 0;
-  }
-
   /* Key-value env rows */
-  .kv-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .kv-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr auto auto;
-    gap: 8px;
-    align-items: center;
-  }
-
-  .kv-key,
-  .kv-value {
-    padding: 8px 10px;
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    font-family: var(--font-mono);
-    background: var(--bg-input);
-    color: var(--text-primary);
-    transition: border-color 0.15s, box-shadow 0.15s;
-  }
-
-  .kv-key::placeholder,
-  .kv-value::placeholder {
-    color: var(--text-muted);
-  }
-
-  .kv-key:focus,
-  .kv-value:focus {
-    outline: none;
-    border-color: var(--border-focus);
-    box-shadow: 0 0 0 3px var(--accent-subtle);
-  }
-
-  .secret-toggle {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    cursor: pointer;
-    font-size: 16px;
-    padding: 4px;
-    opacity: 0.4;
-    transition: opacity 0.15s;
-  }
-
-  .secret-toggle input {
-    margin: 0;
-    accent-color: var(--accent);
-  }
-
-  .secret-toggle:has(input:checked) {
-    opacity: 1;
-  }
 
   /* Port rows */
-  .ports-header,
-  .volumes-header {
-    display: grid;
-    gap: 8px;
-    padding: 0 0 4px;
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-
-  .ports-header {
-    grid-template-columns: 1fr 1fr 100px 32px;
-  }
-
-  .port-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr 100px 32px;
-    gap: 8px;
-    align-items: center;
-    margin-bottom: 8px;
-  }
-
-  .port-row input,
-  .port-row select {
-    padding: 8px 10px;
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    background: var(--bg-input);
-    color: var(--text-primary);
-    transition: border-color 0.15s, box-shadow 0.15s;
-  }
-
-  .port-row input::placeholder {
-    color: var(--text-muted);
-  }
-
-  .port-row input:focus,
-  .port-row select:focus {
-    outline: none;
-    border-color: var(--border-focus);
-    box-shadow: 0 0 0 3px var(--accent-subtle);
-  }
-
-  .volumes-header {
-    grid-template-columns: 140px 1fr 1fr 110px 32px;
-  }
-
-  .volume-row {
-    display: grid;
-    grid-template-columns: 140px 1fr 1fr 110px 32px;
-    gap: 8px;
-    align-items: center;
-    margin-bottom: 8px;
-  }
-
-  .volume-row input,
-  .volume-row select {
-    padding: 8px 10px;
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    background: var(--bg-input);
-    color: var(--text-primary);
-    transition: border-color 0.15s, box-shadow 0.15s;
-  }
-
-  .volume-row input::placeholder {
-    color: var(--text-muted);
-  }
-
-  .volume-row input:focus,
-  .volume-row select:focus {
-    outline: none;
-    border-color: var(--border-focus);
-    box-shadow: 0 0 0 3px var(--accent-subtle);
-  }
-
-  .volume-row input:disabled {
-    background: var(--bg-overlay);
-    color: var(--text-muted);
-    cursor: not-allowed;
-    opacity: 0.7;
-  }
 
   /* Buttons */
-  .btn-add {
-    padding: 6px 14px;
-    background: var(--accent-subtle);
-    color: var(--accent-text);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background 0.15s;
-  }
-
-  .btn-add:hover {
-    background: var(--bg-hover);
-  }
-
-  .btn-remove {
-    width: 32px;
-    height: 32px;
-    background: var(--red-subtle);
-    color: var(--red-text);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    font-size: 14px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: background 0.15s;
-  }
-
-  .btn-remove:hover {
-    background: var(--bg-hover);
-  }
-
-  .form-actions {
-    display: flex;
-    gap: 12px;
-    justify-content: flex-end;
-    padding-top: 20px;
-    border-top: 1px solid var(--border-subtle);
-  }
-
-  .btn-primary,
-  .btn-secondary {
-    padding: 10px 24px;
-    border-radius: var(--radius-sm);
-    font-weight: 500;
-    font-size: 14px;
-    text-decoration: none;
-    cursor: pointer;
-    border: none;
-    transition: background 0.15s;
-  }
-
-  .btn-primary {
-    background: var(--accent);
-    color: var(--text-inverse);
-  }
-
-  .btn-primary:hover:not(:disabled) {
-    background: var(--accent-hover);
-  }
-
-  .btn-primary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .btn-secondary {
-    background: var(--bg-overlay);
-    color: var(--text-primary);
-    border: 1px solid var(--border-default);
-  }
-
-  .btn-secondary:hover {
-    background: var(--bg-hover);
-  }
 
   .worker-select {
     width: 100%;
@@ -1221,51 +703,12 @@ spec:
     margin: 0;
   }
 
-  .subsection-title {
-    font-size: 12px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-muted);
-    margin: 20px 0 12px;
-    padding-top: 16px;
-    border-top: 1px solid var(--border-subtle);
-  }
-
-  .subsection-title:first-of-type {
-    margin-top: 0;
-    padding-top: 0;
-    border-top: none;
-  }
-
   .oidc-config {
     margin-top: 12px;
     padding: 16px;
     background: var(--bg-overlay, rgba(0,0,0,0.15));
     border-radius: var(--radius-sm);
     border: 1px solid var(--border-subtle);
-  }
-
-  .form-group input[type='number'],
-  .form-group input[type='url'],
-  .form-group input[type='password'] {
-    width: 100%;
-    padding: 9px 12px;
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    background: var(--bg-input);
-    color: var(--text-primary);
-    font-size: 14px;
-    font-family: inherit;
-    transition: border-color 0.15s;
-  }
-
-  .form-group input[type='number']:focus,
-  .form-group input[type='url']:focus,
-  .form-group input[type='password']:focus {
-    outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px var(--accent-15);
   }
 
   @media (max-width: 600px) {

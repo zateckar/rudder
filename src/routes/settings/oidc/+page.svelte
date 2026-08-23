@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PageHeader from '$lib/components/PageHeader.svelte';
   import { enhance } from '$app/forms';
 
   let { data, form } = $props();
@@ -54,10 +55,10 @@
   });
 </script>
 
-<header>
-  <h1>OIDC Configuration</h1>
-  <p class="subtitle">Configure a generic OpenID Connect provider for single sign-on (Auth Code + PKCE)</p>
-</header>
+<PageHeader
+  title="OIDC Configuration"
+  subtitle="Configure a generic OpenID Connect provider for single sign-on (Auth Code + PKCE)"
+/>
 
 {#if (form as any)?.success}
   <div class="alert success">✓ Configuration saved successfully</div>
@@ -224,7 +225,7 @@
     {/if}
 
     <div class="form-actions">
-      <button type="submit" class="btn-primary" disabled={saving}>
+      <button type="submit" class="btn-primary btn-lg" disabled={saving}>
         {saving ? 'Saving…' : 'Save Configuration'}
       </button>
     </div>
@@ -240,13 +241,8 @@
 </div>
 
 <style>
-  header { margin-bottom: 24px; }
-  header h1 { font-size: 26px; color: var(--text-primary); margin: 0 0 6px; }
-  .subtitle { color: var(--text-secondary); font-size: 14px; }
-
   .alert {
-    padding: 12px 16px; border-radius: var(--radius-md); margin-bottom: 16px;
-    font-size: 14px; font-weight: 500;
+    font-weight: 500;
   }
   .alert.success { background: var(--green-subtle); color: var(--green-text); border: 1px solid var(--green); }
   .alert.error   { background: var(--red-subtle); color: var(--red-text); border: 1px solid var(--red); }
@@ -262,16 +258,6 @@
     word-break: break-all; user-select: all;
   }
 
-  .form-container {
-    background: var(--bg-raised); padding: 30px; border-radius: var(--radius-lg);
-    border: 1px solid var(--border-subtle);
-  }
-
-  .form-section {
-    margin-bottom: 32px; padding-bottom: 32px; border-bottom: 1px solid var(--border-subtle);
-  }
-  .form-section:last-of-type { border-bottom: none; }
-  .form-section h2 { font-size: 15px; font-weight: 600; margin-bottom: 6px; color: var(--text-primary); }
   .section-desc { font-size: 13px; color: var(--text-secondary); margin-bottom: 16px; }
 
   .toggle-row {
@@ -293,19 +279,6 @@
   .toggle input:checked + .slider { background: var(--accent); }
   .toggle input:checked + .slider::before { background: var(--text-inverse); transform: translateX(22px); }
 
-  .form-group { margin-bottom: 18px; }
-  .form-group label {
-    display: block; margin-bottom: 6px; font-weight: 500; font-size: 13px; color: var(--text-primary);
-  }
-  .required { color: var(--red); }
-  .form-group input[type='text'],
-  .form-group input[type='url'],
-  .form-group input[type='password'] {
-    width: 100%; padding: 9px 12px; border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm); font-size: 14px; background: var(--bg-input);
-    color: var(--text-primary); box-sizing: border-box; transition: border-color 0.15s;
-  }
-  .form-group input:focus { outline: none; border-color: var(--border-focus); }
   .help { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
 
   .input-row { display: flex; gap: 8px; align-items: stretch; }
@@ -329,29 +302,12 @@
   .cb-desc { display: block; font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
 
   /* Actions */
-  .form-actions {
-    display: flex; justify-content: flex-end;
-    padding-top: 20px; border-top: 1px solid var(--border-subtle);
-  }
-  .btn-primary {
-    padding: 10px 24px; background: var(--accent); color: var(--text-inverse);
-    border: none; border-radius: var(--radius-sm); font-size: 14px; font-weight: 500;
-    cursor: pointer; transition: background 0.15s;
-  }
-  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
-  .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
 
   .test-section {
     margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--border-subtle);
   }
   .test-section h3 { font-size: 14px; font-weight: 600; margin-bottom: 6px; color: var(--text-primary); }
   .test-section p { font-size: 13px; color: var(--text-secondary); margin-bottom: 10px; }
-  .btn-secondary {
-    display: inline-block; padding: 8px 16px; background: var(--bg-raised); color: var(--text-primary);
-    border: 1px solid var(--border-default); border-radius: var(--radius-sm); font-size: 13px;
-    text-decoration: none; transition: background 0.15s;
-  }
-  .btn-secondary:hover { background: var(--bg-hover); }
 
   .example-box {
     background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-sm);

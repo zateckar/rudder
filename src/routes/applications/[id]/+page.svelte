@@ -1,8 +1,13 @@
 <script lang="ts">
+  import Modal from '$lib/components/Modal.svelte';
+  import PageHeader from '$lib/components/PageHeader.svelte';
+  import { formatBytes, formatTime } from '$lib/format';
+  import { invalidateAll } from '$app/navigation';
   import ContainerTerminal from '$lib/components/ContainerTerminal.svelte';
   import YamlEditor from '$lib/components/YamlEditor.svelte';
   import { showToast } from '$lib/client/toast.svelte';
   import { confirmAction, type ConfirmRequest } from '$lib/client/dialog.svelte';
+  import { lifecycleControls, lifecycleLabel } from '$lib/client/lifecycle-controls';
 
   /**
    * Deploy errors and deployment notes, shown properly.
@@ -102,7 +107,7 @@
   function reloadWithFreshDrift(delayMs = 800) {
     setTimeout(async () => {
       await runDriftCheck();
-      window.location.reload();
+      invalidateAll();
     }, delayMs);
   }
 
@@ -367,6 +372,39 @@
   });
 
   // ── App-level actions ────────────────────────────────────────────────────
+  //
+  // Which controls to show is decided in lifecycle-controls.ts, so the rules
+  // are unit-tested rather than only observable by finding an application in
+  // the right state.
+  const lifecycle = $derived(lifecycleControls(data.containers));
+
+  async function stopApp() {
+    const n = lifecycle.activeCount;
+    const ok = await confirmAction({
+      title: n > 1 ? `Stop all ${n} containers?` : 'Stop this application?',
+      body: n > 1
+        ? `Every container "${data.application.name}" is serving from stops until the application is started again. Containers retained from a previous deploy are not touched.`
+        : `"${data.application.name}" stops serving traffic until it is started again.`,
+      confirmLabel: n > 1 ? 'Stop all' : 'Stop',
+      danger: true,
+    });
+    if (!ok) return;
+    deployApp('stop');
+  }
+
+  async function restartApp() {
+    const n = lifecycle.activeCount;
+    if (lifecycle.confirmRestart) {
+      const ok = await confirmAction({
+        title: `Restart all ${n} containers?`,
+        body: `Every service of "${data.application.name}" is interrupted at once. Nothing is pulled — each container restarts on the image it already has.`,
+        confirmLabel: 'Restart all',
+      });
+      if (!ok) return;
+    }
+    deployApp('restart');
+  }
+
   async function deployApp(action: string) {
     deploying = true;
     try {
@@ -378,7 +416,11 @@
       const body = await res.json();
       if (res.ok) {
         if (action === 'delete') { window.location.href = '/applications'; return; }
-        showToast('success', body.message || 'Done');
+        // A lifecycle action answers 200 even when some containers refused it —
+        // something did happen — so the toast colour follows what came back and
+        // not the status code. A green "Application stopped" over a stop that
+        // stopped two of five is the one outcome worse than an error.
+        showToast(body.failures?.length ? 'error' : 'success', body.message || 'Done');
         if (['deploy', 'start', 'stop', 'restart'].includes(action)) {
           reloadWithFreshDrift();
         }
@@ -437,7 +479,7 @@
           remove: 'Container removed',
         };
         showToast('success', msgs[action] || `Container ${action}ed`);
-        setTimeout(() => window.location.reload(), 600);
+        setTimeout(() => invalidateAll(), 600);
       } else {
         showToast('error', body.error || `${action} failed`);
       }
@@ -465,7 +507,7 @@
       const body = await res.json();
       if (res.ok) {
         showToast('success', 'Container updated');
-        setTimeout(() => window.location.reload(), 600);
+        setTimeout(() => invalidateAll(), 600);
       } else {
         showToast('error', body.error || 'Update failed');
       }
@@ -518,7 +560,7 @@
       const body = await res.json();
       if (res.ok) {
         showToast('success', 'Resource limits applied');
-        setTimeout(() => window.location.reload(), 800);
+        setTimeout(() => invalidateAll(), 800);
       } else {
         showToast('error', body.error || 'Failed to apply limits');
       }
@@ -572,7 +614,7 @@
       if (res.ok) {
         showScaleModal = false;
         showToast('success', body.message || 'Scaling complete');
-        setTimeout(() => window.location.reload(), 800);
+        setTimeout(() => invalidateAll(), 800);
       } else {
         showToast('error', body.error || 'Scaling failed');
       }
@@ -642,13 +684,6 @@
   let historicalMetrics = $state<Record<string, MetricPoint[] | null>>({});
   let histLoading = $state<Record<string, boolean>>({});
 
-  function formatBytes(b: number): string {
-    if (b === 0) return '0 B';
-    const k = 1024, sizes = ['B','KB','MB','GB','TB'];
-    const i = Math.floor(Math.log(b) / Math.log(k));
-    return `${(b / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
-  }
-
   async function fetchLive(containerId: string) {
     try {
       const res = await fetch(`/api/containers/${containerId}/stats`);
@@ -717,9 +752,6 @@
       .join(' ');
   }
 
-  function formatTime(ts: number): string {
-    return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
 </script>
 
 {#if detail}
@@ -738,13 +770,15 @@
 {/if}
 
 <!-- ── Header ──────────────────────────────────────────────────────────── -->
-<header>
-  <div class="header-left">
-    <a href="/applications" class="back-link">← Back to Applications</a>
-    <div class="title-row">
-      <h1>{data.application.name}</h1>
-      <span class="type-badge">{data.application.type}</span>
-    </div>
+<PageHeader
+  title={data.application.name}
+  back={{ href: '/applications', label: 'Back to Applications' }}
+>
+  {#snippet badge()}
+    <span class="type-badge">{data.application.type}</span>
+  {/snippet}
+
+  {#snippet meta()}
     {#if data.application.type === 'compose' && data.serviceUrls && data.serviceUrls.length > 0}
       <div class="service-urls">
         {#each data.serviceUrls as svc}
@@ -773,13 +807,35 @@
         {/if}
       </div>
     {/if}
-  </div>
-  <div class="header-actions">
+  {/snippet}
+
+  {#snippet actions()}
     {#if data.worker && data.worker.status === 'online'}
       {@const hasContainers = data.containers.length > 0}
       <button class="btn-header {hasContainers ? 'btn-redeploy' : 'btn-success'}" onclick={() => deployApp('deploy')} disabled={deploying} title="Deploy or redeploy the application">
         {deploying ? 'Deploying…' : hasContainers ? '↻ Redeploy' : '▶ Deploy'}
       </button>
+    {/if}
+    <!-- Act on what is already on the worker, for the application as a whole.
+         A compose file with five services needed five clicks and five reloads
+         to be taken down; there was no control that meant "stop this
+         application". Gated on the worker being reachable for the same reason
+         Deploy is: all three are Podman calls. -->
+    {#if data.worker?.status === 'online' && lifecycle.activeCount > 0}
+      {#if lifecycle.canStart}
+        <button class="btn-header btn-lifecycle-start" onclick={() => deployApp('start')} disabled={deploying} title="Start every container this application serves from">
+          {lifecycleLabel('Start', lifecycle.activeCount)}
+        </button>
+      {/if}
+      {#if lifecycle.canStopOrRestart}
+        <button class="btn-header btn-lifecycle-stop" onclick={stopApp} disabled={deploying} title="Stop every container this application serves from">
+          {lifecycleLabel('Stop', lifecycle.activeCount)}
+        </button>
+        <button class="btn-header btn-secondary" onclick={restartApp} disabled={deploying} title="Restart every container this application serves from, without pulling">
+          {lifecycleLabel('Restart', lifecycle.activeCount)}
+        </button>
+      {/if}
+      <span class="header-sep" aria-hidden="true"></span>
     {/if}
     <a href="/applications/{data.application.id}/edit" class="btn-header btn-secondary">Edit</a>
     {#if data.application.type === 'single'}
@@ -792,8 +848,8 @@
     </button>
     <button class="btn-header btn-secondary" onclick={exportApp} title="Export application configuration as JSON">Export</button>
     <button class="btn-header btn-danger" onclick={() => deployApp('delete')} disabled={deploying} title="Permanently delete this application">Delete</button>
-  </div>
-</header>
+  {/snippet}
+</PageHeader>
 
 <!-- ── Webhook panel ───────────────────────────────────────────────────── -->
 <div class="webhook-section">
@@ -927,7 +983,7 @@
   <!-- ── Containers tab ─────────────────────────────────────────────────── -->
   {#if activeTab === 'containers'}
     {#if data.containers.length === 0}
-      <div class="empty-state">
+      <div class="empty-row">
         <p>No containers deployed yet.</p>
         {#if data.worker?.status === 'online'}
           <button class="btn-primary" onclick={() => deployApp('deploy')} title="Deploy this application for the first time">Deploy Application</button>
@@ -1103,7 +1159,7 @@
   <!-- ── Metrics tab ──────────────────────────────────────────────────── -->
   {:else if activeTab === 'metrics'}
     {#if data.containers.length === 0}
-      <div class="empty-state"><p>Deploy the application first to see metrics.</p></div>
+      <div class="empty-row"><p>Deploy the application first to see metrics.</p></div>
     {:else}
       <!-- Range selector -->
       <div class="range-bar">
@@ -1258,9 +1314,9 @@
   <!-- ── Deployments tab ──────────────────────────────────────────────── -->
   {:else if activeTab === 'deployments'}
     {#if deploymentsLoading && !deploymentsLoaded}
-      <div class="empty-state"><p class="loading-text">Loading deployment history...</p></div>
+      <div class="empty-row"><p class="loading-text">Loading deployment history...</p></div>
     {:else if deploymentsList.length === 0}
-      <div class="empty-state"><p>No deployments recorded yet.</p></div>
+      <div class="empty-row"><p>No deployments recorded yet.</p></div>
     {:else}
       <div class="deployments-list">
         <table class="deployments-table">
@@ -1541,108 +1597,90 @@
 </div>
 
 <!-- ── Limits modal ───────────────────────────────────────────────────── -->
-{#if showLimitsModal}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="modal-backdrop" onclick={() => showLimitsModal = false} onkeydown={(e) => e.key === 'Escape' && (showLimitsModal = false)} role="button" tabindex="-1">
-    <div class="modal" onclick={(e) => e.stopPropagation()} onkeydown={() => {}} role="dialog" tabindex="-1">
-      <h3>Update Resource Limits</h3>
-      <p class="help-text">Limits will be applied by recreating the container (no image pull).</p>
-      <div class="form-group">
-        <label for="limitMemory">Memory Limit (e.g. 512m, 1g)</label>
-        <input id="limitMemory" type="text" bind:value={limitMemory} placeholder="Leave empty for no limit" />
-      </div>
-      <div class="form-group">
-        <label for="limitCpuQuota">CPU Limit (e.g. 0.5 for half a core, 2 for 2 cores)</label>
-        <input id="limitCpuQuota" type="text" bind:value={limitCpuQuota} placeholder="Leave empty for no limit" />
-      </div>
-      <div class="modal-actions">
-        <button class="btn-secondary" onclick={() => showLimitsModal = false} title="Close without applying limits">Cancel</button>
-        <button class="btn-primary" onclick={saveLimits} title="Apply resource limits by recreating the container">Apply Limits</button>
-      </div>
-    </div>
+<Modal bind:open={showLimitsModal} title="Update Resource Limits">
+  <p class="help-text">Limits will be applied by recreating the container (no image pull).</p>
+  <div class="form-group">
+    <label for="limitMemory">Memory Limit (e.g. 512m, 1g)</label>
+    <input id="limitMemory" type="text" bind:value={limitMemory} placeholder="Leave empty for no limit" />
   </div>
-{/if}
+  <div class="form-group">
+    <label for="limitCpuQuota">CPU Limit (e.g. 0.5 for half a core, 2 for 2 cores)</label>
+    <input id="limitCpuQuota" type="text" bind:value={limitCpuQuota} placeholder="Leave empty for no limit" />
+  </div>
+  <div class="modal-actions">
+    <button class="btn-secondary" onclick={() => showLimitsModal = false} title="Close without applying limits">Cancel</button>
+    <button class="btn-primary" onclick={saveLimits} title="Apply resource limits by recreating the container">Apply Limits</button>
+  </div>
+</Modal>
 
 <!-- ── Save as Template modal ──────────────────────────────────────── -->
-{#if showTemplateModal}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="modal-backdrop" onclick={() => showTemplateModal = false} onkeydown={(e) => e.key === 'Escape' && (showTemplateModal = false)} role="button" tabindex="-1">
-    <div class="modal" onclick={(e) => e.stopPropagation()} onkeydown={() => {}} role="dialog" tabindex="-1">
-      <h3>Save as Template</h3>
-      <p class="help-text">Create a reusable template from <strong>{data.application.name}</strong>.</p>
-      {#if templateError}
-        <div class="template-error">{templateError}</div>
-      {/if}
-      <div class="form-group">
-        <label for="tplName">Template Name</label>
-        <input id="tplName" type="text" bind:value={templateName} placeholder="my-template" />
-      </div>
-      <div class="form-group">
-        <label for="tplDesc">Description (optional)</label>
-        <input id="tplDesc" type="text" bind:value={templateDesc} placeholder="What this template deploys" />
-      </div>
-      <div class="modal-actions">
-        <button class="btn-secondary" onclick={() => showTemplateModal = false} title="Close without saving">Cancel</button>
-        <button
-          class="btn-primary"
-          disabled={templateSaving || !templateName.trim()}
-          title="Save this application configuration as a template"
-          onclick={async () => {
-            templateSaving = true;
-            templateError = '';
-            try {
-              const fd = new FormData();
-              fd.append('appId', data.application.id);
-              fd.append('name', templateName.trim());
-              fd.append('description', templateDesc.trim());
-              const res = await fetch('/api/templates/save', { method: 'POST', body: fd });
-              const body = await res.json();
-              if (res.ok) {
-                showTemplateModal = false;
-                showToast('success', 'Template saved');
-              } else {
-                templateError = body.error || 'Failed to save';
-              }
-            } catch (e: any) {
-              templateError = e.message;
-            } finally {
-              templateSaving = false;
-            }
-          }}
-        >
-          {templateSaving ? 'Saving…' : 'Save Template'}
-        </button>
-      </div>
-    </div>
+<Modal bind:open={showTemplateModal} title="Save as Template">
+  <p class="help-text">Create a reusable template from <strong>{data.application.name}</strong>.</p>
+  {#if templateError}
+    <div class="template-error">{templateError}</div>
+  {/if}
+  <div class="form-group">
+    <label for="tplName">Template Name</label>
+    <input id="tplName" type="text" bind:value={templateName} placeholder="my-template" />
   </div>
-{/if}
+  <div class="form-group">
+    <label for="tplDesc">Description (optional)</label>
+    <input id="tplDesc" type="text" bind:value={templateDesc} placeholder="What this template deploys" />
+  </div>
+  <div class="modal-actions">
+    <button class="btn-secondary" onclick={() => showTemplateModal = false} title="Close without saving">Cancel</button>
+    <button
+      class="btn-primary"
+      disabled={templateSaving || !templateName.trim()}
+      title="Save this application configuration as a template"
+      onclick={async () => {
+        templateSaving = true;
+        templateError = '';
+        try {
+          const fd = new FormData();
+          fd.append('appId', data.application.id);
+          fd.append('name', templateName.trim());
+          fd.append('description', templateDesc.trim());
+          const res = await fetch('/api/templates/save', { method: 'POST', body: fd });
+          const body = await res.json();
+          if (res.ok) {
+            showTemplateModal = false;
+            showToast('success', 'Template saved');
+          } else {
+            templateError = body.error || 'Failed to save';
+          }
+        } catch (e: any) {
+          templateError = e.message;
+        } finally {
+          templateSaving = false;
+        }
+      }}
+    >
+      {templateSaving ? 'Saving…' : 'Save Template'}
+    </button>
+  </div>
+</Modal>
 
 <!-- ── Scale modal ────────────────────────────────────────────────── -->
-{#if showScaleModal}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="modal-backdrop" onclick={() => showScaleModal = false} onkeydown={(e) => e.key === 'Escape' && (showScaleModal = false)} role="button" tabindex="-1">
-    <div class="modal" onclick={(e) => e.stopPropagation()} onkeydown={() => {}} role="dialog" tabindex="-1">
-      <h3>Scale Application</h3>
-      <p class="help-text">Set the number of container replicas for <strong>{data.application.name}</strong>. Traefik will load-balance across all replicas.</p>
-      <div class="form-group">
-        <label for="scaleReplicas">Replicas</label>
-        <input id="scaleReplicas" type="number" bind:value={scaleTarget} min="1" max="10" />
-        <p class="scale-hint">
-          Current: {data.application.replicas ?? 1} replica{(data.application.replicas ?? 1) !== 1 ? 's' : ''}
-          {#if scaleTarget !== (data.application.replicas ?? 1)}
-            &rarr; {scaleTarget} replica{scaleTarget !== 1 ? 's' : ''}
-          {/if}
-        </p>
-      </div>
-      <div class="modal-actions">
-        <button class="btn-secondary" onclick={() => showScaleModal = false} title="Close without scaling">Cancel</button>
-        <button class="btn-primary" onclick={scaleApp} disabled={scaleBusy || scaleTarget === (data.application.replicas ?? 1)} title="Apply scaling">
-          {scaleBusy ? 'Scaling...' : 'Apply'}
-        </button>
-      </div>
-    </div>
+<Modal bind:open={showScaleModal} title="Scale Application">
+  <p class="help-text">Set the number of container replicas for <strong>{data.application.name}</strong>. Traefik will load-balance across all replicas.</p>
+  <div class="form-group">
+    <label for="scaleReplicas">Replicas</label>
+    <input id="scaleReplicas" type="number" bind:value={scaleTarget} min="1" max="10" />
+    <p class="scale-hint">
+      Current: {data.application.replicas ?? 1} replica{(data.application.replicas ?? 1) !== 1 ? 's' : ''}
+      {#if scaleTarget !== (data.application.replicas ?? 1)}
+        &rarr; {scaleTarget} replica{scaleTarget !== 1 ? 's' : ''}
+      {/if}
+    </p>
   </div>
-{/if}
+  <div class="modal-actions">
+    <button class="btn-secondary" onclick={() => showScaleModal = false} title="Close without scaling">Cancel</button>
+    <button class="btn-primary" onclick={scaleApp} disabled={scaleBusy || scaleTarget === (data.application.replicas ?? 1)} title="Apply scaling">
+      {scaleBusy ? 'Scaling...' : 'Apply'}
+    </button>
+  </div>
+</Modal>
 
 <style>
   /* ── Detail modal — deploy errors and notes ────────────────────────── */
@@ -1663,15 +1701,6 @@
   .detail-actions { display: flex; justify-content: flex-end; }
 
   /* ── Header ────────────────────────────────────────────────────────── */
-  header {
-    display: flex; justify-content: space-between; align-items: flex-start;
-    margin-bottom: 24px; gap: 16px; flex-wrap: wrap;
-  }
-  .header-left { display: flex; flex-direction: column; gap: 6px; }
-  .back-link { font-size: 13px; color: var(--text-muted); text-decoration: none; transition: color 0.15s; }
-  .back-link:hover { color: var(--text-primary); }
-  .title-row { display: flex; align-items: center; gap: 10px; }
-  header h1 { font-size: 26px; color: var(--text-primary); margin: 0; font-weight: 700; letter-spacing: -0.01em; }
   .type-badge {
     padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600;
     background: var(--blue-subtle); color: var(--blue-text);
@@ -1713,15 +1742,6 @@
   .header-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-start; }
 
   /* ── Tabs ──────────────────────────────────────────────────────────── */
-  .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border-subtle); margin-bottom: 24px; }
-  .tabs button {
-    padding: 10px 20px; background: none; border: none;
-    border-bottom: 2px solid transparent; cursor: pointer;
-    font-size: 13px; color: var(--text-muted); font-weight: 500;
-    margin-bottom: -1px; transition: all 0.15s;
-  }
-  .tabs button:hover { color: var(--text-primary); }
-  .tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
 
   /* ── Containers ────────────────────────────────────────────────────── */
   .containers-list { display: grid; gap: 16px; }
@@ -1793,18 +1813,24 @@
   .btn-header.btn-danger:hover:not(:disabled) { filter: brightness(1.1); }
   .btn-header:disabled { opacity: 0.6; cursor: not-allowed; }
 
-  .btn-primary {
-    padding: 8px 16px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500;
-    cursor: pointer; border: none; background: var(--accent); color: var(--text-inverse);
+  /* Application-level lifecycle. Deliberately the same green and yellow as the
+  per-container Start and Stop above, so the header repeats a colour the
+  container rows have already taught. Red stays reserved for Delete — a Stop
+  that looked destructive would sit one misclick from the button that is. */
+  .btn-header.btn-lifecycle-start {
+    background: var(--green-subtle); color: var(--green-text);
+    border: 1px solid color-mix(in srgb, var(--green) 30%, transparent);
   }
-  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
-  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-header.btn-lifecycle-start:hover:not(:disabled) { background: color-mix(in srgb, var(--green) 20%, transparent); }
+  .btn-header.btn-lifecycle-stop {
+    background: var(--yellow-subtle); color: var(--yellow-text);
+    border: 1px solid color-mix(in srgb, var(--yellow) 30%, transparent);
+  }
+  .btn-header.btn-lifecycle-stop:hover:not(:disabled) { background: color-mix(in srgb, var(--yellow) 15%, transparent); }
 
-  .btn-secondary {
-    padding: 8px 16px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500;
-    cursor: pointer; border: 1px solid var(--border-default); background: var(--bg-raised); color: var(--text-secondary);
-  }
-  .btn-secondary:hover { background: var(--bg-hover); }
+  /* Separates "act on what is running" from "change or remove the
+  application", which are otherwise nine buttons in one undifferentiated row. */
+  .header-sep { width: 1px; align-self: stretch; background: var(--border-subtle); margin: 0 2px; }
 
   /* Image details */
   .image-details-toggle {
@@ -1924,7 +1950,6 @@
   }
   .net-name { font-size: 12px; font-weight: 600; color: var(--accent); margin-bottom: 6px; display: block; }
 
-  .mini-table { width: 100%; border-collapse: collapse; font-size: 12px; }
   .mini-table th {
     text-align: left; padding: 6px 10px; font-size: 10px; font-weight: 600;
     color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em;
@@ -1942,38 +1967,20 @@
   .label-val { color: var(--text-secondary); font-size: 11px; word-break: break-all; }
 
   /* ── Modal ─────────────────────────────────────────────────────────── */
-  .modal-backdrop {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px);
-    display: flex; align-items: center; justify-content: center; z-index: 1000;
+  .help-text {
+    margin-bottom: 16px;
   }
-  .modal {
-    background: var(--bg-surface); padding: 28px; border-radius: var(--radius-lg);
-    border: 1px solid var(--border-default); width: 100%; max-width: 420px; box-shadow: var(--shadow-md);
-  }
-  .modal h3 { margin: 0 0 6px; font-size: 16px; font-weight: 700; color: var(--text-primary); }
-  .help-text { font-size: 13px; color: var(--text-secondary); margin-bottom: 16px; }
-  .form-group { margin-bottom: 16px; }
-  .form-group label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500; color: var(--text-secondary); }
-  .form-group input {
-    width: 100%; padding: 9px 12px; border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm); font-size: 14px; box-sizing: border-box;
-    background: var(--bg-input); color: var(--text-primary);
-  }
-  .form-group input:focus { outline: none; border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-subtle); }
-  .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 
   /* ── Shared ────────────────────────────────────────────────────────── */
-  .empty-state {
-    padding: 48px; background: var(--bg-overlay); border-radius: var(--radius-lg);
-    text-align: center; color: var(--text-muted);
+  .empty-row {
+    background: var(--bg-overlay);
+    border-radius: var(--radius-lg);
   }
-  .empty-state p { margin-bottom: 16px; }
-  .small { font-size: 12px; }
+  .empty-row p { margin-bottom: 16px; }
   .loading-text { color: var(--text-muted); font-style: italic; font-size: 13px; }
   .error-text { color: var(--red-text); font-size: 13px; }
 
   .empty { color: var(--text-muted); font-style: italic; text-align: center; padding: 30px; }
-  .loading { color: var(--text-muted); font-style: italic; font-size: 13px; }
   .error { color: var(--red-text); font-size: 13px; }
   .template-error {
     background: var(--red-subtle); color: var(--red-text); border: 1px solid var(--red);
@@ -2038,7 +2045,7 @@
   }
   .btn-rollback:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 15%, transparent); }
   /* Distinguished at a glance: a retained generation is a restart, everything
-     else is a full redeploy, and the two are minutes apart. */
+  else is a full redeploy, and the two are minutes apart. */
   .btn-rollback-fast {
     color: var(--green-text); border-color: color-mix(in srgb, var(--green) 35%, transparent);
     background: var(--green-subtle);
@@ -2059,9 +2066,9 @@
   .btn-notes:hover:not(:disabled) { background: color-mix(in srgb, var(--yellow) 15%, transparent); }
 
   /* ── Drift ─────────────────────────────────────────────────────────────
-     Amber rather than red: the application may well still be serving, and
-     colouring a two-replica app with one dead replica the same as an outage
-     teaches people to ignore the colour. */
+  Amber rather than red: the application may well still be serving, and
+  colouring a two-replica app with one dead replica the same as an outage
+  teaches people to ignore the colour. */
   .drift-panel {
     border: 1px solid color-mix(in srgb, var(--yellow) 35%, transparent);
     background: var(--yellow-subtle);
@@ -2083,7 +2090,7 @@
   .drift-actions { display: flex; gap: 6px; }
 
   /* The clean state is a quiet one-liner, not a second amber banner — it is
-     the normal condition and should not compete with anything on the page. */
+  the normal condition and should not compete with anything on the page. */
   .drift-clean {
     display: flex; align-items: center; justify-content: space-between;
     gap: 12px; flex-wrap: wrap;
@@ -2111,8 +2118,6 @@
   .drift-name { font-family: var(--font-mono, monospace); font-size: 0.78rem; }
   .drift-detail { color: var(--text-muted); flex: 1 1 220px; }
   .drift-foot { margin: 10px 0 0; font-size: 0.76rem; color: var(--text-muted); }
-
-  .text-muted { color: var(--text-muted); }
 
   /* ── Webhook ──────────────────────────────────────────────────────── */
   .webhook-section {

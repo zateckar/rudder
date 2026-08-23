@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '$lib/components/PageHeader.svelte';
+  import { timeAgo as relativeTime } from '$lib/format';
   let { data } = $props();
 
   let isAdmin = $derived(data.user?.role === 'admin');
@@ -16,21 +18,6 @@
   let totalContainers = $derived(
     Object.values(containerBreakdown).reduce((sum: number, n: number) => sum + n, 0)
   );
-
-  function relativeTime(date: Date | string | number): string {
-    const now = Date.now();
-    const then = new Date(date).getTime();
-    const diffMs = now - then;
-    const diffSec = Math.floor(diffMs / 1000);
-    const diffMin = Math.floor(diffSec / 60);
-    const diffHour = Math.floor(diffMin / 60);
-    const diffDay = Math.floor(diffHour / 24);
-
-    if (diffMin < 1) return 'just now';
-    if (diffMin < 60) return `${diffMin} min ago`;
-    if (diffHour < 24) return `${diffHour} hour${diffHour === 1 ? '' : 's'} ago`;
-    return `${diffDay} day${diffDay === 1 ? '' : 's'} ago`;
-  }
 
   function actionIcon(action: string): { symbol: string; cls: string } {
     const upper = action.toUpperCase();
@@ -76,9 +63,7 @@
   }
 </script>
 
-<header>
-  <h1>Dashboard</h1>
-</header>
+<PageHeader title="Dashboard" />
 
 <div class="content">
   {#if isAdmin && (saturatedWorkers.length > 0 || workersWithoutMetrics.length > 0)}
@@ -270,18 +255,6 @@
 </div>
 
 <style>
-  header {
-    margin-bottom: 28px;
-  }
-
-  header h1 {
-    font-family: var(--font-sans);
-    font-size: 28px;
-    font-weight: 700;
-    color: var(--text-primary);
-    letter-spacing: -0.02em;
-  }
-
   .alert-banner {
     background: var(--yellow-subtle);
     border: 1px solid var(--yellow);
@@ -404,13 +377,6 @@
     background: var(--bg-surface);
     border: 1px solid var(--border-subtle);
     border-radius: 12px;
-  }
-
-  .status-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    flex-shrink: 0;
   }
 
   .status-bar-track {
@@ -672,13 +638,6 @@
   }
 
   /* Existing sections */
-  .section {
-    background: var(--bg-raised);
-    border: 1px solid var(--border-subtle);
-    padding: 28px;
-    border-radius: var(--radius-lg);
-    margin-bottom: 24px;
-  }
 
   .section h2 {
     font-family: var(--font-sans);

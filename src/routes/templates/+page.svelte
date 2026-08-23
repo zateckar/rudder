@@ -1,6 +1,8 @@
 <script lang="ts">
+  import PageHeader from '$lib/components/PageHeader.svelte';
   import { enhance } from '$app/forms';
   import { confirmAction } from '$lib/client/dialog.svelte';
+  import Modal from '$lib/components/Modal.svelte';
 
   let { data } = $props();
 
@@ -77,12 +79,13 @@
   );
 </script>
 
-<header>
-  <h1>Templates</h1>
-  {#if data.applications.length > 0}
-    <button class="btn-primary" onclick={openSaveModal} title="Save an existing application as a template">Save as Template</button>
-  {/if}
-</header>
+<PageHeader title="Templates">
+  {#snippet actions()}
+    {#if data.applications.length > 0}
+      <button class="btn-primary" onclick={openSaveModal} title="Save an existing application as a template">Save as Template</button>
+    {/if}
+  {/snippet}
+</PageHeader>
 
 {#if actionSuccess}
   <div class="toast success">{actionSuccess}</div>
@@ -93,7 +96,7 @@
 
 <!-- ── My Templates ────────────────────────────────────────────── -->
 {#if myTemplates.length > 0}
-  <div class="section">
+  <div class="template-group">
     <h2>My Team Templates</h2>
     <div class="template-list">
       {#each myTemplates as tpl}
@@ -162,7 +165,7 @@
 
 <!-- ── Shared Templates ────────────────────────────────────────── -->
 {#if sharedTemplates.length > 0}
-  <div class="section">
+  <div class="template-group">
     <h2>Shared Templates</h2>
     <div class="template-list">
       {#each sharedTemplates as tpl}
@@ -204,10 +207,7 @@
 {/if}
 
 <!-- ── Save as Template modal ───────────────────────────────────── -->
-{#if showSaveModal}
-  <div class="modal-backdrop" onclick={() => showSaveModal = false} onkeydown={(e) => e.key === 'Escape' && (showSaveModal = false)} role="button" tabindex="-1">
-    <div class="modal" onclick={(e) => e.stopPropagation()} onkeydown={() => {}} role="dialog" tabindex="-1">
-      <h3>Save as Template</h3>
+<Modal bind:open={showSaveModal} title="Save as Template">
       {#if actionError}
         <div class="toast error inline">{actionError}</div>
       {/if}
@@ -256,16 +256,11 @@
           </button>
         </div>
       </form>
-    </div>
-  </div>
-{/if}
+</Modal>
 
 <!-- ── Apply Template modal ─────────────────────────────────────── -->
-{#if showApplyModal}
-  {@const tpl = data.templates.find((t: any) => t.id === applyTemplateId)}
-  <div class="modal-backdrop" onclick={() => showApplyModal = false} onkeydown={(e) => e.key === 'Escape' && (showApplyModal = false)} role="button" tabindex="-1">
-    <div class="modal" onclick={(e) => e.stopPropagation()} onkeydown={() => {}} role="dialog" tabindex="-1">
-      <h3>Deploy from Template</h3>
+<Modal bind:open={showApplyModal} title="Deploy from Template">
+      {@const tpl = data.templates.find((t: any) => t.id === applyTemplateId)}
       <p class="modal-subtitle">Template: <strong>{tpl?.name}</strong></p>
       {#if actionError}
         <div class="toast error inline">{actionError}</div>
@@ -328,62 +323,9 @@
           </button>
         </div>
       </form>
-    </div>
-  </div>
-{/if}
+</Modal>
 
 <style>
-  header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 24px;
-  }
-
-  header h1 {
-    font-size: 26px;
-    font-weight: 700;
-    color: var(--text-primary);
-    letter-spacing: -0.02em;
-  }
-
-  .btn-primary {
-    padding: 9px 18px;
-    background: var(--accent);
-    color: var(--text-inverse);
-    border-radius: var(--radius-sm);
-    font-weight: 600;
-    font-size: 13px;
-    text-decoration: none;
-    border: none;
-    cursor: pointer;
-    transition: background 0.15s;
-  }
-
-  .btn-primary:hover:not(:disabled) {
-    background: var(--accent-hover);
-  }
-
-  .btn-primary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .btn-secondary {
-    padding: 9px 18px;
-    background: var(--bg-raised);
-    color: var(--text-primary);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    cursor: pointer;
-    transition: background 0.15s;
-  }
-
-  .btn-secondary:hover {
-    background: var(--bg-hover);
-  }
-
   /* ── Toast ────────────────────────────────────── */
 
   .toast {
@@ -412,11 +354,11 @@
 
   /* ── Sections ─────────────────────────────────── */
 
-  .section {
+  .template-group {
     margin-bottom: 32px;
   }
 
-  .section h2 {
+  .template-group h2 {
     font-size: 13px;
     font-weight: 600;
     color: var(--text-muted);
@@ -604,13 +546,6 @@
   }
 
   /* ── Empty state ──────────────────────────────── */
-  .empty-state {
-    background: var(--bg-surface);
-    border: 1px dashed var(--border-default);
-    padding: 60px;
-    border-radius: var(--radius-lg);
-    text-align: center;
-  }
 
   .empty-icon {
     width: 48px;
@@ -618,92 +553,24 @@
     border-radius: 50%;
     background: var(--bg-raised);
     color: var(--text-muted);
-    font-size: 24px;
     line-height: 48px;
     margin: 0 auto 16px;
   }
 
   .empty-state p {
-    color: var(--text-secondary);
     margin-bottom: 16px;
-    font-size: 14px;
   }
 
   .muted {
-    color: var(--text-muted);
     font-size: 13px;
   }
 
   /* ── Modal ────────────────────────────────────── */
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.7);
-    backdrop-filter: blur(4px);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-  }
-
-  .modal {
-    background: var(--bg-surface);
-    border: 1px solid var(--border-default);
-    padding: 28px;
-    border-radius: var(--radius-lg);
-    width: 100%;
-    max-width: 440px;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
-  }
-
-  .modal h3 {
-    margin: 0 0 4px;
-    font-size: 18px;
-    font-weight: 700;
-    color: var(--text-primary);
-  }
 
   .modal-subtitle {
     font-size: 13px;
     color: var(--text-secondary);
     margin-bottom: 20px;
-  }
-
-  .form-group {
-    margin-bottom: 16px;
-  }
-
-  .form-group label {
-    display: block;
-    margin-bottom: 6px;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--text-primary);
-  }
-
-  .form-group input,
-  .form-group select {
-    width: 100%;
-    padding: 9px 12px;
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    font-size: 14px;
-    background: var(--bg-input);
-    color: var(--text-primary);
-    box-sizing: border-box;
-    transition: border-color 0.15s;
-  }
-
-  .form-group input:focus,
-  .form-group select:focus {
-    outline: none;
-    border-color: var(--border-focus);
-  }
-
-  .help-text {
-    font-size: 12px;
-    color: var(--text-muted);
-    margin-top: 4px;
   }
 
   .domain-preview {
@@ -717,22 +584,9 @@
     gap: 8px;
   }
 
-  .domain-label {
-    font-size: 13px;
-    color: var(--text-secondary);
-    font-weight: 500;
-  }
-
   .domain-preview code {
     font-family: var(--font-mono);
     font-size: 13px;
     color: var(--blue);
-  }
-
-  .modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-    margin-top: 20px;
   }
 </style>

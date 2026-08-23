@@ -1,6 +1,9 @@
 <script lang="ts">
+  import { formatBytes, formatUptime, timeAgo } from '$lib/format';
+  import { invalidateAll } from '$app/navigation';
   import { onMount } from 'svelte';
   import SshKeyPrompt from '$lib/components/SshKeyPrompt.svelte';
+  import PageHeader from '$lib/components/PageHeader.svelte';
   import { showToast } from '$lib/client/toast.svelte';
   import { confirmAction } from '$lib/client/dialog.svelte';
 
@@ -175,7 +178,7 @@
         if (body.skipped?.length) {
           adoptMsg += ` — ${body.skipped.map((s: any) => s.reason).join('; ')}`;
         }
-        if (body.adopted?.length) setTimeout(() => window.location.reload(), 1200);
+        if (body.adopted?.length) setTimeout(() => invalidateAll(), 1200);
       } else {
         adoptMsg = body.error || 'Adoption failed';
       }
@@ -485,7 +488,7 @@
       const body = await res.json();
       if (body.success) {
         collectMsg = body.collected ? 'Metrics collected' : 'Worker offline';
-        setTimeout(() => window.location.reload(), 1500);
+        setTimeout(() => invalidateAll(), 1500);
       } else {
         collectMsg = body.error || 'Failed';
       }
@@ -511,7 +514,7 @@
       const body = await res.json();
       if (body.success) {
         provisionMsg = 'Provisioned!';
-        setTimeout(() => window.location.reload(), 1500);
+        setTimeout(() => invalidateAll(), 1500);
       } else {
         provisionMsg = body.error || 'Failed';
       }
@@ -536,7 +539,7 @@
       const body = await res.json();
       if (body.success) {
         showToast('success', 'Prune completed');
-        setTimeout(() => window.location.reload(), 800);
+        setTimeout(() => invalidateAll(), 800);
       } else {
         showToast('error', body.error || 'Prune failed');
       }
@@ -826,36 +829,6 @@
     showPrompt();
   }
 
-  function formatBytes(bytes: number | null | undefined): string {
-    if (!bytes) return '—';
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
-    if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
-    return (bytes / 1073741824).toFixed(2) + ' GB';
-  }
-
-  function formatUptime(value: number | string | null | undefined): string {
-    if (!value) return '—';
-    // If it's a string from Podman (e.g. "up 45 days, 2 hours, 30 minutes"), return as-is
-    if (typeof value === 'string') return value;
-    // If it's seconds, format it
-    const seconds = value;
-    const d = Math.floor(seconds / 86400);
-    const h = Math.floor((seconds % 86400) / 3600);
-    if (d > 0) return `${d}d ${h}h`;
-    if (h > 0) return `${h}h ${Math.floor((seconds % 3600) / 60)}m`;
-    return `${Math.floor(seconds / 60)}m`;
-  }
-
-  function timeAgo(dateStr: string): string {
-    const d = new Date(dateStr);
-    const diff = Date.now() - d.getTime();
-    if (diff < 60000) return 'just now';
-    if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
-    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
-    return `${Math.floor(diff / 86400000)}d ago`;
-  }
-
   // SVG sparkline
   function sparkline(values: (number | null)[], width = 300, height = 48, color = '#0066cc'): string {
     const nums = values.filter((v): v is number => v != null && !isNaN(v));
@@ -1035,32 +1008,32 @@
 {/if}
 
 <div class="page">
-  <div class="header">
-    <div class="header-top">
-      <a href="/workers" class="back-link">&larr; Workers</a>
-      <div class="header-actions">
-        <button class="btn-tiny btn-accent" disabled={provisioning} onclick={requestProvision} title="Re-run provisioning script on this worker (reinstalls Podman, Traefik, CrowdSec)">
-          {provisioning ? 'Re-provisioning…' : (provisionMsg || 'Re-provision')}
-        </button>
-        <button class="btn-tiny" onclick={collectMetrics} title="Manually collect worker and container metrics">{collectMsg || 'Collect Now'}</button>
-        <a href="/workers/{data.worker.id}/edit" class="btn-tiny" title="Edit worker configuration">Edit</a>
-        <button class="btn-tiny btn-prune" disabled={pruning} onclick={pruneSystem} title="Prune unused images, containers, volumes, and networks">
-          {pruning ? 'Pruning…' : 'Prune'}
-        </button>
-        <button class="btn-tiny btn-delete" onclick={deleteWorker} title="Delete this worker">Delete</button>
-      </div>
-    </div>
-    <div class="title-row">
-      <h1>{data.worker.name}</h1>
+  <PageHeader title={data.worker.name} back={{ href: '/workers', label: 'Workers' }}>
+    {#snippet badge()}
       <span class="status-badge {data.worker.status}">{data.worker.status}</span>
-    </div>
-    <div class="meta-row">
-      <span class="meta">{data.worker.hostname}:{data.worker.sshPort}</span>
-      {#if data.worker.baseDomain}
-        <span class="meta mono">*.{data.worker.baseDomain}</span>
-      {/if}
-    </div>
-  </div>
+    {/snippet}
+
+    {#snippet meta()}
+      <div class="meta-row">
+        <span class="meta">{data.worker.hostname}:{data.worker.sshPort}</span>
+        {#if data.worker.baseDomain}
+          <span class="meta mono">*.{data.worker.baseDomain}</span>
+        {/if}
+      </div>
+    {/snippet}
+
+    {#snippet actions()}
+      <button class="btn-tiny btn-accent" disabled={provisioning} onclick={requestProvision} title="Re-run provisioning script on this worker (reinstalls Podman, Traefik, CrowdSec)">
+        {provisioning ? 'Re-provisioning…' : (provisionMsg || 'Re-provision')}
+      </button>
+      <button class="btn-tiny" onclick={collectMetrics} title="Manually collect worker and container metrics">{collectMsg || 'Collect Now'}</button>
+      <a href="/workers/{data.worker.id}/edit" class="btn-tiny" title="Edit worker configuration">Edit</a>
+      <button class="btn-tiny btn-prune" disabled={pruning} onclick={pruneSystem} title="Prune unused images, containers, volumes, and networks">
+        {pruning ? 'Pruning…' : 'Prune'}
+      </button>
+      <button class="btn-tiny btn-delete" onclick={deleteWorker} title="Delete this worker">Delete</button>
+    {/snippet}
+  </PageHeader>
 
   <!-- Quick stats -->
   <div class="stat-row">
@@ -1077,7 +1050,7 @@
       <div class="stat-label">Managed</div>
     </div>
     <div class="stat">
-      <div class="stat-value">{data.metrics.length > 0 ? timeAgo(data.metrics[0]?.collectedAt) : '—'}</div>
+      <div class="stat-value">{data.metrics.length > 0 ? timeAgo(data.metrics[0]?.collectedAt, 'short') : '—'}</div>
       <div class="stat-label">Last Collect</div>
     </div>
   </div>
@@ -1405,7 +1378,7 @@
       {#if eventsLoading}
         <p class="loading">Loading events…</p>
       {:else if events.length === 0}
-        <div class="empty-state">
+        <div class="empty-row">
           <p class="empty">{syslogMessage || 'No events found'}</p>
           {#if eventSource === 'syslog' && !terminalSshKey}
             <button class="btn-tiny btn-accent" onclick={() => { showSyslogKeyPrompt = true; }}>
@@ -1437,7 +1410,7 @@
               <span class="event-type {ev.Type || ev.type}">{ev.Type || ev.type || '—'}</span>
               <span class="event-action">{ev.Action || ev.action || '—'}</span>
               <span class="event-name">{ev.Actor?.Attributes?.name || ev.Actor?.Attributes?.image || ev.name || ''}</span>
-              <span class="event-time">{ev.time ? timeAgo(new Date(ev.time * 1000).toISOString()) : (ev.timeNano ? timeAgo(new Date(ev.timeNano / 1e6).toISOString()) : '—')}</span>
+              <span class="event-time">{ev.time ? timeAgo(ev.time * 1000, 'short') : (ev.timeNano ? timeAgo(ev.timeNano / 1e6, 'short') : '—')}</span>
             </div>
           {/each}
         </div>
@@ -2153,20 +2126,6 @@
 
   /* ── Header ────────────────────────────────────── */
 
-  .header { margin-bottom: 24px; }
-
-  .header-top {
-    display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;
-  }
-
-  .back-link {
-    font-size: 13px; color: var(--text-muted); text-decoration: none;
-    transition: color 0.15s;
-  }
-  .back-link:hover { color: var(--text-primary); }
-
-  .header-actions { display: flex; gap: 6px; }
-
   .btn-tiny {
     padding: 5px 12px; border-radius: var(--radius-sm); font-size: 11px; font-weight: 500;
     cursor: pointer; border: 1px solid var(--border-default);
@@ -2192,12 +2151,6 @@
   .btn-delete:hover {
     background: var(--red-subtle);
     border-color: var(--red);
-  }
-
-  .title-row { display: flex; align-items: center; gap: 12px; }
-  .title-row h1 {
-    font-size: 24px; font-weight: 700; color: var(--text-primary); margin: 0;
-    letter-spacing: -0.01em;
   }
 
   .status-badge {
@@ -2268,31 +2221,30 @@
   .avail-dot.offline { background: #f85149; }
   .avail-dot.nodata { background: var(--bg-overlay); }
 
-  .loading {
-    color: var(--text-muted); font-size: 13px; font-style: italic;
-  }
   .error { color: var(--red-text); font-size: 13px; }
   .empty {
     color: var(--text-muted); font-size: 13px; font-style: italic;
     text-align: center; padding: 24px;
   }
 
-  .empty-state {
+  .empty-row {
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 32px 0;
   }
-  .empty-state .empty { padding: 0 0 16px 0; }
+  .empty-row .empty { padding: 0 0 16px 0; }
 
   .patch-warn { color: var(--yellow-text, var(--accent)); font-weight: 600; }
   .patch-unknown { color: var(--text-muted); font-style: italic; }
 
   /* ── Adoption ──────────────────────────────────── */
 
-  .help-text { font-size: 11.5px; color: var(--text-muted); line-height: 1.5; margin: 0 0 12px; }
-  .adopt-msg { font-size: 12px; color: var(--text); margin: 0 0 10px; }
+  .help-text {
+    line-height: 1.5;
+    margin: 0 0 12px;
+  }
+  .adopt-msg { font-size: 12px; color: var(--text-primary); margin: 0 0 10px; }
   .adopt-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
   .adopt-row {
     display: grid;
@@ -2308,8 +2260,8 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .adopt-input {
-    background: var(--bg-input, var(--bg)); color: var(--text);
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: var(--bg-input); color: var(--text-primary);
+    border: 1px solid var(--border-default); border-radius: var(--radius-sm);
     padding: 3px 6px; font-size: 11.5px; min-width: 0;
   }
   .btn-primary-tiny { border-color: var(--accent); color: var(--accent); }
@@ -2370,21 +2322,6 @@
   }
 
   /* ── Tabs ──────────────────────────────────────── */
-
-  .tabs {
-    display: flex; gap: 0; border-bottom: 1px solid var(--border-subtle); margin-bottom: 16px;
-  }
-
-  .tabs button {
-    padding: 10px 16px; background: none; border: none;
-    border-bottom: 2px solid transparent; cursor: pointer;
-    font-size: 13px; color: var(--text-muted); font-weight: 500;
-    margin-bottom: -1px; transition: all 0.15s;
-  }
-  .tabs button:hover { color: var(--text-primary); }
-  .tabs button.active {
-    color: var(--accent); border-bottom-color: var(--accent);
-  }
 
   /* ── Charts ────────────────────────────────────── */
 
@@ -2504,7 +2441,6 @@
     margin-bottom: 6px; font-family: var(--font-mono);
   }
 
-  .mini-table { width: 100%; border-collapse: collapse; font-size: 12px; }
   .mini-table th {
     text-align: left; padding: 8px 10px; font-size: 10px; font-weight: 600;
     color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em;
@@ -2515,8 +2451,6 @@
     color: var(--text-secondary);
   }
   .mini-table tr:hover td { background: var(--bg-hover); }
-  .mono { font-family: var(--font-mono); }
-  .small { font-size: 11px; }
 
   /* ── Syslog ────────────────────────────────────── */
 
@@ -2636,8 +2570,6 @@
     color: var(--text-primary); margin: 1px 4px 1px 0;
   }
 
-  .text-muted { color: var(--text-muted); }
-
   /* ── Settings tab ────────────────────────────── */
   .settings-form { display: flex; flex-direction: column; gap: 16px; }
   .form-field { display: flex; flex-direction: column; gap: 4px; }
@@ -2646,19 +2578,19 @@
   .form-field input[type='url'],
   .form-field input[type='password'] {
     padding: 8px 10px; background: var(--bg-overlay, rgba(0,0,0,0.2));
-    border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.9rem; width: 100%;
+    border: 1px solid var(--border-default); border-radius: 6px; color: var(--text-primary); font-size: 0.9rem; width: 100%;
   }
   .form-field input:disabled { opacity: 0.55; cursor: not-allowed; }
   .form-row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .toggle-label { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 0.92rem; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--text); }
+  .toggle-label { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 0.92rem; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--text-primary); }
   .toggle-label input[type='checkbox'] { width: 16px; height: 16px; cursor: pointer; }
-  .oidc-fields { display: flex; flex-direction: column; gap: 14px; padding: 16px; background: var(--bg-overlay, rgba(0,0,0,0.1)); border-radius: 8px; border: 1px solid var(--border); }
+  .oidc-fields { display: flex; flex-direction: column; gap: 14px; padding: 16px; background: var(--bg-overlay, rgba(0,0,0,0.1)); border-radius: 8px; border: 1px solid var(--border-default); }
   .field-hint { font-size: 11px; color: var(--text-muted); margin: 2px 0 0; }
   .oidc-intro { font-size: 13px; color: var(--text-secondary); line-height: 1.5; margin-bottom: 4px; }
   .oidc-prereq {
     margin: 12px 0 16px;
     padding: 14px 16px;
-    border: 1px solid var(--border);
+    border: 1px solid var(--border-default);
     border-left: 3px solid var(--accent, #4a9eff);
     border-radius: 8px;
     background: var(--bg-overlay, rgba(0, 0, 0, 0.1));
@@ -2673,7 +2605,7 @@
   .routing-modes { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin: 12px 0 16px; }
   .routing-mode {
     padding: 14px 16px;
-    border: 1px solid var(--border);
+    border: 1px solid var(--border-default);
     border-radius: 8px;
     background: var(--bg-overlay, rgba(0, 0, 0, 0.1));
     font-size: 13px;
@@ -2692,18 +2624,17 @@
   .form-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding-top: 4px; }
   .btn { padding: 7px 16px; border-radius: 6px; border: 1px solid transparent; cursor: pointer; font-size: 0.88rem; font-weight: 500; transition: all 0.15s; }
   .btn:disabled { opacity: 0.55; cursor: not-allowed; }
-  .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
   .btn-primary:hover:not(:disabled) { opacity: 0.88; }
-  .btn-secondary { background: var(--bg-raised); color: var(--text); border-color: var(--border); }
-  .btn-secondary:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .btn-secondary:hover:not(:disabled) {
+    border-color: var(--accent);
+  }
   .btn-outline-danger { background: transparent; color: var(--red-text, #f87171); border-color: color-mix(in srgb, var(--red, #f87171) 40%, transparent); }
   .btn-outline-danger:hover { background: var(--red-subtle, rgba(248,113,113,0.1)); border-color: var(--red, #f87171); }
-  .settings-msg { margin-top: 4px; padding: 8px 12px; border-radius: 6px; font-size: 0.87rem; background: rgba(50,200,100,0.08); color: var(--text); border: 1px solid rgba(50,200,100,0.2); }
+  .settings-msg { margin-top: 4px; padding: 8px 12px; border-radius: 6px; font-size: 0.87rem; background: rgba(50,200,100,0.08); color: var(--text-primary); border: 1px solid rgba(50,200,100,0.2); }
   .settings-msg.is-error { background: rgba(200,50,50,0.08); color: var(--red-text, #f87171); border-color: rgba(200,50,50,0.2); }
   .help-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; margin-top: 4px; }
   .help-item { display: flex; gap: 12px; align-items: flex-start; }
   .help-icon { font-size: 20px; flex-shrink: 0; margin-top: 2px; }
   .help-item strong { display: block; font-size: 13px; margin-bottom: 2px; }
   .help-item p { font-size: 12px; color: var(--text-muted); margin: 0; line-height: 1.4; }
-
 </style>

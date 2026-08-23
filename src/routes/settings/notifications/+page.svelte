@@ -1,6 +1,6 @@
 <script lang="ts">
-  import AppLayout from '$lib/components/AppLayout.svelte';
-  import { page } from '$app/stores';
+  import PageHeader from '$lib/components/PageHeader.svelte';
+  import { formatDateTime as formatDate } from '$lib/format';
   import { showToast } from '$lib/client/toast.svelte';
   import { confirmAction } from '$lib/client/dialog.svelte';
 
@@ -307,10 +307,6 @@
     return map[op] || op;
   }
 
-  function formatDate(iso: string): string {
-    try { return new Date(iso).toLocaleString(); } catch { return iso; }
-  }
-
   function getSeverityFromValue(value: number, threshold: number): string {
     if (threshold === 0) return 'critical';
     const ratio = Math.abs(value / threshold);
@@ -323,12 +319,10 @@
   const urlPlaceholder = $derived(channelType === 'slack' ? 'https://hooks.slack.com/services/...' : channelType === 'email' ? 'alerts@example.com' : 'https://example.com/webhook');
 </script>
 
-<AppLayout user={data.user} activePage="notifications" pathname={$page.url.pathname}>
-
-<header>
-  <h1>Notifications & Alerts</h1>
-  <p class="subtitle">Manage notification channels, alert rules, and view alert history</p>
-</header>
+<PageHeader
+  title="Notifications & Alerts"
+  subtitle="Manage notification channels, alert rules, and view alert history"
+/>
 
 <!-- ── Notification Channels ────────────────────────────────────────── -->
 <section class="section">
@@ -370,7 +364,7 @@
   {/if}
 
   {#if channels.length === 0}
-    <div class="empty-state">No notification channels configured yet.</div>
+    <div class="empty-row">No notification channels configured yet.</div>
   {:else}
     <div class="table-wrap">
       <table>
@@ -492,7 +486,7 @@
   {/if}
 
   {#if rules.length === 0}
-    <div class="empty-state">No alert rules defined yet.</div>
+    <div class="empty-row">No alert rules defined yet.</div>
   {:else}
     <div class="table-wrap">
       <table>
@@ -550,7 +544,7 @@
   </div>
 
   {#if events.length === 0}
-    <div class="empty-state">No alert events recorded yet.</div>
+    <div class="empty-row">No alert events recorded yet.</div>
   {:else}
     <div class="table-wrap">
       <table>
@@ -598,93 +592,12 @@
   {/if}
 </section>
 
-</AppLayout>
-
 <style>
-  header { margin-bottom: 28px; }
-  header h1 { font-size: 26px; color: var(--text-primary); margin: 0 0 6px; }
-  .subtitle { color: var(--text-secondary); font-size: 14px; margin: 0; }
-
-  .section {
-    background: var(--bg-raised);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-lg);
-    padding: 24px;
-    margin-bottom: 24px;
-  }
-
-  .section-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 16px;
-  }
-
-  .section-header h2 {
-    font-size: 16px;
-    font-weight: 600;
-    color: var(--text-primary);
-    margin: 0;
-  }
-
-  .event-count {
-    font-size: 12px;
-    color: var(--text-muted);
-  }
-
   /* ── Buttons ─────────────────────────────────────────────────── */
-  .btn-primary {
-    padding: 8px 16px;
-    background: var(--accent);
-    color: var(--text-inverse);
-    border: none;
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background 0.15s;
-  }
-  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
-  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
-  .btn-sm { padding: 6px 12px; font-size: 12px; }
-
-  .btn-ghost {
-    padding: 6px 12px;
-    background: transparent;
-    color: var(--text-secondary);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    font-size: 12px;
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-  .btn-ghost:hover { background: var(--bg-hover); color: var(--text-primary); }
-
-  .btn-icon {
-    background: transparent;
-    border: 1px solid var(--border-default);
-    color: var(--text-muted);
-    width: 28px;
-    height: 28px;
-    border-radius: var(--radius-sm);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    transition: all 0.12s;
-  }
-  .btn-icon:hover { background: var(--bg-hover); color: var(--text-primary); border-color: var(--border-focus); }
   .btn-icon.btn-danger:hover { background: var(--red-subtle); color: var(--red-text); border-color: var(--red); }
 
   /* ── Table ───────────────────────────────────────────────────── */
-  .table-wrap { overflow-x: auto; }
-
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13px;
-  }
 
   th {
     text-align: left;
@@ -704,17 +617,14 @@
     vertical-align: middle;
   }
 
-  tbody tr:last-child td { border-bottom: none; }
-  tbody tr:hover { background: var(--bg-hover); }
   tr.acknowledged { opacity: 0.6; }
 
-  .cell-name { font-weight: 500; }
-  .cell-date { font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
   .cell-message { max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cell-channel { font-size: 12px; color: var(--text-secondary); }
-  .actions-col { text-align: right; white-space: nowrap; }
   .actions-col button + button { margin-left: 4px; }
-  .text-muted { color: var(--text-muted); font-size: 12px; }
+  .text-muted {
+    font-size: 12px;
+  }
 
   .resource-id {
     font-size: 11px;
@@ -738,15 +648,6 @@
   }
 
   /* ── Badges ──────────────────────────────────────────────────── */
-  .badge {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 10px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-  }
 
   .badge-webhook { background: var(--blue-subtle, #1e3a5f); color: var(--blue-text, #60a5fa); }
   .badge-slack { background: #2d1b4e; color: #c084fc; }
@@ -808,9 +709,6 @@
   }
 
   .form-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
     margin-bottom: 12px;
   }
 
@@ -818,56 +716,10 @@
     grid-template-columns: 1fr 1fr 1fr;
   }
 
-  .form-group {
-    margin-bottom: 12px;
-  }
-
-  .form-group label {
-    display: block;
-    margin-bottom: 5px;
-    font-weight: 500;
-    font-size: 12px;
-    color: var(--text-primary);
-  }
-
   .optional {
     font-weight: 400;
     color: var(--text-muted);
     font-size: 11px;
-  }
-
-  .form-group input[type='text'],
-  .form-group input[type='number'],
-  .form-group select {
-    width: 100%;
-    padding: 8px 10px;
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    background: var(--bg-input);
-    color: var(--text-primary);
-    box-sizing: border-box;
-    transition: border-color 0.15s;
-    font-family: var(--font-sans);
-  }
-
-  .form-group input:focus,
-  .form-group select:focus {
-    outline: none;
-    border-color: var(--border-focus);
-  }
-
-  .form-actions-inline {
-    display: flex;
-    gap: 8px;
-    margin-top: 8px;
-  }
-
-  .empty-state {
-    text-align: center;
-    padding: 32px 16px;
-    color: var(--text-muted);
-    font-size: 13px;
   }
 
   @media (max-width: 768px) {

@@ -1,4 +1,7 @@
 <script lang="ts">
+  import PageHeader from '$lib/components/PageHeader.svelte';
+  import Modal from '$lib/components/Modal.svelte';
+  import { invalidateAll } from '$app/navigation';
   import { showToast } from '$lib/client/toast.svelte';
   import { confirmAction } from '$lib/client/dialog.svelte';
 
@@ -83,7 +86,7 @@
         body: JSON.stringify({ role: newRole }),
       });
       if (res.ok) {
-        window.location.reload();
+        invalidateAll();
       } else {
         const err = await res.json();
         showToast('error', err.error || 'Failed to update role');
@@ -106,7 +109,7 @@
     try {
       const res = await fetch(`/api/users/${userId}`, { method: 'DELETE' });
       if (res.ok) {
-        window.location.reload();
+        invalidateAll();
       } else {
         const err = await res.json();
         showToast('error', err.error || 'Failed to delete user');
@@ -133,7 +136,7 @@
       });
       if (res.ok) {
         showAddModal = false;
-        window.location.reload();
+        invalidateAll();
       } else {
         const err = await res.json();
         addError = err.error || 'Failed to create user';
@@ -146,12 +149,13 @@
   }
 </script>
 
-<header>
-  <h1>Admin</h1>
-  <button class="btn-primary" onclick={() => { addUsername = ''; addEmail = ''; addFullName = ''; addPassword = ''; addRole = 'member'; addError = ''; showAddModal = true; }} title="Create a new user account">
-    + Add User
-  </button>
-</header>
+<PageHeader title="Admin">
+  {#snippet actions()}
+    <button class="btn-primary" onclick={() => { addUsername = ''; addEmail = ''; addFullName = ''; addPassword = ''; addRole = 'member'; addError = ''; showAddModal = true; }} title="Create a new user account">
+      + Add User
+    </button>
+  {/snippet}
+</PageHeader>
 
 <div class="card">
   <table class="data-table">
@@ -248,103 +252,47 @@
 </div>
 
 <!-- ── Add User modal ─────────────────────────────────────────────── -->
-{#if showAddModal}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="modal-backdrop" onclick={() => showAddModal = false} onkeydown={(e) => e.key === 'Escape' && (showAddModal = false)} role="button" tabindex="-1">
-    <div class="modal" onclick={(e) => e.stopPropagation()} onkeydown={() => {}} role="dialog" tabindex="-1">
-      <h3>Add User</h3>
-      {#if addError}
-        <div class="modal-error">{addError}</div>
-      {/if}
-      <div class="form-group">
-        <label for="addUsername">Username</label>
-        <input type="text" id="addUsername" bind:value={addUsername} placeholder="jdoe" required />
-      </div>
-      <div class="form-group">
-        <label for="addEmail">Email</label>
-        <input type="email" id="addEmail" bind:value={addEmail} placeholder="jdoe@example.com" required />
-      </div>
-      <div class="form-group">
-        <label for="addFullName">Full Name</label>
-        <input type="text" id="addFullName" bind:value={addFullName} placeholder="Jane Doe" required />
-      </div>
-      <div class="form-group">
-        <label for="addPassword">Password</label>
-        <input type="password" id="addPassword" bind:value={addPassword} placeholder="Min 8 characters" required minlength="8" />
-      </div>
-      <div class="form-group">
-        <label for="addRole">Role</label>
-        <select id="addRole" bind:value={addRole}>
-          <option value="member">Member</option>
-          <option value="admin">Admin</option>
-        </select>
-      </div>
-      <div class="modal-actions">
-        <button class="btn-secondary" onclick={() => showAddModal = false} title="Close without creating user">Cancel</button>
-        <button
-          class="btn-primary"
-          disabled={adding || !addUsername || !addEmail || !addFullName || !addPassword}
-          onclick={addUser}
-          title="Create the new user account"
-        >
-          {adding ? 'Creating…' : 'Create User'}
-        </button>
-      </div>
-    </div>
+<Modal bind:open={showAddModal} title="Add User">
+  {#if addError}
+    <div class="modal-error">{addError}</div>
+  {/if}
+  <div class="form-group">
+    <label for="addUsername">Username</label>
+    <input type="text" id="addUsername" bind:value={addUsername} placeholder="jdoe" required />
   </div>
-{/if}
+  <div class="form-group">
+    <label for="addEmail">Email</label>
+    <input type="email" id="addEmail" bind:value={addEmail} placeholder="jdoe@example.com" required />
+  </div>
+  <div class="form-group">
+    <label for="addFullName">Full Name</label>
+    <input type="text" id="addFullName" bind:value={addFullName} placeholder="Jane Doe" required />
+  </div>
+  <div class="form-group">
+    <label for="addPassword">Password</label>
+    <input type="password" id="addPassword" bind:value={addPassword} placeholder="Min 8 characters" required minlength="8" />
+  </div>
+  <div class="form-group">
+    <label for="addRole">Role</label>
+    <select id="addRole" bind:value={addRole}>
+      <option value="member">Member</option>
+      <option value="admin">Admin</option>
+    </select>
+  </div>
+  <div class="modal-actions">
+    <button class="btn-secondary" onclick={() => showAddModal = false} title="Close without creating user">Cancel</button>
+    <button
+      class="btn-primary"
+      disabled={adding || !addUsername || !addEmail || !addFullName || !addPassword}
+      onclick={addUser}
+      title="Create the new user account"
+    >
+      {adding ? 'Creating…' : 'Create User'}
+    </button>
+  </div>
+</Modal>
 
 <style>
-  header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 24px;
-  }
-
-  header h1 {
-    font-size: 26px;
-    font-weight: 700;
-    color: var(--text-primary);
-    letter-spacing: -0.02em;
-  }
-
-  .btn-primary {
-    padding: 9px 18px;
-    background: var(--accent);
-    color: var(--text-inverse);
-    border-radius: var(--radius-md);
-    font-weight: 600;
-    font-size: 13px;
-    text-decoration: none;
-    border: none;
-    cursor: pointer;
-  }
-
-  .btn-primary:hover:not(:disabled) {
-    background: var(--accent-hover);
-  }
-
-  .btn-primary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .btn-secondary {
-    padding: 9px 18px;
-    background: var(--bg-raised);
-    color: var(--text-secondary);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-md);
-    font-size: 13px;
-    cursor: pointer;
-  }
-
-  .btn-secondary:hover {
-    background: var(--bg-hover);
-    color: var(--text-primary);
-  }
-
   .card {
     background: var(--bg-raised);
     border-radius: var(--radius-lg);
@@ -403,17 +351,7 @@
     border-top: 1px solid var(--border-subtle);
   }
 
-  .text-muted { color: var(--text-muted); }
   .text-secondary { color: var(--text-secondary); }
-
-  .data-table {
-    width: 100%;
-    border-collapse: collapse;
-  }
-
-  .data-table thead {
-    background: var(--bg-overlay);
-  }
 
   .data-table th {
     padding: 10px 16px;
@@ -426,17 +364,6 @@
     border-bottom: 1px solid var(--border-subtle);
   }
 
-  .data-table td {
-    padding: 14px 16px;
-    border-top: 1px solid var(--border-subtle);
-    font-size: 14px;
-    color: var(--text-primary);
-  }
-
-  .data-table tr:hover {
-    background: var(--bg-hover);
-  }
-
   .user-name {
     font-weight: 500;
     color: var(--text-primary);
@@ -445,10 +372,6 @@
   .user-handle {
     font-size: 12px;
     color: var(--text-muted);
-  }
-
-  .text-right {
-    text-align: right;
   }
 
   .role-badge {
@@ -524,34 +447,6 @@
 
   /* ── Modal ────────────────────────────────────── */
 
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.6);
-    backdrop-filter: blur(4px);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-  }
-
-  .modal {
-    background: var(--bg-surface);
-    padding: 28px;
-    border-radius: var(--radius-lg);
-    border: 1px solid var(--border-default);
-    width: 100%;
-    max-width: 420px;
-    box-shadow: var(--shadow-md);
-  }
-
-  .modal h3 {
-    margin: 0 0 16px;
-    font-size: 18px;
-    font-weight: 700;
-    color: var(--text-primary);
-  }
-
   .modal-error {
     background: var(--red-subtle);
     color: var(--red-text);
@@ -562,30 +457,6 @@
     margin-bottom: 12px;
   }
 
-  .form-group {
-    margin-bottom: 14px;
-  }
-
-  .form-group label {
-    display: block;
-    margin-bottom: 5px;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--text-secondary);
-  }
-
-  .form-group input,
-  .form-group select {
-    width: 100%;
-    padding: 9px 12px;
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-md);
-    font-size: 14px;
-    background: var(--bg-input);
-    color: var(--text-primary);
-    box-sizing: border-box;
-  }
-
   .form-group input::placeholder,
   .form-group select::placeholder {
     color: var(--text-muted);
@@ -593,15 +464,6 @@
 
   .form-group input:focus,
   .form-group select:focus {
-    outline: none;
-    border-color: var(--border-focus);
     background: var(--bg-raised);
-  }
-
-  .modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-    margin-top: 20px;
   }
 </style>

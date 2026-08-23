@@ -1,0 +1,747 @@
+/*
+ * Shared UI primitives.
+ *
+ * Every page used to carry its own copy of `.btn-primary`, `.form-group`,
+ * `.modal` and friends. Copies drift: `.btn-primary` had twelve different
+ * definitions across nineteen files — three paddings, two radii, two weights
+ * and three text colours — none of it deliberate. This file is the single
+ * definition; the numbers below are the ones that already appeared most often,
+ * so most pages did not move at all.
+ *
+ * Specificity is kept deliberately low. Class rules here are a single class
+ * (0,1,0), which any Svelte-scoped page rule (`.btn-primary.svelte-xxxx`,
+ * 0,2,0) beats without `!important`. Element rules are wrapped in `:where()`
+ * so they contribute nothing at all (0,0,1) and a page can always override
+ * them. Local styles are for what is genuinely local; this file is for what is
+ * not.
+ */
+
+/* ─────────────────────────────── Buttons ─────────────────────────────── */
+
+.btn-primary,
+.btn-secondary,
+.btn-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s, opacity 0.15s;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--text-inverse);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+/*
+ * `--bg-overlay`, not `--bg-raised`: a secondary button sits either on the page
+ * background or inside a `--bg-raised` card, and in the second case a raised
+ * fill makes it vanish into the card. Overlay is one step lighter than both.
+ */
+.btn-secondary {
+  background: var(--bg-overlay);
+  border-color: var(--border-default);
+  color: var(--text-secondary);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.btn-danger {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+}
+
+.btn-danger:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.btn-primary:disabled,
+.btn-secondary:disabled,
+.btn-danger:disabled,
+.btn-ghost:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* A quieter button for row-level actions. Already identical everywhere. */
+.btn-ghost {
+  padding: 6px 12px;
+  background: transparent;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* Square icon-only button, 28px so it lines up with a `.btn-sm` beside it. */
+.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+.btn-icon:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* Size modifiers. The base is the size used by table rows, modals and
+   toolbars; `.btn-lg` is the size the full-page forms use for their submit. */
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.btn-lg {
+  padding: 10px 20px;
+  font-size: 14px;
+}
+
+/* ──────────────────────────────── Forms ──────────────────────────────── */
+
+.form-group {
+  margin-bottom: 16px;
+}
+
+/*
+ * The element half of each selector sits inside `:where()` so these rules
+ * weigh one class (0,1,0). A page that styles a bare `label` or `input` — the
+ * login screen does — keeps its own look without needing `!important`, and a
+ * page that styles `.form-group input` outweighs this easily. Without it the
+ * two would tie at (0,1,1) and the winner would depend on injection order.
+ */
+.form-group :where(label) {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.form-group :where(input, select, textarea) {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.form-group :where(input:focus, select:focus, textarea:focus) {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+  outline: none;
+}
+
+.form-group :where(input::placeholder, textarea::placeholder) {
+  color: var(--text-muted);
+}
+
+.form-group :where(input:disabled, select:disabled, textarea:disabled) {
+  background: var(--bg-overlay);
+  color: var(--text-muted);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+/* The native select arrow does not follow the dark palette, so it is replaced
+   with one drawn in `--text-muted`. */
+.form-group :where(select) {
+  appearance: none;
+  padding-right: 28px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%239898a8' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  cursor: pointer;
+}
+
+.form-group :where(input[type='checkbox'], input[type='radio']) {
+  width: auto;
+  accent-color: var(--accent);
+}
+
+.help-text,
+.form-hint {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.required {
+  color: var(--red);
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.form-actions-inline {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.form-container {
+  padding: 30px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.form-section {
+  margin-bottom: 32px;
+  padding-bottom: 32px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.form-section:last-of-type {
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.subsection-title {
+  margin: 20px 0 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.subsection-title:first-of-type {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+/* ──────────────────────────── Page furniture ─────────────────────────── */
+
+:where(.main-content) header {
+  margin-bottom: 24px;
+}
+
+/* `0 0 6px` rather than `0`: half these headers are followed by a `.subtitle`
+   whose own margin is zero, and the two would otherwise touch. */
+:where(.main-content) header h1 {
+  margin: 0 0 6px;
+  color: var(--text-primary);
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.subtitle {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+/* Rendered by the caller into `PageHeader`'s `actions` snippet, so it is
+   styled here rather than inside that component. */
+.header-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.section {
+  margin-bottom: 24px;
+  padding: 24px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.section-header :where(h2) {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+/* Inside a form the `h2` is an eyebrow above the fields, not a heading in its
+   own right — small, uppercase and muted. */
+.form-section :where(h2) {
+  margin-bottom: 16px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* Underline tabs. `ContainerTerminal` has pill tabs instead and calls them
+   `.term-tabs` so the two do not fight. */
+.tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.tabs :where(button) {
+  padding: 10px 20px;
+  margin-bottom: -1px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.tabs :where(button:hover) {
+  color: var(--text-primary);
+}
+
+.tabs :where(button.active) {
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.back-link {
+  color: var(--text-muted);
+  font-size: 13px;
+  text-decoration: none;
+  transition: color 0.15s;
+}
+
+.back-link:hover {
+  color: var(--accent);
+}
+
+/* ───────────────────────────── Empty states ──────────────────────────── */
+
+/* The full-width "nothing here yet" card a listing page shows in place of its
+   content. `.empty-row` is its counterpart inside a table body, where a dashed
+   card would be wrong. The two were both called `.empty-state` before, which
+   is why that name had nine different definitions. */
+.empty-state {
+  padding: 60px;
+  background: var(--bg-surface);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-lg);
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.empty-row {
+  padding: 32px 16px;
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.empty-state :where(p) {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.empty-icon {
+  margin-bottom: 12px;
+  font-size: 32px;
+}
+
+.empty-hint {
+  padding: 8px 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-style: italic;
+}
+
+/* ──────────────────────────────── Modals ─────────────────────────────── */
+
+/* The backdrop and the dialog belong to `Modal.svelte` and are styled there.
+   The action row is rendered by the caller, so it stays here. */
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+/* ───────────────────────────── Status & text ─────────────────────────── */
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.alert {
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+}
+
+.alert-error {
+  background: var(--red-subtle);
+  border: 1px solid var(--red);
+  color: var(--red-text);
+}
+
+.alert-success {
+  background: var(--green-subtle);
+  border: 1px solid var(--green);
+  color: var(--green-text);
+}
+
+.error-msg {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: var(--red-subtle);
+  border: 1px solid var(--red);
+  border-radius: var(--radius-sm);
+  color: var(--red-text);
+  font-size: 13px;
+}
+
+.text-muted,
+.muted {
+  color: var(--text-muted);
+}
+
+.text-right {
+  text-align: right;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.small {
+  font-size: 12px;
+}
+
+.loading {
+  color: var(--text-muted);
+  font-size: 13px;
+  font-style: italic;
+}
+
+/* ──────────────────────────────── Tables ─────────────────────────────── */
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+:where(.main-content) table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+:where(.main-content) tbody tr:hover {
+  background: var(--bg-hover);
+}
+
+:where(.main-content) tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.data-table :where(thead) {
+  background: var(--bg-overlay);
+}
+
+.data-table :where(td) {
+  padding: 14px 16px;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.data-table :where(tr:hover) {
+  background: var(--bg-hover);
+}
+
+.mini-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.cell-name {
+  font-weight: 500;
+}
+
+.cell-date {
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.actions-col {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.event-count {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* ────────────────────────────── Repeaters ────────────────────────────── */
+/*
+ * A list of rows the user can add to and remove from — environment variables,
+ * port mappings, volume mounts. Each editor owns its own column template, and
+ * declares it in its own scoped `<style>`; everything else about a row is the
+ * same in all three and lives here. There were previously three parallel
+ * vocabularies for this — `.kv-row`, `.port-row`, `.volume-row` — each with
+ * its own copy of the same field chrome.
+ */
+
+.repeat-header,
+.repeat-row {
+  display: grid;
+  gap: 8px;
+}
+
+.repeat-header {
+  padding: 0 0 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.repeat-row {
+  align-items: center;
+}
+
+.repeat-row :where(input, select) {
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 13px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.repeat-row :where(input::placeholder) {
+  color: var(--text-muted);
+}
+
+.repeat-row :where(input:focus, select:focus) {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+  outline: none;
+}
+
+/* Disabled because a registered volume supplies the value, not because the
+   field is inert — so it stays legible. */
+.repeat-row :where(input:disabled) {
+  background: var(--bg-overlay);
+  color: var(--text-muted);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+/* A checkbox that reads as a state icon rather than a form control. */
+.repeat-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  font-size: 16px;
+  opacity: 0.4;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.repeat-toggle :where(input) {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.repeat-toggle:has(input:checked) {
+  opacity: 1;
+}
+
+.btn-add {
+  padding: 6px 14px;
+  background: var(--accent-subtle);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--accent-text);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.btn-add:hover {
+  background: var(--bg-hover);
+}
+
+.btn-remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: var(--red-subtle);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--red-text);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.btn-remove:hover {
+  background: var(--bg-hover);
+}
+
+.domain-label {
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* ───────────────────── Manifest source toggle / errors ───────────────── */
+
+.source-toggle {
+  display: flex;
+  gap: 0;
+  width: fit-content;
+  margin-bottom: 16px;
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+}
+
+.source-btn {
+  padding: 8px 20px;
+  background: var(--bg-input);
+  border: none;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.source-btn:not(:last-child) {
+  border-right: 1px solid var(--border-default);
+}
+
+.source-btn.active {
+  background: var(--accent);
+  color: var(--text-inverse);
+}
+
+.source-btn:hover:not(.active) {
+  background: var(--bg-hover);
+}
+
+.validation-errors {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 120px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  overflow-y: auto;
+  background: var(--red-subtle);
+  border: 1px solid var(--red);
+  border-radius: var(--radius-sm);
+}
+
+.validation-error {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.error-line {
+  flex-shrink: 0;
+  color: var(--red-text);
+  font-family: var(--font-mono);
+  font-weight: 600;
+  white-space: nowrap;
+}

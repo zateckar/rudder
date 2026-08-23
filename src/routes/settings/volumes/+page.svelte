@@ -1,4 +1,7 @@
 <script lang="ts">
+  import PageHeader from '$lib/components/PageHeader.svelte';
+  import { formatDate } from '$lib/format';
+  import { invalidateAll } from '$app/navigation';
   import { showToast } from '$lib/client/toast.svelte';
   import { confirmAction } from '$lib/client/dialog.svelte';
 
@@ -32,7 +35,7 @@
       });
       
       if (res.ok) {
-        window.location.reload();
+        invalidateAll();
       } else {
         const err = await res.json();
         showToast('error', err.error || 'Failed to create volume');
@@ -54,7 +57,7 @@
     try {
       const res = await fetch(`/api/volumes/${volumeId}`, { method: 'DELETE' });
       if (res.ok) {
-        window.location.reload();
+        invalidateAll();
       } else {
         const err = await res.json();
         showToast('error', err.error || 'Failed to delete volume');
@@ -70,9 +73,6 @@
     return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
   }
 
-  function formatDate(date: Date) {
-    return new Date(date).toLocaleDateString();
-  }
 </script>
 
 <svelte:head>
@@ -80,16 +80,17 @@
 </svelte:head>
 
 <div class="volumes-container">
-  <div class="page-header">
-    <div>
-      <a href="/dashboard" class="back-link">← Back to Dashboard</a>
-      <h1>Volumes</h1>
-      <p class="subtitle">Manage persistent storage volumes for containers</p>
-    </div>
-    <button onclick={() => showForm = !showForm} class="btn-primary">
-      {showForm ? 'Cancel' : '+ New Volume'}
-    </button>
-  </div>
+  <PageHeader
+    title="Volumes"
+    subtitle="Manage persistent storage volumes for containers"
+    back={{ href: '/dashboard', label: 'Back to Dashboard' }}
+  >
+    {#snippet actions()}
+      <button onclick={() => showForm = !showForm} class="btn-primary btn-lg">
+        {showForm ? 'Cancel' : '+ New Volume'}
+      </button>
+    {/snippet}
+  </PageHeader>
 
   <!-- Create Form -->
   {#if showForm}
@@ -158,7 +159,7 @@
           </div>
         </div>
         <div class="form-actions">
-          <button type="submit" disabled={isSubmitting} class="btn-primary">
+          <button type="submit" disabled={isSubmitting} class="btn-primary btn-lg">
             {isSubmitting ? 'Creating...' : 'Create Volume'}
           </button>
         </div>
@@ -195,7 +196,7 @@
             </td>
             <td class="text-muted">{formatDate(volume.createdAt)}</td>
             <td class="text-right">
-              <button onclick={() => deleteVolume(volume.id)} class="btn-danger">
+              <button onclick={() => deleteVolume(volume.id)} class="btn-danger btn-sm">
                 Delete
               </button>
             </td>
@@ -216,56 +217,6 @@
 <style>
   .volumes-container {
     padding: 24px;
-  }
-
-  .page-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    margin-bottom: 24px;
-  }
-
-  .back-link {
-    font-size: 13px;
-    color: var(--text-secondary);
-    text-decoration: none;
-  }
-
-  .back-link:hover {
-    color: var(--accent);
-    text-decoration: underline;
-  }
-
-  .page-header h1 {
-    font-size: 28px;
-    color: var(--text-primary);
-    margin: 8px 0;
-  }
-
-  .subtitle {
-    color: var(--text-secondary);
-    font-size: 14px;
-  }
-
-  .btn-primary {
-    padding: 10px 20px;
-    background: var(--accent);
-    color: var(--text-inverse);
-    border: none;
-    border-radius: var(--radius-md);
-    font-weight: 500;
-    font-size: 14px;
-    cursor: pointer;
-    transition: background 0.15s;
-  }
-
-  .btn-primary:hover {
-    background: var(--accent-hover);
-  }
-
-  .btn-primary:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
   }
 
   .card {
@@ -299,53 +250,10 @@
     flex-direction: column;
   }
 
-  .form-group label {
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--text-secondary);
-    margin-bottom: 6px;
-  }
-
-  .form-group input,
-  .form-group select {
-    padding: 10px 12px;
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-md);
-    font-size: 14px;
-    background: var(--bg-input);
-    color: var(--text-primary);
-    transition: border-color 0.15s, box-shadow 0.15s;
-  }
-
-  .form-group input:focus,
-  .form-group select:focus {
-    outline: none;
-    border-color: var(--border-focus);
-    box-shadow: 0 0 0 3px var(--accent-subtle);
-  }
-
-  .form-group select {
-    cursor: pointer;
-  }
-
   .field-hint {
     margin: 6px 0 0;
     font-size: 12px;
     color: var(--text-secondary);
-  }
-
-  .form-actions {
-    display: flex;
-    justify-content: flex-end;
-  }
-
-  .data-table {
-    width: 100%;
-    border-collapse: collapse;
-  }
-
-  .data-table thead {
-    background: var(--bg-overlay);
   }
 
   .data-table th {
@@ -358,17 +266,6 @@
     letter-spacing: 0.05em;
   }
 
-  .data-table td {
-    padding: 14px 16px;
-    border-top: 1px solid var(--border-subtle);
-    font-size: 14px;
-    color: var(--text-primary);
-  }
-
-  .data-table tr:hover {
-    background: var(--bg-hover);
-  }
-
   .name-cell {
     font-weight: 500;
     color: var(--text-primary);
@@ -378,30 +275,6 @@
     font-family: var(--font-mono);
     font-size: 13px;
     color: var(--text-secondary);
-  }
-
-  .text-muted {
-    color: var(--text-secondary);
-  }
-
-  .text-right {
-    text-align: right;
-  }
-
-  .btn-danger {
-    padding: 6px 12px;
-    background: var(--red-subtle);
-    border: 1px solid var(--red);
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    color: var(--red-text);
-    cursor: pointer;
-    transition: background 0.15s;
-  }
-
-  .btn-danger:hover {
-    background: var(--red);
-    color: white;
   }
 
   .empty-message {

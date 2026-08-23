@@ -1,6 +1,6 @@
 <script lang="ts">
-  import AppLayout from '$lib/components/AppLayout.svelte';
-  import { page } from '$app/stores';
+  import PageHeader from '$lib/components/PageHeader.svelte';
+  import { formatBytes, formatDateTime as formatDate } from '$lib/format';
   import { browser } from '$app/environment';
 
   let { data } = $props();
@@ -134,29 +134,12 @@
     }
   }
 
-  function formatBytes(bytes: number): string {
-    if (bytes === 0) return '0 B';
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(1024));
-    return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + sizes[i];
-  }
-
-  function formatDate(d: any): string {
-    if (!d) return 'Never';
-    try {
-      return new Date(d).toLocaleString();
-    } catch {
-      return String(d);
-    }
-  }
 </script>
 
-<AppLayout user={data.user} activePage="backup" pathname={$page.url.pathname}>
-
-<header>
-  <h1>Azure Blob Storage Backups</h1>
-  <p class="subtitle">Configure automated daily backups of your database to Azure Blob Storage</p>
-</header>
+<PageHeader
+  title="Azure Blob Storage Backups"
+  subtitle="Configure automated daily backups of your database to Azure Blob Storage"
+/>
 
 {#if configError}
   <div class="alert alert-error">{configError}</div>
@@ -254,9 +237,9 @@
   </div>
 
   {#if loading}
-    <div class="empty-state">Loading...</div>
+    <div class="empty-row">Loading...</div>
   {:else if backups.length === 0}
-    <div class="empty-state">No backups found. {backupConfig ? 'Click "Backup Now" to create the first backup.' : 'Configure your storage settings first.'}</div>
+    <div class="empty-row">No backups found. {backupConfig ? 'Click "Backup Now" to create the first backup.' : 'Configure your storage settings first.'}</div>
   {:else}
     <div class="table-wrap">
       <table>
@@ -309,35 +292,7 @@
   {/if}
 </section>
 
-</AppLayout>
-
 <style>
-  header { margin-bottom: 28px; }
-  header h1 { font-size: 26px; color: var(--text-primary); margin: 0 0 6px; }
-  .subtitle { color: var(--text-secondary); font-size: 14px; margin: 0; }
-
-  .section {
-    background: var(--bg-raised);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-lg);
-    padding: 24px;
-    margin-bottom: 24px;
-  }
-
-  .section-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 16px;
-  }
-
-  .section-header h2 {
-    font-size: 16px;
-    font-weight: 600;
-    color: var(--text-primary);
-    margin: 0;
-  }
-
   .status-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -364,37 +319,7 @@
   }
 
   .mono {
-    font-family: var(--font-mono);
     font-size: 13px;
-  }
-
-  .alert {
-    padding: 12px 16px;
-    border-radius: var(--radius-sm);
-    margin-bottom: 16px;
-    font-size: 14px;
-  }
-
-  .alert-error {
-    background: var(--red-subtle);
-    color: var(--red-text);
-    border: 1px solid var(--red);
-  }
-
-  .alert-success {
-    background: var(--green-subtle, #0f3d2e);
-    color: var(--green-text, #6ee7b7);
-    border: 1px solid var(--green, #10b981);
-  }
-
-  .badge {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 10px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
   }
 
   .badge-success { background: var(--green-subtle, #0f3d2e); color: var(--green-text, #6ee7b7); }
@@ -402,108 +327,7 @@
   .badge-neutral { background: var(--bg-active); color: var(--text-secondary); }
 
   .form-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
     margin-bottom: 12px;
-  }
-
-  .form-group {
-    margin-bottom: 12px;
-  }
-
-  .form-group label {
-    display: block;
-    margin-bottom: 5px;
-    font-weight: 500;
-    font-size: 12px;
-    color: var(--text-primary);
-  }
-
-  .form-group input[type='text'],
-  .form-group input[type='password'] {
-    width: 100%;
-    padding: 8px 10px;
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    background: var(--bg-input);
-    color: var(--text-primary);
-    box-sizing: border-box;
-    transition: border-color 0.15s;
-    font-family: var(--font-sans);
-  }
-
-  .form-group input:focus {
-    outline: none;
-    border-color: var(--border-focus);
-  }
-
-  .help-text {
-    font-size: 12px;
-    color: var(--text-muted);
-    margin-top: 4px;
-  }
-
-  .form-actions-inline {
-    display: flex;
-    gap: 8px;
-    margin-top: 8px;
-  }
-
-  .btn-primary {
-    padding: 8px 16px;
-    background: var(--accent);
-    color: var(--text-inverse);
-    border: none;
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background 0.15s;
-  }
-  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
-  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-
-  .btn-sm { padding: 6px 12px; font-size: 12px; }
-
-  .btn-ghost {
-    padding: 6px 12px;
-    background: transparent;
-    color: var(--text-secondary);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    font-size: 12px;
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-  .btn-ghost:hover { background: var(--bg-hover); color: var(--text-primary); }
-
-  .btn-danger {
-    padding: 6px 12px;
-    background: var(--red);
-    color: white;
-    border: none;
-    border-radius: var(--radius-sm);
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: opacity 0.15s;
-  }
-  .btn-danger:hover:not(:disabled) { opacity: 0.9; }
-  .btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
-
-  .event-count {
-    font-size: 12px;
-    color: var(--text-muted);
-  }
-
-  .table-wrap { overflow-x: auto; }
-
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13px;
   }
 
   th {
@@ -523,13 +347,6 @@
     border-bottom: 1px solid var(--border-subtle);
     vertical-align: middle;
   }
-
-  tbody tr:last-child td { border-bottom: none; }
-  tbody tr:hover { background: var(--bg-hover); }
-
-  .cell-name { font-weight: 500; }
-  .cell-date { font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
-  .actions-col { text-align: right; white-space: nowrap; }
 
   .restore-confirm {
     display: flex;
@@ -557,13 +374,6 @@
   .restore-input:focus {
     outline: none;
     box-shadow: 0 0 0 2px var(--red-subtle);
-  }
-
-  .empty-state {
-    text-align: center;
-    padding: 32px 16px;
-    color: var(--text-muted);
-    font-size: 13px;
   }
 
   @media (max-width: 768px) {

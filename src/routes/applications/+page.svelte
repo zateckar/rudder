@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '$lib/components/PageHeader.svelte';
+  import Modal from '$lib/components/Modal.svelte';
   let { data } = $props();
   let importFileInput: HTMLInputElement;
   let importing = $state(false);
@@ -69,71 +71,64 @@
 
 <input type="file" accept=".json" class="hidden-file-input" bind:this={importFileInput} onchange={handleFileSelected} />
 
-<header>
-  <h1>Applications</h1>
-  <div class="header-buttons">
+<PageHeader title="Applications">
+  {#snippet actions()}
     <button class="btn-secondary" onclick={handleImportClick}>Import</button>
     <a href="/applications/new" class="btn-primary">New Application</a>
-  </div>
-</header>
+  {/snippet}
+</PageHeader>
 
 {#if importError && !showImportModal}
   <div class="import-error-banner">{importError}</div>
 {/if}
 
 <!-- Import modal -->
-{#if showImportModal}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="modal-backdrop" onclick={() => showImportModal = false} onkeydown={(e) => e.key === 'Escape' && (showImportModal = false)} role="button" tabindex="-1">
-    <div class="modal" onclick={(e) => e.stopPropagation()} onkeydown={() => {}} role="dialog" tabindex="-1">
-      <h3>Import Application</h3>
-      <p class="modal-help">Configure the imported application before creating it.</p>
+<Modal bind:open={showImportModal} title="Import Application">
+  <p class="modal-help">Configure the imported application before creating it.</p>
 
-      {#if importError}
-        <div class="import-error">{importError}</div>
-      {/if}
+  {#if importError}
+    <div class="import-error">{importError}</div>
+  {/if}
 
-      {#if importConfig}
-        <div class="import-preview">
-          <span class="import-preview-label">Source:</span>
-          <span class="import-preview-value">{importConfig.type} &middot; {importConfig.gitRepo ? 'Git' : 'Image'}</span>
-        </div>
-      {/if}
-
-      <div class="form-group">
-        <label for="importName">Application Name <span class="required">*</span></label>
-        <input type="text" id="importName" bind:value={importName} placeholder="my-imported-app" />
-      </div>
-
-      <div class="form-group">
-        <label for="importTeamId">Team <span class="required">*</span></label>
-        <select id="importTeamId" bind:value={importTeamId}>
-          <option value="">Select a team...</option>
-          {#each data.teams as team}
-            <option value={team.id}>{team.name}</option>
-          {/each}
-        </select>
-      </div>
-
-      <div class="form-group">
-        <label for="importWorkerId">Worker <span class="required">*</span></label>
-        <select id="importWorkerId" bind:value={importWorkerId}>
-          <option value="">Select a worker...</option>
-          {#each data.workers as worker}
-            <option value={worker.id}>{worker.name} ({worker.hostname})</option>
-          {/each}
-        </select>
-      </div>
-
-      <div class="modal-actions">
-        <button class="btn-secondary" onclick={() => showImportModal = false}>Cancel</button>
-        <button class="btn-primary" onclick={doImport} disabled={importing || !importName || !importTeamId || !importWorkerId}>
-          {importing ? 'Importing...' : 'Import Application'}
-        </button>
-      </div>
+  {#if importConfig}
+    <div class="import-preview">
+      <span class="import-preview-label">Source:</span>
+      <span class="import-preview-value">{importConfig.type} &middot; {importConfig.gitRepo ? 'Git' : 'Image'}</span>
     </div>
+  {/if}
+
+  <div class="form-group">
+    <label for="importName">Application Name <span class="required">*</span></label>
+    <input type="text" id="importName" bind:value={importName} placeholder="my-imported-app" />
   </div>
-{/if}
+
+  <div class="form-group">
+    <label for="importTeamId">Team <span class="required">*</span></label>
+    <select id="importTeamId" bind:value={importTeamId}>
+      <option value="">Select a team...</option>
+      {#each data.teams as team}
+        <option value={team.id}>{team.name}</option>
+      {/each}
+    </select>
+  </div>
+
+  <div class="form-group">
+    <label for="importWorkerId">Worker <span class="required">*</span></label>
+    <select id="importWorkerId" bind:value={importWorkerId}>
+      <option value="">Select a worker...</option>
+      {#each data.workers as worker}
+        <option value={worker.id}>{worker.name} ({worker.hostname})</option>
+      {/each}
+    </select>
+  </div>
+
+  <div class="modal-actions">
+    <button class="btn-secondary" onclick={() => showImportModal = false}>Cancel</button>
+    <button class="btn-primary" onclick={doImport} disabled={importing || !importName || !importTeamId || !importWorkerId}>
+      {importing ? 'Importing...' : 'Import Application'}
+    </button>
+  </div>
+</Modal>
 
 {#if data.applications.length === 0}
   <div class="empty-state">
@@ -210,20 +205,6 @@
 {/if}
 
 <style>
-  header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 28px;
-  }
-
-  header h1 {
-    font-size: 26px;
-    font-weight: 700;
-    color: var(--text-primary);
-    letter-spacing: -0.02em;
-  }
-
   .filters-bar {
     display: flex;
     gap: 10px;
@@ -232,7 +213,7 @@
   .search-input {
     flex: 1;
     padding: 8px 14px;
-    border: 1px solid var(--border);
+    border: 1px solid var(--border-default);
     border-radius: var(--radius-sm);
     background: var(--bg-input);
     color: var(--text-primary);
@@ -242,35 +223,12 @@
   .search-input:focus { border-color: var(--accent); }
   .status-filter {
     padding: 8px 12px;
-    border: 1px solid var(--border);
+    border: 1px solid var(--border-default);
     border-radius: var(--radius-sm);
     background: var(--bg-input);
     color: var(--text-primary);
     font-size: 13px;
     cursor: pointer;
-  }
-
-  .btn-primary {
-    padding: 9px 18px;
-    background: var(--accent);
-    color: var(--bg-root);
-    border-radius: var(--radius-sm);
-    font-weight: 600;
-    font-size: 13px;
-    text-decoration: none;
-    transition: background 0.15s;
-  }
-
-  .btn-primary:hover {
-    background: var(--accent-hover);
-  }
-
-  .empty-state {
-    background: var(--bg-raised);
-    border: 1px dashed var(--border-default);
-    padding: 60px;
-    border-radius: var(--radius-lg);
-    text-align: center;
   }
 
   .empty-icon {
@@ -279,15 +237,12 @@
     border-radius: 50%;
     background: var(--accent-subtle);
     color: var(--accent);
-    font-size: 26px;
     line-height: 52px;
     margin: 0 auto 16px;
   }
 
   .empty-state p {
-    color: var(--text-secondary);
     margin-bottom: 20px;
-    font-size: 14px;
   }
 
   /* ── List ────────────────────────────────────── */
@@ -344,7 +299,6 @@
     gap: 0;
     min-width: 0;
   }
-
 
   .app-name {
     font-size: 14px;
@@ -462,12 +416,6 @@
   }
 
   /* ── Status dot ──────────────────────────────── */
-  .status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
 
   .status-dot.green {
     background: var(--green);
@@ -489,28 +437,6 @@
   }
 
   /* ── Header buttons ─────────────────────────── */
-  .header-buttons {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-  }
-
-  .btn-secondary {
-    padding: 9px 18px;
-    background: var(--bg-raised);
-    color: var(--text-secondary);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    font-weight: 600;
-    font-size: 13px;
-    cursor: pointer;
-    transition: background 0.15s;
-  }
-
-  .btn-secondary:hover {
-    background: var(--bg-hover);
-  }
-
   .hidden-file-input {
     display: none;
   }
@@ -524,34 +450,6 @@
     padding: 10px 16px;
     font-size: 13px;
     margin-bottom: 16px;
-  }
-
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,0.6);
-    backdrop-filter: blur(4px);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-  }
-
-  .modal {
-    background: var(--bg-surface, var(--bg-raised));
-    padding: 28px;
-    border-radius: var(--radius-lg);
-    border: 1px solid var(--border-default);
-    width: 100%;
-    max-width: 460px;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-  }
-
-  .modal h3 {
-    margin: 0 0 6px;
-    font-size: 16px;
-    font-weight: 700;
-    color: var(--text-primary);
   }
 
   .modal-help {
@@ -590,58 +488,6 @@
   .import-preview-value {
     color: var(--text-primary);
     font-weight: 600;
-  }
-
-  .form-group {
-    margin-bottom: 16px;
-  }
-
-  .form-group label {
-    display: block;
-    margin-bottom: 6px;
-    font-weight: 500;
-    font-size: 13px;
-    color: var(--text-secondary);
-  }
-
-  .required {
-    color: var(--red);
-  }
-
-  .form-group input[type='text'],
-  .form-group select {
-    width: 100%;
-    padding: 9px 12px;
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    font-size: 14px;
-    background: var(--bg-input);
-    color: var(--text-primary);
-    box-sizing: border-box;
-    transition: border-color 0.15s;
-  }
-
-  .form-group input:focus,
-  .form-group select:focus {
-    outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px var(--accent-subtle);
-  }
-
-  .form-group select {
-    appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%239898a8' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 10px center;
-    padding-right: 28px;
-    cursor: pointer;
-  }
-
-  .modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-    margin-top: 20px;
   }
 
   .modal .btn-primary:disabled {

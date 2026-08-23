@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PageHeader from '$lib/components/PageHeader.svelte';
   import { enhance } from '$app/forms';
 
   let { data } = $props();
@@ -7,10 +8,7 @@
   let worker = $derived(data.worker);
 </script>
 
-<header>
-  <a href="/workers/{worker.id}" class="back-link">← Back to {worker.name}</a>
-  <h1>Edit Worker</h1>
-</header>
+<PageHeader title="Edit Worker" back={{ href: `/workers/${worker.id}`, label: `Back to ${worker.name}` }} />
 
 <div class="form-container">
   <form
@@ -64,156 +62,12 @@
     </div>
 
     <div class="form-actions">
-      <a href="/workers/{worker.id}" class="btn-secondary">Cancel</a>
-      <button type="submit" class="btn-primary" disabled={loading} title="Save worker configuration">
+      <a href="/workers/{worker.id}" class="btn-secondary btn-lg">Cancel</a>
+      <button type="submit" class="btn-primary btn-lg" disabled={loading} title="Save worker configuration">
         {loading ? 'Saving…' : 'Save Changes'}
       </button>
     </div>
   </form>
 </div>
 
-<style>
-  header {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    margin-bottom: 24px;
-  }
-
-  .back-link {
-    font-size: 13px;
-    color: var(--text-muted);
-    text-decoration: none;
-    transition: color 0.15s;
-  }
-
-  .back-link:hover {
-    color: var(--text-secondary);
-  }
-
-  header h1 {
-    font-size: 26px;
-    color: var(--text-primary);
-    font-weight: 700;
-    letter-spacing: -0.02em;
-    margin: 0;
-  }
-
-  .form-container {
-    background: var(--bg-raised);
-    padding: 30px;
-    border-radius: var(--radius-md);
-    border: 1px solid var(--border-subtle);
-  }
-
-  .form-section {
-    margin-bottom: 30px;
-    padding-bottom: 30px;
-    border-bottom: 1px solid var(--border-subtle);
-  }
-
-  .form-section:last-of-type {
-    border-bottom: none;
-  }
-
-  .form-section h2 {
-    font-size: 13px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    margin-bottom: 16px;
-    color: var(--text-muted);
-  }
-
-  .form-group {
-    margin-bottom: 16px;
-  }
-
-  .form-group label {
-    display: block;
-    margin-bottom: 6px;
-    font-weight: 500;
-    font-size: 13px;
-    color: var(--text-secondary);
-  }
-
-  .form-group input[type='text'],
-  .form-group input[type='number'] {
-    width: 100%;
-    padding: 9px 12px;
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    font-size: 14px;
-    background: var(--bg-input);
-    color: var(--text-primary);
-    box-sizing: border-box;
-    transition: border-color 0.15s, box-shadow 0.15s;
-  }
-
-  .form-group input::placeholder {
-    color: var(--text-muted);
-  }
-
-  .form-group input:focus {
-    outline: none;
-    border-color: var(--border-focus);
-    box-shadow: 0 0 0 3px var(--accent-subtle);
-  }
-
-  .form-hint {
-    display: block;
-    font-size: 12px;
-    color: var(--text-muted);
-    margin-top: 4px;
-  }
-
-  .form-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 16px;
-  }
-
-  .form-actions {
-    display: flex;
-    gap: 12px;
-    justify-content: flex-end;
-    padding-top: 20px;
-    border-top: 1px solid var(--border-subtle);
-  }
-
-  .btn-primary,
-  .btn-secondary {
-    padding: 10px 20px;
-    border-radius: var(--radius-sm);
-    font-weight: 500;
-    font-size: 14px;
-    text-decoration: none;
-    cursor: pointer;
-    border: none;
-    transition: background 0.15s;
-  }
-
-  .btn-primary {
-    background: var(--accent);
-    color: var(--text-inverse);
-  }
-
-  .btn-primary:hover:not(:disabled) {
-    background: var(--accent-hover);
-  }
-
-  .btn-primary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .btn-secondary {
-    background: var(--bg-overlay);
-    color: var(--text-primary);
-    border: 1px solid var(--border-default);
-  }
-
-  .btn-secondary:hover {
-    background: var(--bg-hover);
-  }
-</style>
+<style></style>
