@@ -61,8 +61,36 @@ export function registryVolumeName(appId: string, volumeName: string): string {
   return `${prefixFor(appId)}${volumeName}`;
 }
 
-/** One entry of a single-container application's `volumes` JSON column. */
+/**
+ * True when a mount source names a host path rather than a volume.
+ *
+ * An absolute path is a bind mount — the user knows their worker's filesystem,
+ * and the mount policy decides whether they may use it. Everything else,
+ * including a relative or `~`-prefixed path, becomes a named volume: a bind to
+ * `./data` would resolve against the *control plane's* working directory, which
+ * is not where the container runs.
+ *
+ * This is the only rule for telling the two apart, and it applies to every
+ * deployment format. Compose asks it of each `volumes:` entry; single-container
+ * applications ask it of `AppVolumeMount.hostPath`.
+ */
+export function isHostPathSource(source: string): boolean {
+  return source.startsWith('/');
+}
+
+/**
+ * One entry of a single-container application's `volumes` JSON column.
+ *
+ * Either a reference into the volume registry (`volumeId`), or a source and a
+ * target. `hostPath` is misnamed and has to stay so — it is what every existing
+ * row calls the field — but it holds a *source*, and `isHostPathSource` decides
+ * whether that source is a host path or a named volume. Adoption in particular
+ * fills it from a container's `HostConfig.Binds`, where Podman reports named
+ * volumes and host paths in the same position: `pg-data:/var/lib/postgresql/data`
+ * and `/srv/data:/data` are indistinguishable until the rule is applied.
+ */
 export interface AppVolumeMount {
+  /** A host path when absolute, otherwise a named volume. */
   hostPath?: string;
   containerPath?: string;
   mode?: string;
@@ -108,6 +136,28 @@ export function singleMountIntents(
       continue;
     }
     if (!v.hostPath || !v.containerPath) continue;
+
+    if (!isHostPathSource(v.hostPath)) {
+      // A named volume, under the name it already has. Not namespaced: this
+      // path exists to serve rows written by adoption, where the name came off
+      // a container that is mounting that exact volume right now. Deriving
+      // `rudder-<app8>-pg-data` from it would create a new empty volume on the
+      // next deploy and leave last week's data on the worker under a name
+      // nothing refers to — the failure this module exists to prevent.
+      //
+      // Until this rule was applied here, such a row reached `buildHostBind`,
+      // which rejected `pg-data` for not being absolute. The application could
+      // not be redeployed at all, and kept running only because adoption never
+      // recreated its container.
+      intents.push({
+        kind: 'volume',
+        name: v.hostPath,
+        target: v.containerPath,
+        mode: v.mode || 'rw',
+      });
+      continue;
+    }
+
     intents.push({
       kind: 'bind',
       source: v.hostPath,
@@ -116,17 +166,4 @@ export function singleMountIntents(
     });
   }
   return intents;
-}
-
-/**
- * True when a compose volume source names a volume rather than a host path.
- *
- * An absolute path is a bind mount — the user knows their worker's filesystem,
- * and the mount policy decides whether they may use it. Everything else,
- * including a relative or `~`-prefixed path, becomes a named volume: a bind to
- * `./data` would resolve against the *control plane's* working directory, which
- * is not where the container runs.
- */
-export function isHostPathSource(source: string): boolean {
-  return source.startsWith('/');
 }

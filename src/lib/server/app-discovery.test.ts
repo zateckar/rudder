@@ -7,6 +7,7 @@ import {
   routedDomain,
   volumesFromContainer,
 } from './app-discovery';
+import { singleMountIntents } from './volumes';
 import type { ContainerInspect } from './podman';
 
 function inspect(over: Record<string, any> = {}): ContainerInspect {
@@ -132,6 +133,33 @@ describe('volumesFromContainer', () => {
   test('defaults a bind with no mode to read-write', () => {
     const volumes = volumesFromContainer(inspect({ HostConfig: { Binds: ['/srv/data:/data'] } }));
     expect(JSON.parse(volumes!)[0].mode).toBe('rw');
+  });
+
+  test('carries a named volume across under the name it already has', () => {
+    // Podman reports a named volume in the same position as a host directory,
+    // so `Binds` holds both kinds. The name is the only thing tying the adopted
+    // application to the data it already holds; it is recorded verbatim, and
+    // `singleMountIntents` is what decides the two apart.
+    const volumes = volumesFromContainer(
+      inspect({ HostConfig: { Binds: ['pg-data:/var/lib/postgresql/data:rw'] } }),
+    );
+    expect(JSON.parse(volumes!)).toEqual([
+      { hostPath: 'pg-data', containerPath: '/var/lib/postgresql/data', mode: 'rw', volumeId: null },
+    ]);
+  });
+
+  test('records the mounts a redeploy can actually realize', () => {
+    // The pair that matters: what adoption writes has to survive the round trip
+    // through `singleMountIntents`. A named volume that came back as a bind was
+    // rejected by the host-mount policy, and the application could not be
+    // redeployed — it kept running only because adoption never recreated it.
+    const volumes = volumesFromContainer(
+      inspect({ HostConfig: { Binds: ['pg-data:/var/lib/postgresql/data:rw', '/srv/conf:/conf:ro'] } }),
+    );
+    expect(singleMountIntents('abcdef12-3456-7890-abcd-ef1234567890', volumes, new Map())).toEqual([
+      { kind: 'volume', name: 'pg-data', target: '/var/lib/postgresql/data', mode: 'rw' },
+      { kind: 'bind', source: '/srv/conf', target: '/conf', mode: 'ro' },
+    ]);
   });
 
   test('is null when the container mounts nothing', () => {

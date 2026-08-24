@@ -33,14 +33,19 @@
     <h2>Volume Mounts</h2>
     <button type="button" class="btn-add" onclick={add} title="Add a volume mount">+ Add Volume</button>
   </div>
-  <p class="help-text">Select a registered volume or enter a host path manually.</p>
+  <p class="help-text">
+    Select a registered volume, or enter a source. An absolute path such as
+    /srv/data mounts that directory on the worker, subject to the host-mount
+    policy. Anything else — pg-data — is a named Podman volume, created on first
+    use and kept across redeploys.
+  </p>
 
   {#if values.length === 0}
     <p class="empty-hint">No volume mounts.</p>
   {:else}
     <div class="repeat-header volume-row">
       <span>Volume</span>
-      <span>Host Path</span>
+      <span>Source</span>
       <span>Container Path</span>
       <span>Mode</span>
       <span></span>
@@ -56,7 +61,7 @@
             <option value={volume.id}>{volume.name}</option>
           {/each}
         </select>
-        <input type="text" placeholder="/data/myapp" bind:value={mount.hostPath} disabled={!!mount.volumeId} />
+        <input type="text" placeholder="/srv/myapp or pg-data" bind:value={mount.hostPath} disabled={!!mount.volumeId} />
         <input type="text" placeholder="/app/data" bind:value={mount.containerPath} disabled={!!mount.volumeId} />
         <select bind:value={mount.mode}>
           <option value="rw">Read/Write</option>
