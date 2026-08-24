@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
 import { db } from '$lib/db';
 import { applications, containers, teams, workers } from '$lib/db/schema';
+import { eq } from 'drizzle-orm';
 import {
   assertNotSharedWithOthers,
   otherAppsUsing,
@@ -229,10 +230,10 @@ describe('assertNotSharedWithOthers', () => {
     }
   });
 
-  test('allows a shared volume no other application declares', async () => {
-    // The residual gap, and deliberately so: there is no ownership record for a
-    // name Rudder did not generate, so "nobody else claims it" is the most that
-    // can be asked.
+  test('allows a name Rudder did not generate that no other application declares', async () => {
+    // The residual gap, and now the whole of it: a volume created by hand on the
+    // worker carries no owner in its name, so "nobody else claims it" really is
+    // the most that can be asked.
     expect(await refusal('restore', volume({ name: 'unreferenced' }))).toBeNull();
   });
 
@@ -245,5 +246,106 @@ describe('assertNotSharedWithOthers', () => {
         volume({ origin: 'app-scoped', name: 'rudder-copy-aaaaaaaa-pgdata-1700000000000' }),
       ),
     ).toBeNull();
+  });
+});
+
+/**
+ * The other half of the guard: a name Rudder generated for a *different*
+ * application.
+ *
+ * `assertNotSharedWithOthers` asks the worker whether anyone else declares the
+ * volume, which is the best available answer for a bare `pgdata` and the wrong
+ * question entirely for `rudder-<other8>-db-data`. Three ordinary situations
+ * answer "nobody declares this" about data that is unambiguously somebody else's:
+ * a volume the neighbour stopped mounting when its manifest changed, a copy the
+ * neighbour took (nothing ever declares a copy), and — for as long as the
+ * neighbour's manifest does not parse — everything the neighbour owns, because
+ * `otherAppsUsing` swallows the parse error by design.
+ *
+ * The name settles all three without a lookup, which is why this is asserted
+ * separately from the shared case rather than folded into it.
+ */
+describe('assertNotSharedWithOthers, on another application\'s volume', () => {
+  const worker = { id: WORKER_ID, name: 'guard-worker', hostname: 'guard.example.com' } as any;
+  const app = { id: APP_ID, name: 'guarded' } as any;
+
+  const foreign = (name: string): AppVolume => ({
+    name,
+    label: name,
+    origin: 'foreign',
+    declared: true,
+    present: true,
+    sizeBytes: 4096,
+    mountpoint: null,
+    targets: [],
+    registryId: null,
+    sizeLimit: null,
+    copies: [],
+  });
+
+  const refusalFor = async (name: string, action: SharedVolumeAction) => {
+    try {
+      await assertNotSharedWithOthers(app, worker, foreign(name), action);
+    } catch (e) {
+      return e as AuthorizationError;
+    }
+    return null;
+  };
+
+  test('refuses every operation on a neighbour\'s leftover volume', async () => {
+    // `otherAppsUsing` says nobody declares it — the neighbour's manifest moved
+    // on — while the data is still there and still theirs.
+    expect(await otherAppsUsing('rudder-bbbbbbbb-db-old', APP_ID, worker)).toEqual([]);
+
+    for (const action of ['delete', 'restore', 'back up', 'copy'] as const) {
+      const error = await refusalFor('rudder-bbbbbbbb-db-old', action);
+      expect(error).toBeInstanceOf(AuthorizationError);
+      expect(error!.statusCode).toBe(409);
+      // Names the owner, so the refusal is diagnosable rather than mysterious.
+      expect(error!.message).toContain('bbbbbbbb');
+    }
+  });
+
+  test('refuses every operation on a neighbour\'s copy', async () => {
+    const theirCopy = 'rudder-copy-bbbbbbbb-db-data-1700000000000';
+    expect(await otherAppsUsing(theirCopy, APP_ID, worker)).toEqual([]);
+
+    for (const action of ['delete', 'restore', 'back up', 'copy'] as const) {
+      expect((await refusalFor(theirCopy, action))!.statusCode).toBe(409);
+    }
+  });
+
+  test('still says what the operation would have done', async () => {
+    expect((await refusalFor('rudder-bbbbbbbb-db-old', 'back up'))!.message).toContain(
+      'hand you their data',
+    );
+    expect((await refusalFor('rudder-bbbbbbbb-db-old', 'delete'))!.message).toContain(
+      'delete their data too',
+    );
+  });
+
+  test('does not consult the database, so a broken manifest cannot weaken it', async () => {
+    // `otherAppsUsing` cannot see through an unparseable manifest and must not
+    // block on one, so a neighbour with a YAML typo used to lose protection for
+    // every volume it owns. Nothing here asks.
+    const before = await db
+      .select()
+      .from(applications)
+      .where(eq(applications.id, OTHER_APP_ID))
+      .get();
+
+    await db
+      .update(applications)
+      .set({ manifest: 'services:\n  db:\n   {{{ not yaml' })
+      .where(eq(applications.id, OTHER_APP_ID));
+    try {
+      expect(await otherAppsUsing('pgdata', APP_ID, worker)).toEqual([]);
+      expect((await refusalFor('rudder-bbbbbbbb-db-data', 'back up'))!.statusCode).toBe(409);
+    } finally {
+      await db
+        .update(applications)
+        .set({ manifest: before!.manifest })
+        .where(eq(applications.id, OTHER_APP_ID));
+    }
   });
 });

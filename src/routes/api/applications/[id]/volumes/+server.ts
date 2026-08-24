@@ -14,6 +14,10 @@ import { appStorage } from '$lib/server/app-volumes';
  * single-container applications, so this is the first view that answers the
  * question for a compose file or a Kubernetes manifest too — see
  * `appStorage`, which reads it out of the same intent a deploy acts on.
+ *
+ * The one caller that asks for sizes, and the reason `appStorage` makes them
+ * optional: `system/df` is the expensive call, and this is the only place a size
+ * is displayed rather than ignored.
  */
 export const GET: RequestHandler = route(async (event) => {
   const { application } = await requireApplication(event, event.params.id!);
@@ -22,5 +26,5 @@ export const GET: RequestHandler = route(async (event) => {
     ? await db.select().from(workers).where(eq(workers.id, application.workerId)).get()
     : null;
 
-  return json(await appStorage(application, worker ?? null));
+  return json(await appStorage(application, worker ?? null, { sizes: true }));
 });

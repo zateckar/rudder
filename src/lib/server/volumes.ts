@@ -71,6 +71,19 @@ export function registryVolumeName(appId: string, volumeName: string): string {
 const COPY_PREFIX = 'rudder-copy-';
 
 /**
+ * The label recording exactly which volume a copy was taken from.
+ *
+ * The copy's *name* cannot answer that. `volumeCopyBase` runs the source through
+ * `volumeBaseName`, which collapses everything outside Podman's safe alphabet,
+ * so `web_1-data` and `web-1-data` produce the same base — and matching copies
+ * back to sources by base then hands each of them the other's copies, which is a
+ * restore aimed at the wrong volume. The label is the exact source name and is
+ * what `buildAppStorage` matches on; the base is kept only as a fallback for
+ * copies taken before it was written.
+ */
+export const COPY_SOURCE_LABEL = 'rudder.copy.of';
+
+/**
  * `rudder-copy-<app8>-<base>-<stamp>` — a point-in-time copy of another volume.
  *
  * The literal `copy` is what keeps the two namespaces apart, and provably so: an
@@ -125,6 +138,34 @@ export function parseVolumeCopyName(
 /** True when this copy belongs to `appId`. */
 export function isCopyOfApp(name: string, appId: string): boolean {
   return parseVolumeCopyName(name)?.appId8 === appId.slice(0, 8);
+}
+
+/**
+ * The application a Rudder-generated volume name belongs to, as its first eight
+ * hex digits — or null when the name is not one Rudder composed.
+ *
+ * All three rules above embed `appId.slice(0, 8)`, so the name of any volume
+ * Rudder created *is* an ownership record, and reading it back is the only way to
+ * tell "a volume this application has no claim to" from "a volume with no owner".
+ * The distinction matters because a manifest is authored by an ordinary team
+ * member and a non-relative compose source is passed through verbatim: an
+ * application can declare `rudder-<someone-else8>-db-data` or
+ * `rudder-copy-<someone-else8>-db-data-<stamp>` and have it resolve as one of its
+ * own volumes. Asking whether anyone *currently declares* the name cannot catch
+ * that — the neighbour's leftovers, its copies, and everything it owns while its
+ * manifest happens not to parse all answer "nobody".
+ *
+ * Deliberately eight hex digits and a dash, matching what the rules generate. A
+ * name with no application segment — `rudder-db-data`, from
+ * `composeVolumeName(null, …)` — is unowned rather than everyone's.
+ */
+export function volumeOwnerApp8(name: string): string | null {
+  const copy = parseVolumeCopyName(name);
+  if (copy) return copy.appId8;
+
+  const bare = 'rudder-';
+  if (!name.startsWith(bare)) return null;
+  return /^([0-9a-f]{8})-/.exec(name.slice(bare.length))?.[1] ?? null;
 }
 
 /**

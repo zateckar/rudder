@@ -388,7 +388,7 @@
   interface AppVolume {
     name: string;
     label: string;
-    origin: 'registry' | 'app-scoped' | 'shared';
+    origin: 'registry' | 'app-scoped' | 'shared' | 'foreign';
     declared: boolean;
     present: boolean;
     sizeBytes: number | null;
@@ -419,6 +419,19 @@
       'The manifest names this volume outright, so it is not scoped to this application — ' +
       'another application naming it gets the same data. If one does, every operation here is ' +
       "refused: the storage is not this application's alone to back up, restore or delete.",
+    foreign:
+      'Rudder generated this name for a different application, so the data behind it is not ' +
+      'this one\'s. It is mounted because the manifest asks for it, but it cannot be backed up, ' +
+      'copied, restored or deleted from here — declaring another application\'s volume does not ' +
+      'transfer it.',
+  };
+
+  /** The badge text. The origin values read as jargon on their own. */
+  const ORIGIN_LABEL: Record<AppVolume['origin'], string> = {
+    registry: 'registry',
+    'app-scoped': 'this app',
+    shared: 'shared',
+    foreign: 'another app',
   };
 
   async function fetchStorage(force = false) {
@@ -452,13 +465,20 @@
     return formatBytes(v.sizeBytes);
   }
 
+  /**
+   * Run one volume operation, and report what came back.
+   *
+   * `body` is the refused response's JSON, so a caller can act on what the server
+   * said rather than assume: `deleteVolume` needs `canForce` to tell Podman's
+   * "still in use" apart from the several other refusals that are also 409s.
+   */
   async function volumeAction(
     name: string,
     label: string,
     url: string,
     method: string,
     body?: BodyInit,
-  ) {
+  ): Promise<{ ok: boolean; body: any }> {
     volumeBusy[name] = label;
     try {
       const res = await fetch(url, { method, ...(body === undefined ? {} : { body }) });
@@ -466,16 +486,16 @@
       if (res.ok) {
         showToast('success', result.message || 'Done');
         await fetchStorage(true);
-        return true;
+        return { ok: true, body: result };
       }
       // These refusals are paragraphs — which containers to stop, which other
       // application shares the volume — so they go in the detail modal rather
       // than a toast that truncates them.
       showDetail(`${label} failed`, [result.error || 'The request was refused.']);
-      return false;
+      return { ok: false, body: result };
     } catch (e: any) {
       showDetail(`${label} failed`, [e.message]);
-      return false;
+      return { ok: false, body: null };
     } finally {
       volumeBusy[name] = null;
     }
@@ -500,7 +520,14 @@
 
     const url = `/api/applications/${data.application.id}/volumes/${encodeURIComponent(v.name)}`;
     const done = await volumeAction(v.name, 'Delete', url, 'DELETE');
-    if (done || isCopy) return;
+    if (done.ok || isCopy) return;
+
+    // Only when the server said forcing is the thing that would help. Every
+    // refusal on this route is a 409 — a volume shared with another application,
+    // one belonging to another application, an unreachable worker — and offering
+    // the override for all of them stated Podman's reason for someone else's,
+    // then invited a retry that is refused identically.
+    if (!done.body?.canForce) return;
 
     // Podman refuses to remove a volume a container still mounts. Offering the
     // override separately keeps it an explicit second decision rather than
@@ -543,7 +570,7 @@
       `/api/applications/${data.application.id}/volumes/${encodeURIComponent(copy.name)}/copy`,
       'PUT',
     );
-    if (done) reloadWithFreshDrift(200);
+    if (done.ok) reloadWithFreshDrift(200);
   }
 
   // ── Restore from an uploaded archive ─────────────────────────────────────
@@ -587,7 +614,7 @@
       restoreFile,
     );
     restoreUploading = false;
-    if (done) {
+    if (done.ok) {
       showRestoreModal = false;
       restoreTarget = null;
       reloadWithFreshDrift(200);
@@ -1706,7 +1733,7 @@
                 <div class="volume-title">
                   <h3>{vol.label}</h3>
                   <span class="origin-badge origin-{vol.origin}" title={ORIGIN_HINT[vol.origin]}>
-                    {vol.origin === 'app-scoped' ? 'this app' : vol.origin}
+                    {ORIGIN_LABEL[vol.origin]}
                   </span>
                   {#if !vol.declared}
                     <span class="orphan-badge" title="Nothing in the current manifest mounts this volume. It is left over from a previous configuration and still holds data.">
@@ -1719,28 +1746,35 @@
                     </span>
                   {/if}
                 </div>
+                <!-- Nothing is offered on another application's volume: the
+                     server refuses all four, so a row of buttons that can only
+                     produce the same refusal is worse than the reason. -->
                 <div class="volume-actions">
-                  {#if vol.present}
-                    <!-- A plain link, not a fetch: the browser streams the tar
-                         straight to disk instead of the page buffering it. -->
-                    <a
-                      class="btn-act"
-                      href="/api/applications/{data.application.id}/volumes/{encodeURIComponent(vol.name)}/backup"
-                      download
-                      title="Download the whole volume as a tar archive"
-                    >Backup</a>
-                    <button class="btn-act" onclick={() => copyVolume(vol)} disabled={!!busy}
-                      title="Copy the volume on the worker, as a safety net before a risky change">
-                      {busy === 'Copy' ? 'Copying…' : 'Copy'}
-                    </button>
-                  {/if}
-                  <button class="btn-act" onclick={() => openRestore(vol)} disabled={!!busy}
-                    title="Upload a tar archive back into this volume">Restore…</button>
-                  {#if vol.present}
-                    <button class="btn-act btn-stop" onclick={() => deleteVolume(vol, false)} disabled={!!busy}
-                      title="Delete the volume and everything written to it">
-                      {busy?.includes('elete') ? 'Deleting…' : 'Delete'}
-                    </button>
+                  {#if vol.origin === 'foreign'}
+                    <span class="text-muted">Owned by another application</span>
+                  {:else}
+                    {#if vol.present}
+                      <!-- A plain link, not a fetch: the browser streams the tar
+                           straight to disk instead of the page buffering it. -->
+                      <a
+                        class="btn-act"
+                        href="/api/applications/{data.application.id}/volumes/{encodeURIComponent(vol.name)}/backup"
+                        download
+                        title="Download the whole volume as a tar archive"
+                      >Backup</a>
+                      <button class="btn-act" onclick={() => copyVolume(vol)} disabled={!!busy}
+                        title="Copy the volume on the worker, as a safety net before a risky change">
+                        {busy === 'Copy' ? 'Copying…' : 'Copy'}
+                      </button>
+                    {/if}
+                    <button class="btn-act" onclick={() => openRestore(vol)} disabled={!!busy}
+                      title="Upload a tar archive back into this volume">Restore…</button>
+                    {#if vol.present}
+                      <button class="btn-act btn-stop" onclick={() => deleteVolume(vol, false)} disabled={!!busy}
+                        title="Delete the volume and everything written to it">
+                        {busy?.includes('elete') ? 'Deleting…' : 'Delete'}
+                      </button>
+                    {/if}
                   {/if}
                 </div>
               </div>
@@ -2504,6 +2538,9 @@
   /* Not namespaced to this application, so deleting it may take another
      application's data with it. Coloured as the warning it is. */
   .origin-shared { background: var(--red-subtle); color: var(--red-text); }
+  /* Somebody else's, provably. Same colour as `shared` — both are "not yours to
+     act on" — and the badge text says which. */
+  .origin-foreign { background: var(--red-subtle); color: var(--red-text); }
   .orphan-badge { background: var(--bg-overlay); color: var(--text-muted); }
   .pending-badge { background: var(--bg-overlay); color: var(--text-muted); }
 

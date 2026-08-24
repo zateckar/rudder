@@ -7,7 +7,7 @@ import {
   runningContainerNames,
 } from '$lib/server/app-volumes';
 import { cloneVolume, restoreFromCopy } from '$lib/server/volume-ops';
-import { LockError, withLock, workerDeployLock } from '$lib/server/locks';
+import { LockError, VOLUME_OP_TTL_MS, withLock, workerDeployLock } from '$lib/server/locks';
 import { parseVolumeCopyName } from '$lib/server/volumes';
 
 /**
@@ -28,7 +28,13 @@ async function withWorkerLock<T>(
       ok: true,
       value: await withLock(
         workerDeployLock(workerId),
-        { operation, holder: `${process.pid}:${crypto.randomUUID()}` },
+        {
+          operation,
+          holder: `${process.pid}:${crypto.randomUUID()}`,
+          // Copying a large volume outlasts the deploy-sized default, and a lock
+          // judged stale under a running copy lets a deploy in beside it.
+          ttlMs: VOLUME_OP_TTL_MS,
+        },
         fn,
       ),
     };

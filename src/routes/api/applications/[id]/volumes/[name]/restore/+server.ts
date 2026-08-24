@@ -3,7 +3,8 @@ import type { RequestHandler } from './$types';
 import { requireApplication, route } from '$lib/server/auth';
 import { requireAppVolume, runningContainerNames } from '$lib/server/app-volumes';
 import { restoreVolume, type RestoreMode } from '$lib/server/volume-ops';
-import { LockError, withLock, workerDeployLock } from '$lib/server/locks';
+import { PodmanApiError } from '$lib/server/podman';
+import { LockError, VOLUME_OP_TTL_MS, withLock, workerDeployLock } from '$lib/server/locks';
 
 /**
  * Write a tar archive back into a volume.
@@ -66,6 +67,10 @@ export const POST: RequestHandler = route(async (event) => {
       {
         operation: `restore volume ${volume.name}`,
         holder: `${process.pid}:${crypto.randomUUID()}`,
+        // The upload is the client's, so this is bounded by their link speed and
+        // the archive's size, not by anything here. The deploy-sized default
+        // expires under a large restore and lets a deploy run beside it.
+        ttlMs: VOLUME_OP_TTL_MS,
       },
       () => restoreVolume(worker, application.id, volume.name, body, mode),
     );
@@ -81,7 +86,28 @@ export const POST: RequestHandler = route(async (event) => {
         { status: 409 },
       );
     }
-    throw e;
+    if (e instanceof PodmanApiError) throw e;
+
+    // Still a 500 — this is a genuine fault and must not be relabelled — but with
+    // a body, and one that says what state the data is in. `replace` recreates the
+    // volume before extracting, so a failure past that point leaves it empty, and
+    // the archive that would have filled it was the request body: it is gone, and
+    // the caller is the only one who still has a copy. Letting `route()` produce
+    // a bare 500 meant the page could not even parse the response, and reported a
+    // JSON syntax error for the loss of a database.
+    const detail = e instanceof Error ? e.message : String(e);
+    return json(
+      {
+        error:
+          mode === 'replace'
+            ? `Restoring "${volume.name}" failed after the volume had been emptied, so it is now ` +
+              `empty and the archive was not applied. Upload it again once the cause is fixed — ` +
+              `Rudder does not keep a copy. The failure was: ${detail}`
+            : `Merging the archive into "${volume.name}" failed partway through, so it may hold a ` +
+              `mixture of old and new files. The failure was: ${detail}`,
+      },
+      { status: 500 },
+    );
   }
 
   return json({

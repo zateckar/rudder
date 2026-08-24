@@ -89,6 +89,19 @@ const OPERATION_BY_SEGMENT: Record<string, string | null> = {
 };
 
 /**
+ * Where the method changes what the route's own name means.
+ *
+ * `/volumes/:name/copy` is both operations: POST takes a copy, which costs disk
+ * and nothing else, while PUT writes one back — force-removing the volume and
+ * replacing its contents. Recording both as COPY_VOLUME filed the most
+ * destructive operation in the storage surface under the name of the safest one,
+ * so the trail could not distinguish them at all.
+ */
+const OPERATION_BY_METHOD: Record<string, Record<string, string>> = {
+  PUT: { copy: 'RESTORE_VOLUME' },
+};
+
+/**
  * Reads recorded despite the trail otherwise being writes only.
  *
  * Auditing every GET would bury everything worth finding under page loads, which
@@ -192,14 +205,6 @@ export function classifyRequest(method: string, pathname: string, search = ''): 
 
   let resourceType = (isApi ? RESOURCE_BY_API_ROOT : RESOURCE_BY_PAGE_ROOT)[route[0]] ?? 'unknown';
 
-  // Storage under an application is *about the volume*, not the application:
-  // `DELETE /api/applications/:id/volumes/:name` destroys data and nothing about
-  // the application itself changes. Filed as `volume` so it sits with the rest
-  // of the storage trail rather than among that application's deploys.
-  if (isApi && route[0] === 'applications' && route[2] === 'volumes') {
-    resourceType = 'volume';
-  }
-
   // The last id-shaped segment is the thing being acted on: `/api/workers/:id/
   // prune` is about the worker, `/api/containers/:id/exec` about the container.
   let resourceId: string | null = null;
@@ -207,11 +212,25 @@ export function classifyRequest(method: string, pathname: string, search = ''): 
     if (looksLikeId(segment)) resourceId = segment;
   }
 
+  // Storage under an application is *about the volume*, not the application:
+  // `DELETE /api/applications/:id/volumes/:name` destroys data and nothing about
+  // the application itself changes. Filed as `volume` so it sits with the rest
+  // of the storage trail rather than among that application's deploys.
+  //
+  // The name is the id, too. A volume has no UUID — the name is how every route
+  // here addresses it — and leaving the loop above to pick the last id-shaped
+  // segment recorded the *application's* UUID under `resourceType: volume`, so
+  // the trail named the wrong thing and never said which volume was destroyed.
+  if (isApi && route[0] === 'applications' && route[2] === 'volumes') {
+    resourceType = 'volume';
+    resourceId = route[3] ?? resourceId;
+  }
+
   // Verbs live at the end of the path — except for the page form actions, where
   // they live in the query string.
   const formAction = search.startsWith('?/') ? search.slice(2).split('&')[0] : null;
   const tail = route[route.length - 1];
-  const operation = OPERATION_BY_SEGMENT[tail];
+  const operation = OPERATION_BY_METHOD[method.toUpperCase()]?.[tail] ?? OPERATION_BY_SEGMENT[tail];
 
   let action: string;
   if (!isApi && formAction) {

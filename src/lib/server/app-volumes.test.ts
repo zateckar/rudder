@@ -60,14 +60,17 @@ function workerRow(): typeof workers.$inferSelect {
   } as typeof workers.$inferSelect;
 }
 
-function podmanVolume(name: string): PodmanVolume {
-  return { name, mountpoint: `/var/lib/containers/storage/volumes/${name}/_data`, createdAt: null, labels: {} };
+function podmanVolume(name: string, labels: Record<string, string> = {}): PodmanVolume {
+  return { name, mountpoint: `/var/lib/containers/storage/volumes/${name}/_data`, createdAt: null, labels };
 }
 
-function snapshot(entries: [string, number][]): WorkerVolumeSnapshot {
+/** `[name, bytes]`, optionally with the labels Podman reports for it. */
+type SnapshotEntry = [string, number] | [string, number, Record<string, string>];
+
+function snapshot(entries: SnapshotEntry[]): WorkerVolumeSnapshot {
   return {
-    volumes: entries.map(([name]) => podmanVolume(name)),
-    usage: new Map(entries),
+    volumes: entries.map(([name, , labels]) => podmanVolume(name, labels)),
+    usage: new Map(entries.map(([name, bytes]) => [name, bytes])),
   };
 }
 
@@ -174,6 +177,137 @@ describe('compose applications', () => {
     expect(data?.targets).toEqual([
       { container: 'db', path: '/var/lib/postgresql/data', mode: 'rw' },
     ]);
+  });
+});
+
+/**
+ * A manifest naming a volume Rudder generated for somebody else.
+ *
+ * A non-relative compose source is passed through verbatim, so this needs nothing
+ * but an ordinary team member editing their own application's manifest — and no
+ * deploy, because the storage view is computed from the manifest rather than from
+ * anything that ran. Classifying these as `shared` left them guarded only by
+ * "does another application declare this right now", which is `false` for a
+ * neighbour's leftovers, `false` for a neighbour's copies, and `false` for
+ * everything a neighbour owns while its manifest does not parse.
+ */
+describe('a volume in another application\'s namespace', () => {
+  const OTHER = '99999999-0000-0000-0000-000000000000';
+
+  const naming = (source: string) =>
+    appRow({
+      type: 'compose',
+      manifest: ['services:', '  x:', '    image: alpine', '    volumes:', `      - ${source}:/a`].join('\n'),
+    });
+
+  test('is foreign, not shared', () => {
+    const storage = storageFor(naming('rudder-99999999-db-data'));
+    expect(storage.volumes[0]).toMatchObject({
+      name: 'rudder-99999999-db-data',
+      origin: 'foreign',
+      declared: true,
+    });
+  });
+
+  test('so is a copy of theirs, which nothing would ever declare', () => {
+    const theirCopy = volumeCopyName(OTHER, 'db-data', 1_700_000_000_000);
+    expect(storageFor(naming(theirCopy)).volumes[0].origin).toBe('foreign');
+  });
+
+  test('still foreign when it is on the worker, which is when it holds data', () => {
+    // The exfiltration case: declared *and* present is what made a backup stream
+    // a neighbour's database out. Reported as existing, because the manifest
+    // mounts it and that is worth seeing — but with no size and no mount point,
+    // which are facts about their data.
+    const storage = storageFor(naming('rudder-99999999-db-old'), {
+      snapshot: snapshot([['rudder-99999999-db-old', 4096]]),
+    });
+    expect(storage.volumes[0]).toMatchObject({
+      origin: 'foreign',
+      present: true,
+      sizeBytes: null,
+      mountpoint: null,
+    });
+  });
+
+  test('this application\'s own names are unaffected', () => {
+    // The prefix check has to stay exact: `rudder-abcdef12-…` is this
+    // application's, and treating it as somebody's else's would refuse every
+    // operation on the storage the feature exists for.
+    expect(storageFor(naming('rudder-abcdef12-db-data')).volumes[0].origin).toBe('app-scoped');
+  });
+
+  test('a name with no application segment is shared, not foreign', () => {
+    // `pgdata` and `rudder-db-data` carry no owner, so the name proves nothing
+    // and the question has to be asked of the worker instead.
+    expect(storageFor(naming('pgdata')).volumes[0].origin).toBe('shared');
+    expect(storageFor(naming('rudder-db-data')).volumes[0].origin).toBe('shared');
+  });
+});
+
+/**
+ * Matching a copy back to the volume it was taken from.
+ *
+ * By name it cannot be done: the copy's base segment has been through
+ * `volumeBaseName`, which collapses everything outside Podman's alphabet, so
+ * `web_1-data` and `web-1-data` produce the same base. Keying on it gave each of
+ * two such volumes the other's copies, and `requireAppVolume` resolves a copy's
+ * `copyOf` to whichever sorts first — a restore that force-removes and overwrites
+ * the wrong volume.
+ */
+describe('copies and their source', () => {
+  const COLLIDING = ['rudder-abcdef12-web_1-data', 'rudder-abcdef12-web-1-data'];
+
+  /** Two volumes whose copy bases collide, declared directly. */
+  const desiredWith = (names: string[]) =>
+    ({
+      containers: names.map((name, i) => ({
+        key: `svc${i}`,
+        planned: { mounts: [{ kind: 'volume', name, target: '/a', mode: 'rw' }] },
+      })),
+    }) as any;
+
+  const fold = (snap: WorkerVolumeSnapshot) =>
+    buildAppStorage({
+      appId: APP_ID,
+      desired: desiredWith(COLLIDING),
+      manifestError: null,
+      registry: [],
+      snapshot: snap,
+      unreachable: null,
+    });
+
+  test('the two really do share a copy base', () => {
+    // The premise. If this ever stops being true the tests below stop testing
+    // anything.
+    expect(volumeCopyName(APP_ID, COLLIDING[0], 1)).toBe(volumeCopyName(APP_ID, COLLIDING[1], 1));
+  });
+
+  test('a copy goes to the volume it was taken from, not to its base twin', () => {
+    const copy = volumeCopyName(APP_ID, COLLIDING[0], 1_700_000_000_000);
+    const storage = fold(
+      snapshot([
+        [COLLIDING[0], 10],
+        [COLLIDING[1], 20],
+        [copy, 10, { 'rudder.copy.of': COLLIDING[0] }],
+      ]),
+    );
+
+    const source = storage.volumes.find((v) => v.name === COLLIDING[0]);
+    const twin = storage.volumes.find((v) => v.name === COLLIDING[1]);
+    expect(source?.copies.map((c) => c.name)).toEqual([copy]);
+    expect(twin?.copies).toEqual([]);
+  });
+
+  test('a copy taken before the label was written is still found, by base', () => {
+    // Backward compatibility, and the reason the base is still consulted at all.
+    // It attaches to both twins, which is precisely the ambiguity the label
+    // removes — recorded rather than asserted away, because a copy taken before
+    // this change genuinely cannot say which of the two it came from.
+    const copy = volumeCopyName(APP_ID, COLLIDING[0], 1_700_000_000_000);
+    const storage = fold(snapshot([[COLLIDING[0], 10], [COLLIDING[1], 20], [copy, 10]]));
+
+    expect(storage.volumes.map((v) => v.copies.map((c) => c.name))).toEqual([[copy], [copy]]);
   });
 });
 
@@ -329,6 +463,27 @@ describe('the worker\'s side of it', () => {
 
     expect(storage.volumes).toHaveLength(1);
     expect(storage.volumes[0].copies).toEqual([]);
+  });
+
+  test('sizes are null, not zero, when they were not asked for', () => {
+    // `requireAppVolume` declines them: `system/df` is the expensive call and no
+    // route that acts on a volume reads a size. Zero would read as "measured and
+    // empty".
+    const storage = buildAppStorage({
+      appId: APP_ID,
+      desired: desiredState({
+        app,
+        worker: workerRow(),
+        team: { id: 'team-1', name: 'Shop', slug: 'shop' },
+        volumeRegistry: new Map(),
+      }),
+      manifestError: null,
+      registry: [],
+      snapshot: { volumes: [podmanVolume('rudder-abcdef12-db-data')], usage: null },
+      unreachable: null,
+    });
+
+    expect(storage.volumes[0]).toMatchObject({ present: true, sizeBytes: null });
   });
 
   test('an unreachable worker leaves the declared list intact and the sizes unknown', () => {

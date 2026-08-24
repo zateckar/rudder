@@ -38,6 +38,31 @@ describe('volume storage', () => {
     expect(classifyRequest('POST', under('/copy')).action).toBe('COPY_VOLUME');
   });
 
+  test('names the volume, not the application it hangs under', () => {
+    // A volume has no UUID — the name is how every route here addresses it — so
+    // taking the last id-shaped segment recorded the application's id under
+    // `resourceType: volume`. The trail named the wrong thing, and never said
+    // which volume a delete had destroyed.
+    expect(classifyRequest('DELETE', under()).resourceId).toBe(VOLUME);
+    expect(classifyRequest('POST', under('/restore')).resourceId).toBe(VOLUME);
+    expect(classifyRequest('GET', under('/backup')).resourceId).toBe(VOLUME);
+  });
+
+  test('putting a copy back is a restore, not a copy', () => {
+    // The same path, two operations: POST takes a copy and costs disk, PUT
+    // force-removes the volume and replaces its contents. Recording both as
+    // COPY_VOLUME filed the most destructive operation in the storage surface
+    // under the name of the safest one.
+    expect(classifyRequest('PUT', under('/copy')).action).toBe('RESTORE_VOLUME');
+    expect(classifyRequest('POST', under('/copy')).action).toBe('COPY_VOLUME');
+  });
+
+  test('a DELETE against an operation route still deletes', () => {
+    // The method-shaped override must not reintroduce what the DELETE carve-out
+    // exists to prevent.
+    expect(classifyRequest('DELETE', `/api/applications/${APP}/webhook`).action).toBe('DELETE');
+  });
+
   test('a backup is audited, though it is a GET', () => {
     // The hook records writes only, which would have left the one operation
     // that takes a volume's entire contents off the worker with no trail. The

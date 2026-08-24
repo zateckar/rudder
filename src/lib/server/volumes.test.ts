@@ -11,6 +11,7 @@ import {
   volumeBaseName,
   volumeCopyBase,
   volumeCopyName,
+  volumeOwnerApp8,
 } from './volumes';
 
 const APP_ID = 'abcdef12-3456-7890-abcd-ef1234567890';
@@ -29,6 +30,41 @@ describe('volume naming', () => {
 
   test('compose falls back to an unscoped prefix with no application id', () => {
     expect(composeVolumeName(undefined, 'db', 'data')).toBe('rudder-db-data');
+  });
+});
+
+/**
+ * Reading an owner back out of a name.
+ *
+ * This is what turns "the name proves nothing" into "the name says whose it is"
+ * for every volume Rudder created, and it is the only ownership record there is:
+ * a manifest can name any volume on the worker, and asking who *declares* a name
+ * cannot see a neighbour's leftovers, a neighbour's copies, or anything at all
+ * while the neighbour's manifest does not parse.
+ */
+describe('volumeOwnerApp8', () => {
+  test('reads the owner out of each rule that embeds one', () => {
+    expect(volumeOwnerApp8(composeVolumeName(APP_ID, 'db', 'data'))).toBe('abcdef12');
+    expect(volumeOwnerApp8(registryVolumeName(APP_ID, 'pgdata'))).toBe('abcdef12');
+    expect(volumeOwnerApp8(volumeCopyName(APP_ID, 'pgdata', 1_700_000_000_000))).toBe('abcdef12');
+  });
+
+  test('a name Rudder did not compose has no owner', () => {
+    // Unowned, not everyone's: these fall to the "does anyone declare it" test.
+    expect(volumeOwnerApp8('pgdata')).toBeNull();
+    expect(volumeOwnerApp8('my-rudder-volume')).toBeNull();
+    // No application segment — `composeVolumeName(null, …)`.
+    expect(volumeOwnerApp8('rudder-db-data')).toBeNull();
+    // Eight characters, but not hex, so not the shape an application id takes.
+    expect(volumeOwnerApp8('rudder-zzzzzzzz-db-data')).toBeNull();
+    // Eight hex digits and no separator: not a prefix either rule produces.
+    expect(volumeOwnerApp8('rudder-abcdef12')).toBeNull();
+  });
+
+  test('a copy prefix cannot be mistaken for an application id', () => {
+    // `o`, `p` and `y` are not hex digits, which is what keeps the two
+    // namespaces apart — see `volumeCopyName`.
+    expect(volumeOwnerApp8('rudder-copy-abcdef12-db-data-1700000000000')).toBe('abcdef12');
   });
 });
 

@@ -437,9 +437,25 @@ nothing refers to.
 **A bare compose volume name is not namespaced.** `pgdata:/data` creates a volume
 called `pgdata` on the worker, and any other application naming `pgdata` gets the
 same data — which is sometimes what a compose file means and is usually a
-surprise. Rudder marks these `shared` on the Storage tab and refuses to delete
-one while another application on the same worker declares it, naming that
-application.
+surprise. Rudder marks these `shared` on the Storage tab and refuses **every**
+operation on one — delete, restore, copy and backup alike, since a tar of a
+neighbour's database is the whole of the exposure — while another application on
+the same worker declares it, naming that application.
+
+**A manifest can name any volume, so declaring one is not owning it.** A
+non-relative source is passed through as written, so nothing stops a manifest
+saying `rudder-<someone-else8>-db-data:/data`. Because the first three rules above
+all embed `<app8>`, the name of any volume Rudder created says which application
+it belongs to — so a name in another application's namespace is marked `foreign`
+on the Storage tab and refused outright, with no lookup and no controls offered.
+That check is deliberately independent of who currently *declares* the volume:
+that question answers "nobody" for a neighbour's leftover volumes, for every copy
+a neighbour has taken, and for everything a neighbour owns while its manifest does
+not parse.
+
+What remains, and cannot be closed: a volume Rudder did not name that nothing
+declares — a `pgdata` created by hand on the worker. There is no ownership record
+for such a name, so "nobody else claims it" is the most that can be asked.
 
 A Kubernetes manifest produces no named volumes at all: `emptyDir` becomes a
 tmpfs, `hostPath` a bind mount, and `configMap`/`secret` become files. See
@@ -470,7 +486,16 @@ Two guards, both refusals rather than warnings:
   process has open is how a restore produces a corrupt database rather than the
   state that was backed up. The refusal names the containers to stop.
 - **Restore and copy hold the worker's deploy lock**, so a deploy cannot recreate
-  containers onto the volume halfway through.
+  containers onto the volume halfway through. They hold it for up to six hours
+  rather than the deploy-sized ten minutes: both are bounded by the size of the
+  data and, for a restore, by the client's upload speed, and a lock that expires
+  under a running restore lets a deploy in beside it.
+
+`replace` destroys before it writes, so `VOLUME_TOOL_IMAGE` is confirmed to be
+pullable or already present *before* the volume is emptied — otherwise a worker
+that cannot reach the registry ends up with an empty volume and an archive that
+was never applied. If a restore does fail after that point, the error says so
+explicitly: Rudder keeps no copy of the upload.
 
 `BODY_SIZE_LIMIT` caps a restore upload and defaults to 512 KB — see
 [Environment Variables](#environment-variables). Raise it, and your proxy's limit

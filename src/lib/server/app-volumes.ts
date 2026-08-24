@@ -31,23 +31,35 @@ import { withPodman } from './podman-client';
 import { desiredState, type DesiredApp } from './reconcile';
 import { ManifestError } from './deploy/plan';
 import {
+  COPY_SOURCE_LABEL,
   isAppScopedVolume,
   parseVolumeCopyName,
   registryVolumeName,
   stripAppPrefix,
   volumeCopyBase,
+  volumeOwnerApp8,
 } from './volumes';
 
 /**
  * Where a volume's name came from, which decides what may safely be done to it.
  *
- * `shared` is the one that matters. A compose file saying `pgdata:/data` gets a
- * Podman volume literally called `pgdata` — see `parseCompose`, which passes a
- * non-relative source through unchanged — so it is *not* namespaced to the
- * application and may well be another application's data as well. Deleting one
- * is not a local decision.
+ * `registry` and `app-scoped` names are derived from this application's id, so
+ * nothing else can be behind one and every operation is this application's own
+ * business.
+ *
+ * The other two are both cases of a manifest naming a volume outright — see
+ * `parseCompose`, which passes a non-relative source through unchanged — and they
+ * differ in whether the name says who owns it:
+ *
+ * - `foreign` — the name is one Rudder composed for a *different* application:
+ *   `rudder-<other8>-…` or `rudder-copy-<other8>-…`. Refused outright; see
+ *   `assertNotSharedWithOthers`.
+ * - `shared` — a name Rudder did not compose, such as `pgdata`. It is not
+ *   namespaced to anything, so it may well be another application's data as
+ *   well, and deleting one is not a local decision. Whether anyone else declares
+ *   it is the most that can be asked.
  */
-export type VolumeOrigin = 'registry' | 'app-scoped' | 'shared';
+export type VolumeOrigin = 'registry' | 'app-scoped' | 'shared' | 'foreign';
 
 /** A copy taken of a volume, on request, as a safety net. */
 export interface VolumeCopy {
@@ -115,8 +127,12 @@ interface RegistryEntry {
 
 export interface WorkerVolumeSnapshot {
   volumes: PodmanVolume[];
-  /** Volume name → bytes, from one `system/df`. */
-  usage: Map<string, number>;
+  /**
+   * Volume name → bytes, from one `system/df`. Null when sizes were not asked
+   * for, which leaves every `sizeBytes` null rather than zero — see
+   * `appStorage`'s `sizes` option for why a caller would decline them.
+   */
+  usage: Map<string, number> | null;
 }
 
 export interface BuildAppStorageInput {
@@ -144,7 +160,12 @@ export function buildAppStorage(input: BuildAppStorageInput): AppStorage {
 
   const originOf = (name: string): VolumeOrigin => {
     if (registryByName.has(name)) return 'registry';
-    return isAppScopedVolume(name, appId) ? 'app-scoped' : 'shared';
+    if (isAppScopedVolume(name, appId)) return 'app-scoped';
+    // A name Rudder composed for another application. Checked before `shared`
+    // because the two are asked different questions: a name carrying somebody
+    // else's id is answered by the name alone, and no lookup can overrule it.
+    const owner = volumeOwnerApp8(name);
+    return owner && owner !== appId.slice(0, 8) ? 'foreign' : 'shared';
   };
 
   const ensure = (name: string, declared: boolean): AppVolume => {
@@ -209,15 +230,29 @@ export function buildAppStorage(input: BuildAppStorageInput): AppStorage {
   // volumes of their own, so a safety copy taken last week never reads as a
   // stray volume to be cleaned away. `rudder-copy-` cannot collide with
   // `rudder-<app8>-`; see `volumeCopyName`.
+  //
+  // Matched on `COPY_SOURCE_LABEL`, which holds the source's exact name.
+  // `volumeCopyBase` is lossy — `web_1-data` and `web-1-data` share a base — so
+  // keying on it attaches each of two such volumes' copies to both, and
+  // `requireAppVolume` then resolves the copy's `copyOf` to whichever sorts
+  // first: a restore that force-removes and overwrites the wrong volume. The
+  // base is still consulted, but only for copies taken before the label existed.
   const copiesBySource = new Map<string, VolumeCopy[]>();
+  const copiesByBase = new Map<string, VolumeCopy[]>();
   if (snapshot) {
     for (const found of snapshot.volumes) {
       const copy = parseVolumeCopyName(found.name);
       if (copy) {
         if (copy.appId8 !== appId.slice(0, 8)) continue;
-        const list = copiesBySource.get(copy.base) ?? [];
-        list.push({ name: found.name, at: copy.at, sizeBytes: snapshot.usage.get(found.name) ?? 0 });
-        copiesBySource.set(copy.base, list);
+        const entry = {
+          name: found.name,
+          at: copy.at,
+          sizeBytes: snapshot.usage ? (snapshot.usage.get(found.name) ?? 0) : null,
+        };
+        const source = found.labels?.[COPY_SOURCE_LABEL];
+        const index = source ? copiesBySource : copiesByBase;
+        const key = source || copy.base;
+        index.set(key, [...(index.get(key) ?? []), entry]);
         continue;
       }
 
@@ -228,16 +263,22 @@ export function buildAppStorage(input: BuildAppStorageInput): AppStorage {
 
       const volume = ensure(found.name, false);
       volume.present = true;
+      if (volume.origin === 'foreign') {
+        // It exists — worth saying, since the manifest mounts it — but its size
+        // and mount point are facts about another application's data, and the
+        // inspect route refuses to report them for the same reason. Nothing can
+        // be done to it from here either way; see `assertNotAnotherApps`.
+        continue;
+      }
       volume.mountpoint = found.mountpoint;
-      volume.sizeBytes = snapshot.usage.get(found.name) ?? 0;
+      volume.sizeBytes = snapshot.usage ? (snapshot.usage.get(found.name) ?? 0) : null;
     }
 
     for (const volume of byName.values()) {
-      // Keyed on the copy base rather than the label: the two differ whenever a
-      // volume name contains a character `volumeBaseName` collapses.
-      volume.copies = (copiesBySource.get(volumeCopyBase(appId, volume.name)) ?? []).sort(
-        (a, b) => b.at - a.at,
-      );
+      volume.copies = [
+        ...(copiesBySource.get(volume.name) ?? []),
+        ...(copiesByBase.get(volumeCopyBase(appId, volume.name)) ?? []),
+      ].sort((a, b) => b.at - a.at);
     }
   }
 
@@ -254,6 +295,25 @@ export function buildAppStorage(input: BuildAppStorageInput): AppStorage {
 }
 
 /**
+ * The registry volume ids an application's `volumes` column references.
+ *
+ * Malformed JSON yields none, which is how `singleMountIntents` reads the same
+ * column — so the two agree on an application with an unusable one.
+ */
+function referencedVolumeIds(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const declared = JSON.parse(raw);
+    if (!Array.isArray(declared)) return [];
+    return declared
+      .map((v: { volumeId?: string }) => v?.volumeId)
+      .filter((id): id is string => !!id);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * The registry rows an application references, resolved to the Podman names they
  * produce.
  *
@@ -267,21 +327,7 @@ async function referencedRegistry(
   raw: string | null | undefined,
 ): Promise<{ entries: RegistryEntry[]; forDesiredState: Map<string, { name: string; containerPath: string }> }> {
   const empty = { entries: [], forDesiredState: new Map() };
-  if (!raw) return empty;
-
-  let referenced: string[] = [];
-  try {
-    const declared = JSON.parse(raw);
-    if (Array.isArray(declared)) {
-      referenced = declared
-        .map((v: { volumeId?: string }) => v?.volumeId)
-        .filter((id): id is string => !!id);
-    }
-  } catch {
-    // Malformed JSON: nothing to look up. `singleMountIntents` reads it the
-    // same way, so the two agree on an application with an unusable column.
-    return empty;
-  }
+  const referenced = referencedVolumeIds(raw);
   if (referenced.length === 0) return empty;
 
   const rows = await db.select().from(volumes).where(inArray(volumes.id, referenced)).all();
@@ -298,16 +344,23 @@ async function referencedRegistry(
 }
 
 /**
- * Every volume this application uses, with its real size on the worker.
+ * Every volume this application uses, and — when asked — its real size on disk.
  *
- * One Podman round trip: `listVolumes` for what exists and `system/df` for how
- * big it is. A worker that is offline, or has no Podman URL, leaves `unreachable`
- * set and every size null — the declared list still renders, which is the view
- * someone reaching for this page during an outage needs.
+ * `listVolumes` for what exists, and `system/df` for how big it is. A worker that
+ * is offline, or has no Podman URL, leaves `unreachable` set and every size null;
+ * the declared list still renders, which is the view someone reaching for this
+ * page during an outage needs.
+ *
+ * `sizes` defaults to false because `system/df` is the expensive half by a wide
+ * margin — it is the only place Podman reports volume usage and it computes it by
+ * walking the storage tree — and the callers that resolve a volume in order to
+ * *act* on it never read a size. Only the listing endpoint pays for it. When it
+ * is wanted, the two calls go out together rather than one after the other.
  */
 export async function appStorage(
   app: typeof applications.$inferSelect,
   worker: typeof workers.$inferSelect | null,
+  { sizes = false }: { sizes?: boolean } = {},
 ): Promise<AppStorage> {
   const registry = await referencedRegistry(app.id, app.volumes);
 
@@ -346,10 +399,13 @@ export async function appStorage(
   let snapshot: WorkerVolumeSnapshot | null = null;
   let unreachable: string | null = null;
   try {
-    snapshot = await withPodman(worker, async (client) => ({
-      volumes: await client.listVolumes(),
-      usage: await client.volumeUsage(),
-    }));
+    snapshot = await withPodman(worker, async (client) => {
+      const [volumes, usage] = await Promise.all([
+        client.listVolumes(),
+        sizes ? client.volumeUsage() : Promise.resolve(null),
+      ]);
+      return { volumes, usage };
+    });
   } catch (e: unknown) {
     unreachable =
       `Worker "${worker.name}" could not be reached, so sizes and any volumes left behind by a ` +
@@ -386,14 +442,19 @@ export async function appStorage(
  * non-relative source through verbatim, so `pgdata:/data` — or
  * `rudder-<someone-else8>-pgdata:/data` — declares a volume this application has
  * no claim to. Every operation that reads or writes contents therefore names
- * itself and is refused on a volume another application declares; see
+ * itself and is refused on a volume that is not this application's alone; see
  * `assertNotSharedWithOthers`. `null` is for a read that touches no contents —
  * the inspect GET — and is the only way to opt out.
+ *
+ * `sizes` is off by default: resolving a volume in order to act on it needs to
+ * know that it exists, not how big it is, and asking costs a `system/df` sweep of
+ * the worker's storage. See `appStorage`.
  */
 export async function requireAppVolume(
   app: typeof applications.$inferSelect,
   volumeName: string,
   action: SharedVolumeAction | null,
+  { sizes = false }: { sizes?: boolean } = {},
 ): Promise<{
   worker: typeof workers.$inferSelect;
   storage: AppStorage;
@@ -406,7 +467,7 @@ export async function requireAppVolume(
   const worker = await db.select().from(workers).where(eq(workers.id, app.workerId)).get();
   if (!worker) throw new AuthorizationError('Worker not found', 404);
 
-  const storage = await appStorage(app, worker);
+  const storage = await appStorage(app, worker, { sizes });
   if (storage.unreachable) {
     // Every operation below needs the worker. Refusing with its own words beats
     // a Podman error from three calls deeper.
@@ -415,6 +476,9 @@ export async function requireAppVolume(
 
   const direct = storage.volumes.find((v) => v.name === volumeName);
   if (direct) {
+    // Ownership is not a function of what the caller intends, so this one runs
+    // even for the inspect read that opts out of everything else.
+    assertNotAnotherApps(direct, action);
     if (action) await assertNotSharedWithOthers(app, worker, direct, action);
     return { worker, storage, volume: direct, copyOf: null };
   }
@@ -485,9 +549,21 @@ export async function otherAppsUsing(
     .where(eq(applications.workerId, worker.id))
     .all();
 
-  const teamRows = await db.select().from(teams).all();
+  // Both lookups are scoped to what this worker's applications actually
+  // reference. They used to load the `teams` and `volumes` tables whole, on every
+  // shared-volume assertion — which is once per destructive operation, to answer
+  // a question about a handful of rows.
+  const teamIds = [...new Set(workerApps.map((a) => a.teamId).filter((id): id is string => !!id))];
+  const volumeIds = [...new Set(workerApps.flatMap((a) => referencedVolumeIds(a.volumes)))];
+
+  const teamRows = teamIds.length
+    ? await db.select().from(teams).where(inArray(teams.id, teamIds)).all()
+    : [];
   const teamById = new Map(teamRows.map((t) => [t.id, t]));
-  const volumeRows = await db.select().from(volumes).all();
+
+  const volumeRows = volumeIds.length
+    ? await db.select().from(volumes).where(inArray(volumes.id, volumeIds)).all()
+    : [];
   const volumeById = new Map(
     volumeRows.map((v) => [v.id, { name: v.name, containerPath: v.containerPath }]),
   );
@@ -514,8 +590,30 @@ export async function otherAppsUsing(
   return users;
 }
 
-/** What a caller is about to do to a volume's contents, for the refusal below. */
+/** What a caller is about to do to a volume's contents, for the refusals below. */
 export type SharedVolumeAction = 'delete' | 'restore' | 'back up' | 'copy';
+
+/**
+ * Refuse a volume whose name Rudder generated for a different application.
+ *
+ * Synchronous and unconditional, which is the point: this asks nothing of the
+ * database and nothing of the caller's intent, so unlike the shared-volume check
+ * it also covers the inspect read — which would otherwise report a neighbour's
+ * volume's size and mount point — and cannot be weakened by the neighbour's
+ * manifest happening not to parse.
+ */
+function assertNotAnotherApps(volume: AppVolume, action: SharedVolumeAction | null): void {
+  if (volume.origin !== 'foreign') return;
+
+  throw new AuthorizationError(
+    `"${volume.name}" belongs to another application: Rudder generated that name for ` +
+      `application ${volumeOwnerApp8(volume.name)}, not this one. ` +
+      `${action ? `${SHARED_CONSEQUENCE[action]}. ` : ''}` +
+      `Declaring another application's volume in a manifest does not transfer it — mount a ` +
+      `volume of your own instead.`,
+    409,
+  );
+}
 
 /** What each of them would do to the other application, in its own words. */
 const SHARED_CONSEQUENCE: Record<SharedVolumeAction, string> = {
@@ -533,23 +631,36 @@ const SHARED_CONSEQUENCE: Record<SharedVolumeAction, string> = {
  * A volume reaches an application's storage list because its manifest declares
  * it, and a declaration is not a claim: a bare compose source is passed through
  * as written, so `pgdata:/data` names whatever `pgdata` already is on that
- * worker, and a source spelled `rudder-<someone-else8>-pgdata` names another
- * team's volume outright. `app-scoped` and `registry` names are derived from the
- * application id and cannot say that; `shared` is exactly the case where the
- * name proves nothing.
+ * worker, and a source spelled `rudder-<someone-else8>-db-data` names another
+ * team's volume outright. `app-scoped` and `registry` names are derived from
+ * *this* application's id and cannot say that, so they are let straight through.
  *
- * So the question is asked of the worker instead: does another application
- * declare this volume? Computed with the same per-worker `desiredState` loop
- * `reconcileWorker` runs. If one does, every operation that reads or writes the
- * contents is refused — reads included, because a backup or a copy of another
- * team's database is the whole of the exposure and no less so for being
- * read-only.
+ * The other two are refused on different grounds, and the difference is the whole
+ * of this function:
  *
- * Two applications that genuinely share a volume are told to rename it in one of
- * the manifests, which is the only way to make the storage attributable at all.
- * The residual gap is a shared volume nothing else declares *yet* — there is no
- * ownership record for a name Rudder did not generate, so there is nothing
- * better to ask.
+ * **`foreign` — the name itself says whose it is.** Every rule in `volumes.ts`
+ * embeds `appId.slice(0, 8)`, so a volume Rudder created carries its owner in its
+ * name; `volumeOwnerApp8` reads it back. Refused outright, with no lookup,
+ * because no lookup could overrule it. This is what the "does anyone else declare
+ * it" test below cannot catch: a neighbour's leftover volume from an earlier
+ * manifest, a neighbour's safety copy (nothing ever declares a copy), and
+ * everything a neighbour owns during the ordinary minutes when its manifest does
+ * not parse all answer "nobody declares this" while being unambiguously somebody
+ * else's data.
+ *
+ * **`shared` — the name proves nothing, so the worker is asked.** Does another
+ * application declare this volume? Computed with the same per-worker
+ * `desiredState` loop `reconcileWorker` runs. If one does, every operation that
+ * reads or writes the contents is refused — reads included, because a backup or a
+ * copy of another team's database is the whole of the exposure and no less so for
+ * being read-only. Two applications that genuinely share a volume are told to
+ * rename it in one of the manifests, which is the only way to make the storage
+ * attributable at all.
+ *
+ * The residual gap is now only a volume Rudder did not name and nothing declares
+ * yet — a `pgdata` created by hand on the worker. There is no ownership record
+ * for such a name, so "nobody else claims it" really is the most that can be
+ * asked.
  */
 export async function assertNotSharedWithOthers(
   app: typeof applications.$inferSelect,
@@ -557,6 +668,7 @@ export async function assertNotSharedWithOthers(
   volume: AppVolume,
   action: SharedVolumeAction,
 ): Promise<void> {
+  assertNotAnotherApps(volume, action);
   if (volume.origin !== 'shared') return;
 
   const others = await otherAppsUsing(volume.name, app.id, worker);

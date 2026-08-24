@@ -63,6 +63,38 @@ import { singleMountIntents } from './volumes';
 
 export const MANAGED_LABEL = 'rudder.managed';
 export const APP_ID_LABEL = 'rudder.app.id';
+export const ROLE_LABEL = 'rudder.role';
+
+/**
+ * The `rudder.role` of a volume backup/restore/copy helper.
+ *
+ * Written by `withVolumeHelper` and read here, from one definition, because the
+ * two sides disagreeing would reinstate the drift-per-operation noise silently.
+ */
+export const HELPER_ROLE = 'volume-helper';
+
+/**
+ * A container that exists to perform one operation and then be removed, rather
+ * than to serve an application.
+ *
+ * `volume-helper` is the only one: `withVolumeHelper` creates it, mounts a volume
+ * into it, does one thing and removes it in a `finally`. It is labelled as
+ * Rudder's — it has to be, or `mayRemove` could never clean one up — and it is
+ * deliberately absent from the `containers` table, which together is exactly the
+ * shape the orphan rule looks for. So every backup, copy and restore that
+ * outlived a reconcile cycle raised `orphan` drift against the application whose
+ * volume was being worked on, and because each helper has a random name it was a
+ * fresh `driftFingerprint` each time: an alert row and a notification to every
+ * global channel per volume operation, and a second when it cleared.
+ *
+ * Skipped rather than reclassified as `foreign`, which would be a lie about
+ * ownership. A helper that genuinely leaks is not hidden by this — it surfaces
+ * where it actually bites, as Podman's 409 on the next delete of the volume it is
+ * holding open, which the delete route relays with `canForce`.
+ */
+export function isTransientHelper(container: { labels: Record<string, string> }): boolean {
+  return mayRemove(container) && container.labels?.[ROLE_LABEL] === HELPER_ROLE;
+}
 
 /** A container as the Podman API reports it, reduced to what reconciliation uses. */
 export interface ObservedContainer {
@@ -521,6 +553,10 @@ export function diff(input: DiffInput): DiffResult {
     // container still cannot be destroyed.
     const tracked = trackedIds.has(container.id) || trackedNames.has(container.name);
     if (tracked) continue;
+
+    // Mid-operation, by design, and never in the `containers` table. See
+    // `isTransientHelper`.
+    if (isTransientHelper(container)) continue;
 
     if (!mayRemove(container)) {
       drift.push({

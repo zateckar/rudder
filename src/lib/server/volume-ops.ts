@@ -24,7 +24,11 @@ import { env } from './env';
 import { realizeMounts, type MountIntent } from './mounts';
 import type { PodmanClient } from './podman';
 import { getRestPodmanClient, withPodman } from './podman-client';
-import { volumeCopyName } from './volumes';
+// The labels come from `reconcile`, which is what reads them back: a helper is
+// labelled so `mayRemove` permits cleaning one up and so `isTransientHelper` can
+// keep a mid-operation helper out of the drift report.
+import { APP_ID_LABEL, HELPER_ROLE, MANAGED_LABEL, ROLE_LABEL } from './reconcile';
+import { COPY_SOURCE_LABEL, volumeCopyName } from './volumes';
 
 /** Where a helper sees the volume it is working on. */
 const MOUNT_AT = '/volume';
@@ -67,14 +71,16 @@ async function withVolumeHelper<T>(
     binds,
     tmpfs,
     restartPolicy: 'no',
-    // Labelled as Rudder's so the reconciler's orphan pass recognises it rather
-    // than reporting a foreign container on the worker. It carries no
-    // `rudder.app.id` container of its own to be confused with, because it is
-    // never in the `containers` table.
+    // `rudder.managed` so `mayRemove` permits cleaning one up, and `rudder.role`
+    // so the reconciler can tell it apart from a container that is supposed to be
+    // serving. Without the role it matched the orphan rule exactly — managed,
+    // carrying an application id, and never in the `containers` table — and every
+    // operation long enough to span a reconcile cycle raised drift. See
+    // `isTransientHelper`.
     labels: {
-      'rudder.managed': 'true',
-      'rudder.app.id': appId,
-      'rudder.role': 'volume-helper',
+      [MANAGED_LABEL]: 'true',
+      [APP_ID_LABEL]: appId,
+      [ROLE_LABEL]: HELPER_ROLE,
     },
   });
 
@@ -182,6 +188,13 @@ export async function restoreVolume(
 ): Promise<void> {
   await withPodman(worker, async (client) => {
     if (mode === 'replace') {
+      // Before anything is destroyed. `withVolumeHelper` would pull the image
+      // itself, but that happens *after* the wipe, so a worker that cannot reach
+      // the registry — or that Rudder's own prune has just taken the image off —
+      // ended up with an emptied volume and the archive never applied. The upload
+      // stream is gone by then; there is nothing to retry with.
+      await client.ensureImage(env.VOLUME_TOOL_IMAGE);
+
       // Force, because the caller has already established that nothing of the
       // application's is running; anything still holding it is not ours.
       await client.removeVolume(volumeName, true);
@@ -264,9 +277,12 @@ export async function cloneVolume(
 
   return withPodman(worker, async (client) => {
     await client.createVolume(target, {
-      'rudder.managed': 'true',
-      'rudder.app.id': appId,
-      'rudder.copy.of': sourceName,
+      [MANAGED_LABEL]: 'true',
+      [APP_ID_LABEL]: appId,
+      // The exact source name, which the copy's own name cannot carry: the base
+      // segment has been through `volumeBaseName`. `buildAppStorage` matches on
+      // this to attach the copy to the volume it was really taken from.
+      [COPY_SOURCE_LABEL]: sourceName,
     });
 
     try {
@@ -299,6 +315,10 @@ export async function restoreFromCopy(
   targetName: string,
 ): Promise<void> {
   await withPodman(worker, async (client) => {
+    // As in `restoreVolume`: established before the target is destroyed, not
+    // when the helper is created halfway through.
+    await client.ensureImage(env.VOLUME_TOOL_IMAGE);
+
     await client.removeVolume(targetName, true);
     await client.createVolume(targetName);
     await copyVolumeContents(client, appId, copyName, targetName);

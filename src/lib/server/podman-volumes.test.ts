@@ -172,9 +172,18 @@ describe('removeVolume', () => {
     expect(seen).toContain('DELETE /volumes/orphan');
   });
 
-  test('a volume that is already gone is a success', async () => {
+  test('a volume that is already gone is a success, and says it removed nothing', async () => {
+    // The distinction the route needs. Reporting "already gone" as a deletion
+    // claims disk was reclaimed that never existed, and a declared volume nothing
+    // ever deployed is the ordinary way to arrive here.
     reset();
-    await expect(client.removeVolume('never-existed')).resolves.toBeUndefined();
+    expect(await client.removeVolume('never-existed')).toBe(false);
+  });
+
+  test('a volume that was there reports that it went', async () => {
+    reset();
+    await client.createVolume('real');
+    expect(await client.removeVolume('real')).toBe(true);
   });
 
   test('a volume still in use is a 409 the caller can act on, not a silent success', async () => {

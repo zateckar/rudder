@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import {
   APP_ID_LABEL,
+  HELPER_ROLE,
   MANAGED_LABEL,
+  ROLE_LABEL,
   autoCorrectable,
   desiredState,
   diff,
@@ -609,6 +611,50 @@ describe('diff', () => {
     expect(result.drift.map((d) => d.kind)).toEqual(['orphan']);
     expect(result.drift[0].detail).toContain('no longer exists');
     expect(result.drift[0].appId).toBe('app-gone');
+  });
+
+  test('a volume helper mid-operation is not drift', () => {
+    // `withVolumeHelper` creates one, mounts a volume into it, does one thing and
+    // removes it. It has to carry `rudder.managed` — otherwise `mayRemove` could
+    // never clean one up — and it is deliberately never in the `containers`
+    // table, which is the orphan rule exactly. So every backup, copy and restore
+    // that outlived a reconcile cycle raised drift against the application whose
+    // volume was being worked on, and each helper's random name made it a fresh
+    // fingerprint: an alert row and a notification to every global channel per
+    // volume operation.
+    const helper = toObserved(
+      raw({
+        Id: 'vh1',
+        Names: ['/rudder-volhelper-0a1b2c3d4e5f'],
+        Labels: {
+          [MANAGED_LABEL]: 'true',
+          [APP_ID_LABEL]: 'app-1',
+          [ROLE_LABEL]: HELPER_ROLE,
+        },
+      }),
+    );
+
+    const result = diff({ desired: [], rows: [], observed: [helper], knownAppIds: new Set(['app-1']) });
+    expect(result.drift).toEqual([]);
+    expect(result.clean).toBe(true);
+    // Skipped from the report, not from the ownership rule: a leaked helper is
+    // still Rudder's to remove.
+    expect(permittedRemovals([helper])).toEqual([helper]);
+  });
+
+  test('a managed container that only *looks* like a helper is still an orphan', () => {
+    // The role is what identifies one, not the name. Anything else would let a
+    // container escape the report by being called `rudder-volhelper-…`.
+    const impostor = toObserved(
+      raw({
+        Id: 'vh2',
+        Names: ['/rudder-volhelper-deadbeefcafe'],
+        Labels: { [MANAGED_LABEL]: 'true', [APP_ID_LABEL]: 'app-1' },
+      }),
+    );
+
+    const result = diff({ desired: [], rows: [], observed: [impostor], knownAppIds: new Set(['app-1']) });
+    expect(result.drift.map((d) => d.kind)).toEqual(['orphan']);
   });
 
   test('says so differently when the orphan belongs to an application that exists', () => {

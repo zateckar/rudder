@@ -111,6 +111,26 @@ export function workerDeployLock(workerId: string): string {
   return `deploy:worker:${workerId}`;
 }
 
+/**
+ * How long a volume operation may hold the worker lock before it is presumed
+ * abandoned.
+ *
+ * The default ten minutes is sized for a deploy and is far too short for these.
+ * A restore streams an upload of arbitrary size from the client's browser and a
+ * copy is a `cp -a` of an arbitrarily large volume; both routinely outlast it, and
+ * both talk to Podman with `timeoutMs: null` because being idle for a long time is
+ * what they are supposed to do. Once `isStale` says the lock is abandoned, a
+ * webhook-triggered deploy acquires the same key and recreates containers onto the
+ * volume mid-extraction — precisely the interleaving the lock was extended to
+ * cover, and silently, because the operation's own `finally` then finds a
+ * different holder and does not even release it.
+ *
+ * Six hours. A lock is in-memory and dies with the process, so the only thing
+ * this bounds is a genuinely hung operation inside a live one; being generous
+ * costs nothing that a restart does not already fix.
+ */
+export const VOLUME_OP_TTL_MS = 6 * 60 * 60 * 1000;
+
 export function isLocked(key: string): boolean {
   const entry = locks.get(key);
   if (!entry) return false;

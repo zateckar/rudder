@@ -714,6 +714,47 @@ export class PodmanClient {
     return this.request<ContainerInspect>(`/containers/${id}/json`);
   }
 
+  /**
+   * Make sure `image` can be run on this worker, and return its resolved name.
+   *
+   * Extracted from `createContainer`, which is still the main caller, so that an
+   * operation whose *first* step destroys something can establish this before
+   * taking that step. `restoreVolume` is the case: it removes and recreates the
+   * volume before the helper container exists, so a pull that fails there — an
+   * air-gapped worker, a rate-limited registry, `VOLUME_TOOL_IMAGE` pruned off
+   * the worker by Rudder's own prune — used to leave the volume empty and the
+   * archive unapplied.
+   *
+   * @throws when the image can be neither pulled nor found already present.
+   */
+  async ensureImage(image: string): Promise<string> {
+    const resolvedImage = this.resolveImageName(image);
+
+    try {
+      await this.pullImage(resolvedImage);
+    } catch (e) {
+      // A failed pull is survivable only if the image is already on the worker.
+      // It matters most for digest references: a rollback asks for specific
+      // bytes, and quietly running something else — or failing later with
+      // podman's own opaque error — is exactly what pinning was meant to stop.
+      const present = await this.getImageJson(resolvedImage).then(() => true, () => false);
+      if (!present) {
+        const byDigest = resolvedImage.includes('@sha256:');
+        throw new Error(
+          byDigest
+            ? `Image ${resolvedImage} could not be pulled and is not present on this worker. ` +
+              `That digest may have been pruned from the registry or the tag deleted; ` +
+              `the exact bytes this deployment recorded are no longer available.`
+            : `Image ${resolvedImage} could not be pulled and is not present on this worker: ` +
+              `${(e as Error)?.message ?? e}`,
+        );
+      }
+      console.warn(`Failed to pull image ${resolvedImage}, using the copy already on the worker:`, e);
+    }
+
+    return resolvedImage;
+  }
+
   private resolveImageName(image: string): string {
     if (image.includes('/') || image.startsWith('docker.io/') || image.startsWith('quay.io/') || image.startsWith('ghcr.io/')) {
       return image;
@@ -747,29 +788,7 @@ export class PodmanClient {
     /** Mount point → mount options, e.g. `{'/run/secrets': 'rw,mode=0700'}`. */
     tmpfs?: Record<string, string>;
   }): Promise<{ Id: string; Warnings: string[] }> {
-    const resolvedImage = this.resolveImageName(config.image);
-
-    try {
-      await this.pullImage(resolvedImage);
-    } catch (e) {
-      // A failed pull is survivable only if the image is already on the worker.
-      // It matters most for digest references: a rollback asks for specific
-      // bytes, and quietly running something else — or failing later with
-      // podman's own opaque error — is exactly what pinning was meant to stop.
-      const present = await this.getImageJson(resolvedImage).then(() => true, () => false);
-      if (!present) {
-        const byDigest = resolvedImage.includes('@sha256:');
-        throw new Error(
-          byDigest
-            ? `Image ${resolvedImage} could not be pulled and is not present on this worker. ` +
-              `That digest may have been pruned from the registry or the tag deleted; ` +
-              `the exact bytes this deployment recorded are no longer available.`
-            : `Image ${resolvedImage} could not be pulled and is not present on this worker: ` +
-              `${(e as Error)?.message ?? e}`,
-        );
-      }
-      console.warn(`Failed to pull image ${resolvedImage}, using the copy already on the worker:`, e);
-    }
+    const resolvedImage = await this.ensureImage(config.image);
 
     const containerConfig: any = {
       Image: resolvedImage,
@@ -1028,8 +1047,13 @@ export class PodmanClient {
    * still mounts it — is deliberately let through: that is a rule the caller has
    * broken and can act on, and `route()` relays a 4xx from Podman as itself.
    * `force` is the caller's explicit override, never the default.
+   *
+   * Returns whether a volume was actually removed, so a caller can say which of
+   * the two happened. Reporting "already gone" as a deletion claims disk was
+   * reclaimed that never existed, and a declared volume nothing ever deployed is
+   * the ordinary way to arrive here.
    */
-  async removeVolume(name: string, force: boolean = false): Promise<void> {
+  async removeVolume(name: string, force: boolean = false): Promise<boolean> {
     const encoded = encodeURIComponent(name);
     try {
       await this.volumeRequest(
@@ -1037,8 +1061,9 @@ export class PodmanClient {
         `/${encoded}?force=${force}`,
         { method: 'DELETE' },
       );
+      return true;
     } catch (e: unknown) {
-      if (PodmanApiError.hasStatus(e, 404)) return;
+      if (PodmanApiError.hasStatus(e, 404)) return false;
       throw e;
     }
   }
