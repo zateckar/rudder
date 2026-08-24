@@ -8,6 +8,7 @@ import { db } from '$lib/db';
 import { oidcConfig, users, userOidc } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { createSession, setSessionCookie } from '$lib/auth';
+import { decryptField } from '$lib/server/encryption';
 import { resolveTeamNames, syncUserTeams } from '$lib/server/oidc-teams';
 
 function decodeJwtPayload(token: string): Record<string, any> | null {
@@ -96,8 +97,13 @@ export async function GET({ url, cookies }: { url: URL; cookies: any }) {
     client_id: cfg.clientId,
   });
 
-  if (cfg.clientSecret) {
-    tokenBody.set('client_secret', cfg.clientSecret);
+  // Stored encrypted; `decryptField` passes through a row written before that
+  // was true, and returns null if the ENCRYPTION_KEY no longer matches — in
+  // which case this is a public client as far as the exchange is concerned, and
+  // the provider's own error is clearer than anything invented here.
+  const clientSecret = decryptField(cfg.clientSecret);
+  if (clientSecret) {
+    tokenBody.set('client_secret', clientSecret);
   }
 
   // Attach PKCE code_verifier if used

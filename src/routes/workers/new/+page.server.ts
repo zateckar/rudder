@@ -2,6 +2,7 @@ import { redirect, fail } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { workers } from '$lib/db/schema';
 import { domainFormatError } from '$lib/server/domains';
+import { workerTargetError } from '$lib/server/ssh-target';
 import { currentUser, isAdmin, requirePageAdmin } from '$lib/server/auth';
 
 export const load = async (event: { locals: App.Locals }) => {
@@ -24,6 +25,14 @@ export const actions = {
     if (!name || !hostname || !sshUser) {
       return fail(400, { error: 'Missing required fields' });
     }
+
+    // The name is substituted into the provisioning script that runs on the
+    // worker as root, and the hostname and user become the `user@host` argument
+    // of an `ssh` invocation on this host. This form checked the base domain and
+    // nothing else, so all three arrived unvalidated — `schemas.createWorker`
+    // exists and constrains the name, but no page action was using it.
+    const badTarget = workerTargetError({ name, hostname, sshUser });
+    if (badTarget) return fail(400, { error: badTarget });
 
     // The base domain is the stem of every hostname on this worker, and each one
     // becomes a Traefik `Host()` rule — for applications, and for the worker's

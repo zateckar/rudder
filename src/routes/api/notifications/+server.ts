@@ -42,8 +42,20 @@ export const POST: RequestHandler = route(async (event) => {
     return json({ error: 'name, type, and config are required' }, { status: 400 });
   }
 
-  if (!['webhook', 'slack', 'email'].includes(type)) {
-    return json({ error: 'type must be webhook, slack, or email' }, { status: 400 });
+  // `email` is deliberately not creatable. The schema and the dispatcher both
+  // still know the type — rows created before this exist — but there is no SMTP
+  // path behind it, so a new email channel could only ever fail to deliver. It
+  // used to be offered, accepted, and reported as sent; see `sendEmail`.
+  if (!['webhook', 'slack'].includes(type)) {
+    return json(
+      {
+        error:
+          type === 'email'
+            ? 'Email notifications are not available yet — Rudder has no SMTP support. Use a webhook or Slack channel.'
+            : 'type must be webhook or slack',
+      },
+      { status: 400 },
+    );
   }
 
   // Validate config is valid JSON (or already an object)

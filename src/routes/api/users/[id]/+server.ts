@@ -30,6 +30,41 @@ const patchUserSchema = schemas.userUpdate.extend({
   password: z.string().optional(),
 });
 
+/**
+ * Refuse a change that would leave the installation with no administrator.
+ *
+ * There is no recovery path from zero admins. `ADMIN_PASSWORD` only seeds an
+ * admin when the account does not exist, so an installation whose last admin
+ * demoted themselves — or was deleted by the other admin, who then demoted
+ * themselves — cannot reach `/users`, `/workers`, `/settings` or any admin API
+ * again without editing the SQLite file by hand.
+ *
+ * DELETE already refused self-deletion, which reads like this rule but is not:
+ * it stops an admin removing *themselves*, and does nothing about an admin
+ * removing the only *other* one and then stepping *down*. Demotion is the hole,
+ * and it is the one with no warning attached to it.
+ *
+ * DELETE consults this too, though the self-deletion check above happens to make
+ * it unreachable today — the only caller who could delete the only admin *is*
+ * the only admin. It is here so the invariant does not depend on that
+ * coincidence holding.
+ *
+ * Returns a message when the change is refused, or null when it is fine.
+ */
+async function lastAdminError(
+  target: typeof users.$inferSelect,
+  action: 'demote' | 'delete',
+): Promise<string | null> {
+  if (target.role !== 'admin') return null;
+
+  const admins = await db.select({ id: users.id }).from(users).where(eq(users.role, 'admin')).all();
+  if (admins.length > 1) return null;
+
+  return action === 'demote'
+    ? `"${target.username}" is the only administrator. Promote another account before changing this one's role — an installation with no admin cannot be administered back.`
+    : `"${target.username}" is the only administrator. Promote another account before deleting this one.`;
+}
+
 export const GET: RequestHandler = route(async (event) => {
   const targetId = event.params.id!;
   const currentUser = requireUser(event).user;
@@ -108,6 +143,11 @@ export const PATCH: RequestHandler = route(async (event) => {
     }
   }
 
+  if (updates.role && updates.role !== 'admin') {
+    const problem = await lastAdminError(targetUser, 'demote');
+    if (problem) return json({ error: problem }, { status: 409 });
+  }
+
   // Password update
   let passwordChanged = false;
   if (body.password !== undefined && (isSelf || isAdmin)) {
@@ -176,6 +216,9 @@ export const DELETE: RequestHandler = route(async (event) => {
   if (!targetUser) {
     return json({ error: 'User not found' }, { status: 404 });
   }
+
+  const problem = await lastAdminError(targetUser, 'delete');
+  if (problem) return json({ error: problem }, { status: 409 });
 
   // Delete related records
   await db.delete(sessions).where(eq(sessions.userId, targetId));

@@ -3,12 +3,22 @@ import { db } from '$lib/db';
 import { oidcConfig } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { isAdmin, currentUser as sessionUser, requirePageAdmin } from '$lib/server/auth';
+import { decryptField, encryptField } from '$lib/server/encryption';
 
 export const load = async (event: { locals: App.Locals; url: URL }) => {
   const currentUser = requirePageAdmin(event).user;
 
-  // Load generic OIDC config from DB (take first/only row)
-  const config = await db.select().from(oidcConfig).get();
+  // Load generic OIDC config from DB (take first/only row).
+  //
+  // `clientSecret` is stored encrypted (see `save`), so it is decrypted here to
+  // prefill the form — the same bargain the per-application OIDC settings make
+  // with `authConfig`: encrypted at rest, readable by the admin-only form that
+  // has to round-trip it. Rows written before it was encrypted come back as
+  // plaintext, which `decryptField` passes through and the next save encrypts.
+  const stored = await db.select().from(oidcConfig).get();
+  const config = stored
+    ? { ...stored, clientSecret: decryptField(stored.clientSecret) }
+    : null;
 
   // The callback URL that must be registered in the OIDC provider
   const callbackUrl = `${event.url.origin}/api/auth/oidc/generic/callback`;
@@ -33,7 +43,12 @@ export const actions = {
       providerName: formData.get('providerName')?.toString() || 'Generic OIDC',
       issuerUrl: formData.get('issuerUrl')?.toString() || null,
       clientId: formData.get('clientId')?.toString() || null,
-      clientSecret: formData.get('clientSecret')?.toString() || null,
+      // Encrypted at rest, like `workers.oidcClientSecret` and an application's
+      // `authConfig`. This column was the last credential in the schema kept in
+      // plaintext — readable in every `SELECT *`, and uploaded verbatim to Azure
+      // by the nightly database backup. `encryptField` is idempotent, so
+      // re-saving a row written before this does not double-encrypt.
+      clientSecret: encryptField(formData.get('clientSecret')?.toString()),
       authorizationEndpoint: formData.get('authorizationEndpoint')?.toString() || null,
       tokenEndpoint: formData.get('tokenEndpoint')?.toString() || null,
       userinfoEndpoint: formData.get('userinfoEndpoint')?.toString() || null,

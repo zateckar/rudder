@@ -289,12 +289,17 @@ async function reservedPortsForWorker(
  *
  * The secrets mount is applied last on purpose: a manifest that declares
  * storage at `/run/secrets` does not get to displace it.
+ *
+ * `appId` is what scopes the policy to one tenant: it is how a manifest naming
+ * a volume Rudder generated for a *different* application is refused rather
+ * than mounted. See `assertVolumeOwnership`.
  */
 function containerMounts(
   intents: readonly MountIntent[],
   hasSecretFiles: boolean,
+  appId: string,
 ): { binds?: string[]; tmpfs?: Record<string, string> } {
-  const { binds, tmpfs } = realizeMounts(intents);
+  const { binds, tmpfs } = realizeMounts(intents, { owner: appId });
   if (hasSecretFiles) tmpfs[SECRETS_DIR] = SECRETS_TMPFS_OPTS;
   return {
     binds: binds.length > 0 ? binds : undefined,
@@ -862,7 +867,9 @@ async function deployApplication(
     // again per container during creation, but by then the legacy path has
     // already removed the previous generation — so a denied host path would
     // take the application down before saying why.
-    for (const { planned } of desired.containers) realizeMounts(planned.mounts);
+    for (const { planned } of desired.containers) {
+      realizeMounts(planned.mounts, { owner: app.id });
+    }
   } catch (e: any) {
     // A manifest that cannot be deployed as written. Nothing has been created,
     // nothing torn down, and no deployment row records the attempt.
@@ -1023,7 +1030,7 @@ async function deployApplication(
           healthcheck: planned.healthcheck,
           networkMode: networkName,
           networkAliases: planned.aliases,
-          ...containerMounts(planned.mounts, appSecrets.files.length > 0),
+          ...containerMounts(planned.mounts, appSecrets.files.length > 0, app.id),
         });
 
         await deliverFiles(podmanClient, containerResult.Id, files);

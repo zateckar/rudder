@@ -3,6 +3,7 @@ import { db, safeWorkerColumns } from '$lib/db';
 import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { domainFormatError } from '$lib/server/domains';
+import { workerTargetError } from '$lib/server/ssh-target';
 import { currentUser, isAdmin, requirePageAdmin } from '$lib/server/auth';
 
 export const load = async (event: { params: { id: string }; locals: App.Locals }) => {
@@ -43,6 +44,12 @@ export const actions = {
     if (!name || !hostname || !sshUser) {
       return fail(400, { error: 'Missing required fields' });
     }
+
+    // Same rule as the create form. An edit is the more important of the two to
+    // check: a worker created cleanly can be renamed here afterwards, and the
+    // next provisioning run is what carries the value to a root shell.
+    const badTarget = workerTargetError({ name, hostname, sshUser });
+    if (badTarget) return fail(400, { error: badTarget });
 
     const updates: Record<string, any> = {
       name,

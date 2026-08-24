@@ -340,7 +340,14 @@
           <select id="ch-type" bind:value={channelType}>
             <option value="webhook">Webhook</option>
             <option value="slack">Slack</option>
-            <option value="email">Email</option>
+            <!--
+              Disabled, not removed: an installation may already have email
+              channels, and the badge and edit form still have to render them.
+              There is no SMTP path behind this type, so a channel created here
+              could only fail to deliver — which it used to do while reporting
+              success. See sendEmail in $lib/server/notifications.
+            -->
+            <option value="email" disabled>Email (not available yet)</option>
           </select>
         </div>
       </div>

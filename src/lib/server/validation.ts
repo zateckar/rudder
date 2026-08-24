@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { domainFormatError } from './domains';
+import { hostnameFormatError, sshUserFormatError } from './ssh-target';
 
 export function parseBody<T extends z.ZodTypeAny>(
   body: unknown,
@@ -46,6 +47,25 @@ const domainSchema = z.string().superRefine((value, ctx) => {
   if (error) ctx.addIssue({ code: z.ZodIssueCode.custom, message: error });
 });
 
+/** Built on the same rule the SSH layer enforces; see `ssh-target.ts`. */
+function refined(check: (value: string) => string | null) {
+  return z.string().superRefine((value, ctx) => {
+    const error = check(value);
+    if (error) ctx.addIssue({ code: z.ZodIssueCode.custom, message: error });
+  });
+}
+
+/**
+ * A worker's SSH destination.
+ *
+ * These were `z.string().min(1).max(253)` and `z.string().min(1).max(100)`, so
+ * a length was the only thing asked of a value that becomes the `user@host`
+ * argument of an `ssh` invocation — where anything starting with a dash is read
+ * as an option rather than a destination.
+ */
+const sshHostSchema = refined(hostnameFormatError);
+const sshUserSchema = refined(sshUserFormatError);
+
 export const schemas = {
   workerId: z.string().uuid().min(1),
   containerId: z.string().min(1).max(256),
@@ -86,9 +106,9 @@ export const schemas = {
 
   createWorker: z.object({
     name: z.string().min(1).max(100).regex(/^[a-zA-Z0-9_-]+$/, 'Name can only contain letters, numbers, underscores, and hyphens'),
-    hostname: z.string().min(1).max(253),
+    hostname: sshHostSchema,
     sshPort: z.number().int().min(1).max(65535).default(22),
-    sshUser: z.string().min(1).max(100),
+    sshUser: sshUserSchema,
     /**
      * Every hostname on the worker is built from this, and each one becomes a
      * Traefik `Host()` rule — so it gets the same check an application domain
@@ -249,7 +269,7 @@ export const schemas = {
 
   registerWorker: z.object({
     name: z.string().min(1).max(100),
-    hostname: z.string().min(1).max(253),
+    hostname: sshHostSchema,
     secret: z.string().min(1),
     labels: z.record(z.string(), z.string()).optional(),
   }),

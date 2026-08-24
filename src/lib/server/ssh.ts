@@ -15,6 +15,7 @@ import { join } from 'path';
 import { tmpdir, platform } from 'os';
 import { randomBytes } from 'crypto';
 import { resolveDataDir } from './paths';
+import { hostnameFormatError, sshUserFormatError } from './ssh-target';
 
 export interface SSHConnectionConfig {
   host: string;
@@ -69,6 +70,27 @@ export function deleteTempKeyFile(path: string): void {
   } catch {
     /* best-effort */
   }
+}
+
+/**
+ * The `user@host` argument, checked before it becomes one.
+ *
+ * argv rather than a shell string already keeps `$(...)` out of the local shell
+ * — but not a value that begins with a dash. `ssh` takes no `--` before its
+ * destination, so `-oProxyCommand=curl…|sh` in either half is parsed as an
+ * option and runs on *this* host, as the Rudder process, before any connection
+ * is attempted.
+ *
+ * Checked here and not only where a worker is created, because rows written
+ * before the create and edit forms validated these fields are still in the
+ * database, and this is the last point at which either value is still data.
+ */
+function sshDestination(username: string, host: string): string {
+  const problem = sshUserFormatError(username) ?? hostnameFormatError(host);
+  if (problem) {
+    throw new Error(`Refusing to connect: ${problem}`);
+  }
+  return `${username.trim()}@${host.trim()}`;
 }
 
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
@@ -140,12 +162,13 @@ function runSSH(
 export async function testSSHConnection(config: SSHConnectionConfig): Promise<boolean> {
   let tempKeyPath: string | null = null;
   try {
+    const destination = sshDestination(config.username, config.host);
     tempKeyPath = createTempKeyFile(config.privateKey);
     const result = await runSSH(
       [
         ...baseOptions(config.port, tempKeyPath),
         '-o', 'ConnectTimeout=10',
-        `${config.username}@${config.host}`,
+        destination,
         'echo hello',
       ],
       { timeoutMs: 15000 },
@@ -167,6 +190,8 @@ export async function executeSSHCommand(
 ): Promise<RunResult> {
   let tempKeyPath: string | null = null;
   try {
+    // Before the key file exists, so a rejected destination leaves nothing behind.
+    const destination = sshDestination(config.username, config.host);
     tempKeyPath = createTempKeyFile(config.privateKey);
 
     const args = [
@@ -174,7 +199,7 @@ export async function executeSSHCommand(
       '-o', 'ConnectTimeout=30',
       '-o', 'ServerAliveInterval=15',
       '-o', 'ServerAliveCountMax=60',
-      `${config.username}@${config.host}`,
+      destination,
       // Passed as a single argv element: the *remote* shell interprets it,
       // the local one never sees it.
       command,

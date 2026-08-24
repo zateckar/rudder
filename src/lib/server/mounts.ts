@@ -8,10 +8,13 @@
  * default and only permitted under prefixes an operator has explicitly
  * allow-listed via ALLOWED_HOST_MOUNT_PREFIXES.
  *
- * Named volumes go through the `volumes` table and are namespaced per
- * application, so they are always allowed.
+ * Named volumes are namespaced per application by the rules in `volumes.ts`, so
+ * an application's *own* names are always allowed. A manifest may still write a
+ * name out longhand, though, and a name Rudder generated for somebody else is
+ * refused — see `assertVolumeOwnership`.
  */
 import { env } from './env';
+import { volumeOwnerApp8 } from './volumes';
 
 export class MountPolicyError extends Error {
   constructor(message: string) {
@@ -64,19 +67,58 @@ function assertContainerPath(containerPath: string): string {
 }
 
 /**
+ * Refuse a volume whose name Rudder generated for a *different* application.
+ *
+ * Every naming rule in `volumes.ts` embeds `appId.slice(0, 8)`, so the name of
+ * any volume Rudder created is an ownership record and `volumeOwnerApp8` reads
+ * it back. That matters here because a manifest is authored by an ordinary team
+ * member and a non-relative compose source is passed through verbatim — see
+ * `parseCompose`. So `volumes: ["rudder-<someone-else8>-db-data:/data"]` is a
+ * read-write mount of another team's database, on any worker the two
+ * applications share, with no lookup involved.
+ *
+ * `requireAppVolume` already refuses the same names on the volume *management*
+ * routes (`assertNotAnotherApps`), which is where backing one up or deleting it
+ * goes. Mounting one bypassed all of that: the container reads and writes the
+ * data directly and nothing in this path ever asked whose it was.
+ *
+ * Only names Rudder composed are refused. A bare `pgdata` names nothing in
+ * particular and is left alone — two applications sharing one is a real
+ * configuration, and the name carries no claim either way.
+ */
+function assertVolumeOwnership(name: string, owner: string | undefined): void {
+  if (!owner) return;
+
+  const named = volumeOwnerApp8(name);
+  if (!named || named === owner.slice(0, 8)) return;
+
+  throw new MountPolicyError(
+    `Volume "${name}" belongs to another application: Rudder generated that name for ` +
+      `application ${named}, not this one. Declaring another application's volume in a ` +
+      `manifest does not transfer it — mount a volume of your own instead.`,
+  );
+}
+
+/**
  * Build a validated `name:container:mode` spec for a named volume.
  *
- * Named volumes are namespaced per application by the callers in `volumes.ts`,
- * so unlike a host path there is nothing here for a manifest to reach outside
- * of — the check is that the generated name is still a name.
+ * `owner` is the application the mount is for, when there is one. Volumes
+ * Rudder creates on its own behalf — the throwaway helper in `volume-ops` works
+ * on a name it was handed — pass nothing and skip the ownership check.
  */
-export function buildVolumeBind(name: string, containerPath: string, mode?: string): string {
+export function buildVolumeBind(
+  name: string,
+  containerPath: string,
+  mode?: string,
+  owner?: string,
+): string {
   if (!VOLUME_NAME.test(name)) {
     throw new MountPolicyError(
       `"${name}" is not a usable volume name. Volume names must start with a letter or digit ` +
         `and contain only letters, digits, dots, dashes and underscores.`,
     );
   }
+  assertVolumeOwnership(name, owner);
   return `${name}:${assertContainerPath(containerPath)}:${assertModeAllowed(mode)}`;
 }
 
@@ -86,12 +128,18 @@ export function buildVolumeBind(name: string, containerPath: string, mode?: stri
  * Returns the two shapes `createContainer` takes: `binds` for anything backed
  * by the filesystem or a volume, and `tmpfs` for anything backed by memory.
  *
+ * `owner` names the application these mounts are for. Pass it whenever the
+ * intents came from a manifest — it is what refuses another application's named
+ * volume. It is optional only because `volume-ops` realizes mounts for Rudder's
+ * own helper containers, whose names Rudder just generated.
+ *
  * @throws MountPolicyError, which the deploy path reports as a 400 — a rejected
  * mount is a problem with the manifest, and the container must not start
  * without the storage it asked for.
  */
 export function realizeMounts(
   intents: readonly MountIntent[],
+  { owner }: { owner?: string } = {},
 ): { binds: string[]; tmpfs: Record<string, string> } {
   const binds: string[] = [];
   const tmpfs: Record<string, string> = {};
@@ -102,7 +150,7 @@ export function realizeMounts(
         binds.push(buildHostBind(intent.source, intent.target, intent.mode));
         break;
       case 'volume':
-        binds.push(buildVolumeBind(intent.name, intent.target, intent.mode));
+        binds.push(buildVolumeBind(intent.name, intent.target, intent.mode, owner));
         break;
       case 'tmpfs':
         tmpfs[assertContainerPath(intent.target)] = intent.options ?? DEFAULT_TMPFS_OPTS;

@@ -27,6 +27,34 @@ const SEVERITY_EMOJI: Record<string, string> = {
 };
 
 /**
+ * How long a channel gets to accept a notification.
+ *
+ * This is not a nicety. `evaluateAlerts` is awaited inside the metrics
+ * collection cycle, and that cycle holds a `running` flag which is released only
+ * when the collection *actually* finishes — the four-minute race in `runLoop`
+ * reports a hang, it cannot cancel one. `fetch` has no default timeout, so a
+ * webhook host that accepts the connection and never answers left this promise
+ * pending for the life of the process: metrics collection, reconciliation and
+ * alert evaluation all stopped, and the only symptom was "Previous collection
+ * still running, skipping this cycle" once a minute.
+ *
+ * Ten seconds is generous for an endpoint whose whole job is to accept a small
+ * JSON body, and it keeps the worst case for a fleet of channels well inside the
+ * collection interval.
+ */
+const SEND_TIMEOUT_MS = 10_000;
+
+/** `fetch` that cannot outlive the collection cycle it runs inside. */
+async function postJson(url: string, headers: Record<string, string>, body: unknown) {
+  return fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+  });
+}
+
+/**
  * Send a notification through the given channel.
  * Errors are logged but never thrown — callers should not break on notification failures.
  */
@@ -81,15 +109,11 @@ async function sendWebhook(
     ...(config.headers || {}),
   };
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      title: payload.title,
-      message: payload.message,
-      severity: payload.severity,
-      timestamp: new Date().toISOString(),
-    }),
+  const res = await postJson(url, headers, {
+    title: payload.title,
+    message: payload.message,
+    severity: payload.severity,
+    timestamp: new Date().toISOString(),
   });
 
   if (!res.ok) {
@@ -127,11 +151,11 @@ async function sendSlack(
     ],
   };
 
-  const res = await fetch(webhookUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(slackPayload),
-  });
+  const res = await postJson(
+    webhookUrl,
+    { 'Content-Type': 'application/json' },
+    slackPayload,
+  );
 
   if (!res.ok) {
     console.error(`[notifications] Slack "${channelName}" returned ${res.status}: ${await res.text().catch(() => '')}`);
@@ -142,17 +166,29 @@ async function sendSlack(
   return true;
 }
 
+/**
+ * Email is not implemented, and says so.
+ *
+ * This used to log the message and return `true`, so an alert routed to an email
+ * channel was recorded as delivered and reported as sent. The one thing a
+ * notification channel must never do is claim to have notified someone: an
+ * operator who configures email alerts and sees them succeed has no reason to go
+ * looking, and finds out during the incident the alert was for.
+ *
+ * Returning false is not the whole fix — the channel type should not be
+ * offerable until there is an SMTP path behind it, which is why
+ * `/api/notifications` now refuses to create one — but it is what makes the
+ * existing rows honest.
+ */
 function sendEmail(
   channelName: string,
   config: Record<string, any>,
   payload: NotificationPayload,
 ): boolean {
-  // TODO: Implement email sending when SMTP infrastructure is ready
-  console.log(`[notifications] EMAIL (not yet implemented) channel "${channelName}":`, {
-    to: config.to || '(not configured)',
-    subject: payload.title,
-    body: payload.message,
-    severity: payload.severity,
-  });
-  return true;
+  console.error(
+    `[notifications] Channel "${channelName}" is an email channel, and Rudder cannot send ` +
+      `email — there is no SMTP support yet. "${payload.title}" was NOT delivered to ` +
+      `${config.to || '(no recipient configured)'}. Route this rule to a webhook or Slack channel.`,
+  );
+  return false;
 }

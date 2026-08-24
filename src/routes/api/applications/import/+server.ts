@@ -13,6 +13,21 @@ function importedTokenHeader(raw: unknown): string | null {
   return name && !tokenHeaderNameError(name) ? name : null;
 }
 
+/**
+ * The replica count from an imported file, clamped to what every other entry
+ * point allows.
+ *
+ * Both application forms clamp to 1–10 and the Kubernetes scale sub-resource
+ * rejects anything outside it, but this route wrote `config.replicas` straight
+ * through — so an imported file was the one way for an ordinary member to ask a
+ * worker for ten thousand containers, or to put a string in an integer column.
+ */
+function importedReplicas(raw: unknown): number {
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isFinite(n)) return 1;
+  return Math.max(1, Math.min(10, Math.trunc(n)));
+}
+
 export const POST: RequestHandler = route(async (event) => {
   const body = await event.request.json();
   const { config, name, teamId, workerId } = body;
@@ -86,7 +101,7 @@ export const POST: RequestHandler = route(async (event) => {
     oidcIdTokenHeader: importedTokenHeader(config.oidcIdTokenHeader),
     oidcAccessTokenHeader: importedTokenHeader(config.oidcAccessTokenHeader),
     healthcheck: config.healthcheck || null,
-    replicas: config.replicas || 1,
+    replicas: importedReplicas(config.replicas),
     gitRepo: config.gitRepo || null,
     gitBranch: config.gitBranch || null,
     gitDockerfile: config.gitDockerfile || null,

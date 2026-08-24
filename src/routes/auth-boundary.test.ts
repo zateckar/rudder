@@ -1073,6 +1073,60 @@ describe('user administration', () => {
     expect((await patch(target.id, member, { password: 'a-whole-new-passphrase' })).status).toBe(403);
     expect((await db.select().from(users).where(eq(users.id, target.id)).get())?.passwordHash).toBe(before!);
   });
+
+  /**
+   * There is no way back from an installation with no administrator: the
+   * `ADMIN_PASSWORD` bootstrap only seeds an account that does not exist, so the
+   * remaining route is editing the SQLite file.
+   */
+  describe('the last administrator', () => {
+    /**
+     * Run `fn` with `soleId` as the installation's only admin.
+     *
+     * The suite's shared `admin` fixture owns rows in half the other tables, so
+     * it is demoted for the duration rather than deleted — the guard counts
+     * admins, and that is the state being reproduced.
+     */
+    async function withOnlyOneAdmin<T>(soleId: string, fn: () => Promise<T>): Promise<T> {
+      const others = (await db.select().from(users).where(eq(users.role, 'admin')).all())
+        .filter((u) => u.id !== soleId);
+      for (const other of others) {
+        await db.update(users).set({ role: 'member' }).where(eq(users.id, other.id));
+      }
+      try {
+        return await fn();
+      } finally {
+        for (const other of others) {
+          await db.update(users).set({ role: 'admin' }).where(eq(users.id, other.id));
+        }
+      }
+    }
+
+    test('cannot demote themselves', async () => {
+      await withOnlyOneAdmin(admin.id, async () => {
+        expect((await patch(admin.id, admin, { role: 'member' })).status).toBe(409);
+        expect((await db.select().from(users).where(eq(users.id, admin.id)).get())?.role).toBe('admin');
+      });
+    });
+
+    test('cannot be demoted by a second admin who then steps down', async () => {
+      // The sequence the self-deletion check does not cover: two admins, one
+      // demotes the other, then demotes themselves. The second step is what has
+      // to be refused.
+      const second = await makeUser('stepping-down-admin', 'admin');
+
+      await withOnlyOneAdmin(second.id, async () => {
+        // `second` is now the only admin; `admin` is a member for the duration.
+        expect((await patch(second.id, second, { role: 'member' })).status).toBe(409);
+        expect((await db.select().from(users).where(eq(users.id, second.id)).get())?.role).toBe('admin');
+      });
+    });
+
+    test('demotion is allowed while another admin remains', async () => {
+      const target = await makeUser('spare-admin', 'admin');
+      expect((await patch(target.id, admin, { role: 'member' })).status).toBe(200);
+    });
+  });
 });
 
 /**

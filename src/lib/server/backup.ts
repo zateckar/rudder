@@ -1,14 +1,31 @@
-import { db } from '$lib/db';
+import { db, sqlite } from '$lib/db';
 import { backupConfig } from '$lib/db/schema';
 import { decrypt } from '$lib/server/encryption';
 import { createHmac } from 'crypto';
 import { copyFileSync, readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { resolveDbPath } from './paths';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DB_PATH = join(__dirname, '../../../data/rudder.db');
-const TEMP_DIR = join(__dirname, '../../../data/tmp');
+/**
+ * The database this backs up, and the scratch directory it stages through.
+ *
+ * Resolved the same way `$lib/db` resolves the file it opens — `DATABASE_URL`
+ * first, the directory beside the bundle as a fallback. These used to be
+ * `join(__dirname, '../../../data/rudder.db')` outright, which ignored
+ * `DATABASE_URL` entirely: on any deployment that pointed it somewhere else,
+ * `performBackup` uploaded a file nothing writes to (or failed to copy at all)
+ * and `restoreBackup` wrote the downloaded database to a path nothing reads —
+ * and then reported success, so the failure only surfaced after a restart, when
+ * the data that was supposed to have been restored was still missing.
+ *
+ * It happened to agree with the shipped docker-compose, whose `DATABASE_URL`
+ * resolves to the same `/app/data/rudder.db` the relative path landed on. That
+ * is what kept it from being noticed.
+ */
+const DB_PATH = resolveDbPath(join(dirname(fileURLToPath(import.meta.url)), '../../../data'));
+/** Beside the database, so the staging copy is always on the same volume. */
+const TEMP_DIR = join(dirname(DB_PATH), 'tmp');
 const AZURE_API_VERSION = '2020-10-02';
 
 function getConfig() {
@@ -83,7 +100,7 @@ export async function performBackup(): Promise<{ success: boolean; message: stri
     return { success: false, message: msg };
   }
 
-  // Copy DB to temp file to avoid locking
+  // Stage a snapshot to upload from.
   if (!existsSync(TEMP_DIR)) {
     mkdirSync(TEMP_DIR, { recursive: true });
   }
@@ -93,9 +110,21 @@ export async function performBackup(): Promise<{ success: boolean; message: stri
   const tempPath = join(TEMP_DIR, blobName);
 
   try {
-    copyFileSync(DB_PATH, tempPath);
+    // `VACUUM INTO`, not `copyFileSync`.
+    //
+    // The database runs in WAL mode (see $lib/db), so committed transactions
+    // live in `rudder.db-wal` until a checkpoint moves them across. Copying the
+    // main file alone therefore silently omitted every write since the last
+    // checkpoint — and a copy taken *during* one is not a consistent snapshot at
+    // all, only a file that happens to open. Both produce a backup that restores
+    // to something that was never the state of the system.
+    //
+    // `VACUUM INTO` asks SQLite for the snapshot instead: it reads through the
+    // same connection the application writes on, includes the WAL, and writes a
+    // single self-contained file, all while other queries keep running.
+    sqlite.run('VACUUM INTO ?', [tempPath]);
   } catch (e: any) {
-    const msg = 'Failed to copy database: ' + e.message;
+    const msg = 'Failed to snapshot database: ' + e.message;
     await updateStatus('failed: ' + msg);
     return { success: false, message: msg };
   }
@@ -264,10 +293,24 @@ function parseListBlobsXml(xml: string): { name: string; size: number; lastModif
   return blobs;
 }
 
+/** The 16 bytes every SQLite file starts with, including the trailing NUL. */
+const SQLITE_MAGIC = Buffer.from('SQLite format 3\0', 'latin1');
+
 export async function restoreBackup(blobName: string): Promise<{ success: boolean; message: string }> {
   const config = getConfig();
   if (!config) {
     return { success: false, message: 'Backup not configured' };
+  }
+
+  // The blob name is put straight into the request path, so `..` in it would
+  // reach a different container in the same storage account. Restores are
+  // admin-only, but a restore is also the one operation that overwrites the
+  // whole database, and the caller has no business naming anything but a backup.
+  if (!/^rudder-backup-[0-9-]+\.db$/.test(blobName)) {
+    return {
+      success: false,
+      message: `"${blobName}" is not a Rudder backup name. Pick one from the list of backups.`,
+    };
   }
 
   let accessKey: string;
@@ -315,8 +358,45 @@ export async function restoreBackup(blobName: string): Promise<{ success: boolea
 
     const buffer = Buffer.from(await response.arrayBuffer());
 
-    // Write restored database
+    // Checked before the live database is overwritten, because this is the one
+    // operation with nothing to fall back on. A truncated download, or an Azure
+    // error document served with a 200, would otherwise be written over
+    // rudder.db and take the installation with it.
+    if (buffer.length < SQLITE_MAGIC.length || !buffer.subarray(0, SQLITE_MAGIC.length).equals(SQLITE_MAGIC)) {
+      return {
+        success: false,
+        message:
+          `"${blobName}" is not a SQLite database (${buffer.length} bytes, wrong header). ` +
+          `Nothing was changed.`,
+      };
+    }
+
+    // Keep the database that is being replaced. A restore aimed at the wrong
+    // backup is otherwise unrecoverable, and the operator finds out after the
+    // restart this instructs them to perform.
+    try {
+      if (existsSync(DB_PATH)) copyFileSync(DB_PATH, `${DB_PATH}.pre-restore`);
+    } catch (e: any) {
+      return {
+        success: false,
+        message: `Could not set the current database aside first (${e.message}). Nothing was changed.`,
+      };
+    }
+
     writeFileSync(DB_PATH, buffer);
+
+    // The write-ahead log and shared-memory index belong to the database that
+    // was just replaced. Left in place, SQLite replays that WAL over the
+    // restored file on the next open — so the restore is silently undone, or
+    // worse, half-applied. They are removed here rather than left for the
+    // restart to trip over.
+    for (const sidecar of [`${DB_PATH}-wal`, `${DB_PATH}-shm`]) {
+      try {
+        if (existsSync(sidecar)) unlinkSync(sidecar);
+      } catch (e) {
+        console.error('[backup] Could not remove', sidecar, e);
+      }
+    }
 
     return {
       success: true,
