@@ -136,11 +136,24 @@ export function environmentFromContainer(inspect: ContainerInspect): string | nu
   return entries.length > 0 ? JSON.stringify(entries) : null;
 }
 
-/** Host mounts, as `applications.volumes` JSON. */
+/**
+ * The container's mounts, as `applications.volumes` JSON.
+ *
+ * `HostConfig.Binds` is not a list of host paths, whatever the field name
+ * suggests: Podman reports a named volume in the same position and the same
+ * shape as a directory, so `pg-data:/var/lib/postgresql/data:rw` and
+ * `/srv/data:/data:rw` arrive indistinguishable. What separates them is
+ * `isHostPathSource`, and applying it is `singleMountIntents`' job — the source
+ * is recorded verbatim here so the row says what the container actually mounts.
+ *
+ * That matters most for a named volume. Its name is the only thing tying the
+ * adopted application to the data it already holds, so it is carried across
+ * untouched rather than turned into a path or renamed into Rudder's namespace.
+ */
 export function volumesFromContainer(inspect: ContainerInspect): string | null {
   const binds = ((inspect as any).HostConfig?.Binds ?? []).map((bind: string) => {
-    const [hostPath, containerPath, mode = 'rw'] = bind.split(':');
-    return { hostPath, containerPath, mode, volumeId: null };
+    const [source, containerPath, mode = 'rw'] = bind.split(':');
+    return { hostPath: source, containerPath, mode, volumeId: null };
   });
   return binds.length > 0 ? JSON.stringify(binds) : null;
 }

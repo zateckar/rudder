@@ -144,6 +144,7 @@ export function isAppScopedVolume(name: string, appId: string): boolean {
 
 /** One entry of a single-container application's `volumes` JSON column. */
 export interface AppVolumeMount {
+  /** A host path when absolute, otherwise a named volume. */
   hostPath?: string;
   containerPath?: string;
   mode?: string;
@@ -189,6 +190,28 @@ export function singleMountIntents(
       continue;
     }
     if (!v.hostPath || !v.containerPath) continue;
+
+    if (!isHostPathSource(v.hostPath)) {
+      // A named volume, under the name it already has. Not namespaced: this
+      // path exists to serve rows written by adoption, where the name came off
+      // a container that is mounting that exact volume right now. Deriving
+      // `rudder-<app8>-pg-data` from it would create a new empty volume on the
+      // next deploy and leave last week's data on the worker under a name
+      // nothing refers to — the failure this module exists to prevent.
+      //
+      // Until this rule was applied here, such a row reached `buildHostBind`,
+      // which rejected `pg-data` for not being absolute. The application could
+      // not be redeployed at all, and kept running only because adoption never
+      // recreated its container.
+      intents.push({
+        kind: 'volume',
+        name: v.hostPath,
+        target: v.containerPath,
+        mode: v.mode || 'rw',
+      });
+      continue;
+    }
+
     intents.push({
       kind: 'bind',
       source: v.hostPath,
@@ -197,17 +220,4 @@ export function singleMountIntents(
     });
   }
   return intents;
-}
-
-/**
- * True when a compose volume source names a volume rather than a host path.
- *
- * An absolute path is a bind mount — the user knows their worker's filesystem,
- * and the mount policy decides whether they may use it. Everything else,
- * including a relative or `~`-prefixed path, becomes a named volume: a bind to
- * `./data` would resolve against the *control plane's* working directory, which
- * is not where the container runs.
- */
-export function isHostPathSource(source: string): boolean {
-  return source.startsWith('/');
 }
