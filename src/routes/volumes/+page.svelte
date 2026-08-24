@@ -45,22 +45,46 @@
     }
   }
 
-  async function deleteVolume(volumeId: string) {
+  /**
+   * Delete the entry, and — separately — the data.
+   *
+   * These are two different things, and the dialog used to offer only the first
+   * while stating the second as a reassurance: "Data already written on the
+   * worker is not deleted." True, and the reason the whole feature was a way to
+   * lose track of disk rather than reclaim it. Both outcomes are offered, and
+   * the destructive one has to be picked deliberately.
+   */
+  async function deleteVolume(volume: { id: string; name: string; usedBy?: string[] }, withData: boolean) {
+    const inUse = volume.usedBy?.length
+      ? ` It is mounted by ${volume.usedBy.map((n) => `"${n}"`).join(', ')}.`
+      : '';
     const ok = await confirmAction({
-      title: 'Delete this volume?',
-      body: 'The registry entry is removed. Data already written on the worker is not deleted, and an application still mounting it will fail to deploy.',
-      confirmLabel: 'Delete volume',
+      title: withData ? `Delete "${volume.name}" and its data?` : 'Remove this registry entry?',
+      body: withData
+        ? `Everything written to this volume is deleted from the worker.${inUse} There is no undo, ` +
+          `and no backup is taken — download one from the application's Storage tab first if you ` +
+          `might want the data.`
+        : `The entry is removed from the registry. Data already written on the worker is left ` +
+          `where it is, reachable from the application's Storage tab.${inUse} An application ` +
+          `still mounting this volume will fail to deploy.`,
+      confirmLabel: withData ? 'Delete volume and data' : 'Remove entry',
       danger: true,
     });
     if (!ok) return;
 
     try {
-      const res = await fetch(`/api/volumes/${volumeId}`, { method: 'DELETE' });
+      const res = await fetch(`/api/volumes/${volume.id}${withData ? '?data=1' : ''}`, {
+        method: 'DELETE',
+      });
+      const body = await res.json().catch(() => ({}));
       if (res.ok) {
+        if (body.message) showToast('success', body.message);
         invalidateAll();
       } else {
-        const err = await res.json();
-        showToast('error', err.error || 'Failed to delete volume');
+        showToast('error', body.error || body.message || 'Failed to delete volume');
+        // The row may be gone even when the data could not be removed, so the
+        // table has to be refetched either way.
+        invalidateAll();
       }
     } catch (e: any) {
       showToast('error', e.message || 'Failed to delete volume');
@@ -176,6 +200,7 @@
           <th>Container Path</th>
           <th>Team</th>
           <th>Worker</th>
+          <th>Used by</th>
           <th>Usage</th>
           <th>Created</th>
           <th class="text-right">Actions</th>
@@ -190,20 +215,35 @@
             <td class="path-cell">{volume.containerPath}</td>
             <td class="text-muted">{team?.name || '-'}</td>
             <td class="text-muted">{worker?.name || 'Any'}</td>
+            <!-- A registered volume only exists on disk once an application
+                 mounts it, and it is namespaced per application — so this is
+                 also what makes the usage figure attributable at all. -->
+            <td class="text-muted">
+              {#if volume.usedBy?.length}
+                {volume.usedBy.join(', ')}
+              {:else}
+                <span title="No application references this entry, so no volume has been created for it.">unused</span>
+              {/if}
+            </td>
             <td class="text-muted mono">
               {volume.actualSizeMB != null ? `${volume.actualSizeMB} MB` : '—'}
               {volume.sizeLimit ? ` / ${formatSize(volume.sizeLimit)}` : ''}
             </td>
             <td class="text-muted">{formatDate(volume.createdAt)}</td>
-            <td class="text-right">
-              <button onclick={() => deleteVolume(volume.id)} class="btn-danger btn-sm">
-                Delete
+            <td class="text-right actions-cell">
+              <button onclick={() => deleteVolume(volume, false)} class="btn-sm"
+                title="Remove the registry entry and leave the data on the worker">
+                Remove entry
+              </button>
+              <button onclick={() => deleteVolume(volume, true)} class="btn-danger btn-sm"
+                title="Remove the entry and delete the volume's data from the worker">
+                Delete data
               </button>
             </td>
           </tr>
         {:else}
           <tr>
-            <td colspan="7" class="empty-message">
+            <td colspan="8" class="empty-message">
               No volumes configured yet.
               <button onclick={() => showForm = true} class="link-button">Create one</button>
             </td>
@@ -276,6 +316,8 @@
     font-size: 13px;
     color: var(--text-secondary);
   }
+
+  .actions-cell { display: flex; gap: 6px; justify-content: flex-end; }
 
   .empty-message {
     padding: 40px;

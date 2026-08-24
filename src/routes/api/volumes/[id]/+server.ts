@@ -1,9 +1,11 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
-import { volumes, teamMembers } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { applications, volumes, teamMembers, workers } from '$lib/db/schema';
+import { eq, and, inArray } from 'drizzle-orm';
 import { AuthorizationError, requireUser, route } from '$lib/server/auth';
+import { withPodman } from '$lib/server/podman-client';
+import { registryVolumeName } from '$lib/server/volumes';
 
 /**
  * Resolve a volume the caller may act on.
@@ -68,11 +70,113 @@ export const PATCH: RequestHandler = route(async (event) => {
   return json(updated);
 });
 
+/**
+ * Remove a volume from the registry, and optionally its data.
+ *
+ * The row and the data are two different things, and this endpoint used to
+ * delete only the row — leaving the Podman volume on the worker under a name
+ * nothing referred to any more. That is still the default, because it is what
+ * "remove this entry" means and because the row may be referenced by an
+ * application that is only temporarily undeployed.
+ *
+ * `?data=1` also deletes the volume itself, on every worker where an application
+ * referencing this row put one. A registered volume is namespaced per
+ * application — `rudder-<app8>-<name>` — so there can be several, and each has
+ * to be named explicitly rather than guessed at from the row's own name.
+ */
 export const DELETE: RequestHandler = route(async (event) => {
   const volumeId = event.params.id!;
-  await requireVolume(event, volumeId);
+  const volume = await requireVolume(event, volumeId);
+  const alsoData = event.url.searchParams.get('data') === '1';
 
+  const removed: string[] = [];
+  const failed: string[] = [];
+
+  if (alsoData) {
+    for (const target of await podmanTargetsFor(volume)) {
+      try {
+        await withPodman(target.worker, (client) =>
+          // Not forced: a volume a container still mounts is a refusal the
+          // caller should see rather than something to override on their behalf.
+          client.removeVolume(target.podmanName, false),
+        );
+        removed.push(target.podmanName);
+      } catch (e) {
+        failed.push(
+          `${target.podmanName} on "${target.worker.name}": ` +
+            `${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    }
+  }
+
+  // The row goes even when a volume could not be removed: the two are separate,
+  // and the message says exactly what happened to each.
   await db.delete(volumes).where(eq(volumes.id, volumeId));
 
-  return json({ success: true, message: 'Volume deleted' });
+  if (failed.length > 0) {
+    return json(
+      {
+        success: false,
+        message:
+          `Removed the registry entry for "${volume.name}", but its data could not be deleted: ` +
+          `${failed.join('; ')}. Stop whatever is using it and delete the volume from the ` +
+          `application's Storage tab.`,
+      },
+      { status: 409 },
+    );
+  }
+
+  return json({
+    success: true,
+    message: alsoData
+      ? removed.length > 0
+        ? `Deleted "${volume.name}" and its data (${removed.join(', ')}).`
+        : `Removed the registry entry for "${volume.name}". No volume had been created for it yet.`
+      : `Removed the registry entry for "${volume.name}". Its data is still on the worker.`,
+  });
 });
+
+/**
+ * Every Podman volume this registry row has produced, with the worker it is on.
+ *
+ * Driven from the applications referencing the row rather than from
+ * `volumes.worker_id`, which is advisory — "Any worker" is a valid value — while
+ * the volume itself exists wherever the application that mounts it was deployed.
+ */
+async function podmanTargetsFor(
+  volume: typeof volumes.$inferSelect,
+): Promise<{ worker: typeof workers.$inferSelect; podmanName: string }[]> {
+  const apps = await db
+    .select({ id: applications.id, workerId: applications.workerId, volumes: applications.volumes })
+    .from(applications)
+    .all();
+
+  const targets: { workerId: string; podmanName: string }[] = [];
+  for (const app of apps) {
+    if (!app.workerId || !app.volumes) continue;
+    let declared: unknown;
+    try {
+      declared = JSON.parse(app.volumes);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(declared)) continue;
+    if (!declared.some((e) => (e as { volumeId?: string })?.volumeId === volume.id)) continue;
+    targets.push({ workerId: app.workerId, podmanName: registryVolumeName(app.id, volume.name) });
+  }
+
+  if (targets.length === 0) return [];
+
+  const workerRows = await db
+    .select()
+    .from(workers)
+    .where(inArray(workers.id, [...new Set(targets.map((t) => t.workerId))]))
+    .all();
+  const workerById = new Map(workerRows.map((w) => [w.id, w]));
+
+  return targets.flatMap((t) => {
+    const worker = workerById.get(t.workerId);
+    return worker?.podmanApiUrl ? [{ worker, podmanName: t.podmanName }] : [];
+  });
+}

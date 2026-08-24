@@ -89,6 +89,28 @@ export async function withLock<T>(
   }
 }
 
+/**
+ * Serialize everything that mutates one worker's containers or their storage.
+ *
+ * Keyed on the worker, not the application, because the contended resources are
+ * shared: `reservedPortsForWorker` reads the `containers` rows, and a deploy
+ * does not write one until well after it has allocated, so two deploys of
+ * *different* applications overlapping on one worker can be handed the same host
+ * port and the second container fails to bind. Two deploys of the *same*
+ * application additionally compute the same `nextGeneration` from the same
+ * snapshot and collide on the container name.
+ *
+ * Not hypothetical: `/api/applications/[id]/webhook/trigger` runs a full deploy
+ * synchronously and has no rate limit, so an ordinary CI retry is enough.
+ *
+ * It lives here rather than in `deploy.ts`, where it started, because deploys are
+ * no longer the only thing that needs it: restoring or copying a volume must not
+ * run while a deploy is recreating the containers mounting it.
+ */
+export function workerDeployLock(workerId: string): string {
+  return `deploy:worker:${workerId}`;
+}
+
 export function isLocked(key: string): boolean {
   const entry = locks.get(key);
   if (!entry) return false;

@@ -45,6 +45,15 @@ data:
   # PROTOCOL_HEADER and HOST_HEADER are already baked into the Docker image
   # (ENV PROTOCOL_HEADER=X-Forwarded-Proto / HOST_HEADER=X-Forwarded-Host).
   # Override here only if your ingress uses non-standard header names.
+
+  # Largest request body accepted, which is what caps a volume restore upload —
+  # the whole archive goes in one request. adapter-node's own default is 512K,
+  # which rejects any real restore before the route runs. Raise it only as far as
+  # the largest volume you intend to restore; it applies to every route.
+  BODY_SIZE_LIMIT: "4G"
+  # Image for the throwaway container that backs up, restores and copies a
+  # volume. Runs on the *worker*, not here; it needs a shell and `cp`.
+  VOLUME_TOOL_IMAGE: "docker.io/library/busybox:1.36"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -169,7 +178,14 @@ metadata:
   labels:
     app.kubernetes.io/name: rudder
   annotations:
-    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    # A volume restore uploads the whole archive in one request, so this and
+    # BODY_SIZE_LIMIT in the ConfigMap have to agree — raising only the app's
+    # limit leaves the ingress rejecting it first, with a 413 that says nothing
+    # about volumes. Set both to the largest volume you intend to restore.
+    nginx.ingress.kubernetes.io/proxy-body-size: "4g"
+    # A large upload and the `cp -a` behind a copy both outlast the 60s default.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "1800"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "1800"
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
 spec:
   ingressClassName: nginx
