@@ -1,7 +1,11 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { requireApplication, route } from '$lib/server/auth';
-import { requireAppVolume, runningContainerNames } from '$lib/server/app-volumes';
+import {
+  assertNotSharedWithOthers,
+  requireAppVolume,
+  runningContainerNames,
+} from '$lib/server/app-volumes';
 import { cloneVolume, restoreFromCopy } from '$lib/server/volume-ops';
 import { LockError, withLock, workerDeployLock } from '$lib/server/locks';
 import { parseVolumeCopyName } from '$lib/server/volumes';
@@ -61,7 +65,11 @@ async function withWorkerLock<T>(
  */
 export const POST: RequestHandler = route(async (event) => {
   const { application } = await requireApplication(event, event.params.id!);
-  const { worker, volume, copyOf } = await requireAppVolume(application, event.params.name!);
+  const { worker, volume, copyOf } = await requireAppVolume(
+    application,
+    event.params.name!,
+    'copy',
+  );
 
   if (copyOf) {
     return json(
@@ -96,14 +104,23 @@ export const POST: RequestHandler = route(async (event) => {
 /**
  * Put a copy back over the volume it was taken from.
  *
- * Addressed by the *copy's* name, which is what the UI has to hand. Same guard
- * as a tar restore, for the same reason — this overwrites live data — and always
- * a replacement: a copy exists to return to a known state, and merging one over
- * whatever is there now gives a state that never existed.
+ * Addressed by the *copy's* name, which is what the UI has to hand. Same guards
+ * as a tar restore, for the same reasons — this overwrites live data — and
+ * always a replacement: a copy exists to return to a known state, and merging
+ * one over whatever is there now gives a state that never existed.
+ *
+ * The shared-volume check is the one place it has to be made by hand. What is
+ * resolved from the URL is the *copy*, which is always app-scoped by
+ * construction, while what gets force-removed and rewritten is `copyOf` — so
+ * that is what has to be established as this application's alone.
  */
 export const PUT: RequestHandler = route(async (event) => {
   const { application } = await requireApplication(event, event.params.id!);
-  const { worker, volume, copyOf } = await requireAppVolume(application, event.params.name!);
+  const { worker, volume, copyOf } = await requireAppVolume(
+    application,
+    event.params.name!,
+    'restore',
+  );
 
   if (!copyOf) {
     return json(
@@ -115,6 +132,8 @@ export const PUT: RequestHandler = route(async (event) => {
       { status: 400 },
     );
   }
+
+  await assertNotSharedWithOthers(application, worker, copyOf, 'restore');
 
   const running = await runningContainerNames(application.id);
   if (running.length > 0) {

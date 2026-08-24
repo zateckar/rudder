@@ -1161,7 +1161,22 @@ export class PodmanClient {
             const { done, value } = await reader.read();
             if (done) break;
             if (!req.write(value)) {
-              await new Promise<void>((r) => req.once('drain', () => r()));
+              // Both outcomes, or a request that fails while the buffer is full
+              // leaves this await pending forever and the reader never released.
+              // Each listener removes the other so a long upload does not
+              // accumulate one pair per chunk.
+              await new Promise<void>((resolveDrain, rejectDrain) => {
+                const onDrain = () => {
+                  req.off('error', onError);
+                  resolveDrain();
+                };
+                const onError = (err: Error) => {
+                  req.off('drain', onDrain);
+                  rejectDrain(err);
+                };
+                req.once('drain', onDrain);
+                req.once('error', onError);
+              });
             }
           }
           req.end();

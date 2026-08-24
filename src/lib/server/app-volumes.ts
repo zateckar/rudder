@@ -379,10 +379,21 @@ export async function appStorage(
  * volume it runs on. Copies are addressable — they can be restored from and
  * deleted — but they are not in `storage.volumes`, so a lookup by name alone
  * would not find them.
+ *
+ * `action` says what the caller is about to do, and is what makes resolving a
+ * volume safe rather than merely scoped. Being *declared* is not ownership: a
+ * manifest is authored by an ordinary team member and `parseCompose` passes a
+ * non-relative source through verbatim, so `pgdata:/data` — or
+ * `rudder-<someone-else8>-pgdata:/data` — declares a volume this application has
+ * no claim to. Every operation that reads or writes contents therefore names
+ * itself and is refused on a volume another application declares; see
+ * `assertNotSharedWithOthers`. `null` is for a read that touches no contents —
+ * the inspect GET — and is the only way to opt out.
  */
 export async function requireAppVolume(
   app: typeof applications.$inferSelect,
   volumeName: string,
+  action: SharedVolumeAction | null,
 ): Promise<{
   worker: typeof workers.$inferSelect;
   storage: AppStorage;
@@ -403,8 +414,15 @@ export async function requireAppVolume(
   }
 
   const direct = storage.volumes.find((v) => v.name === volumeName);
-  if (direct) return { worker, storage, volume: direct, copyOf: null };
+  if (direct) {
+    if (action) await assertNotSharedWithOthers(app, worker, direct, action);
+    return { worker, storage, volume: direct, copyOf: null };
+  }
 
+  // A copy needs no such check: `rudder-copy-<app8>-…` is generated here and
+  // provably namespaced to this application, so no other application's data can
+  // be behind one. The volume a copy is *written back onto* is another matter —
+  // that is `copyOf`, and the copy route checks it explicitly.
   const owner = storage.volumes.find((v) => v.copies.some((c) => c.name === volumeName));
   if (owner) {
     const copy = owner.copies.find((c) => c.name === volumeName)!;
@@ -494,4 +512,60 @@ export async function otherAppsUsing(
     }
   }
   return users;
+}
+
+/** What a caller is about to do to a volume's contents, for the refusal below. */
+export type SharedVolumeAction = 'delete' | 'restore' | 'back up' | 'copy';
+
+/** What each of them would do to the other application, in its own words. */
+const SHARED_CONSEQUENCE: Record<SharedVolumeAction, string> = {
+  delete: 'Deleting it would delete their data too',
+  restore:
+    'Restoring over it would overwrite their data — under containers of theirs that may be ' +
+    'running, which is how a restore corrupts a database rather than restoring one',
+  'back up': 'Backing it up would hand you their data',
+  copy: 'Copying it would take a copy of their data',
+};
+
+/**
+ * Refuse an operation on a volume that is not this application's alone.
+ *
+ * A volume reaches an application's storage list because its manifest declares
+ * it, and a declaration is not a claim: a bare compose source is passed through
+ * as written, so `pgdata:/data` names whatever `pgdata` already is on that
+ * worker, and a source spelled `rudder-<someone-else8>-pgdata` names another
+ * team's volume outright. `app-scoped` and `registry` names are derived from the
+ * application id and cannot say that; `shared` is exactly the case where the
+ * name proves nothing.
+ *
+ * So the question is asked of the worker instead: does another application
+ * declare this volume? Computed with the same per-worker `desiredState` loop
+ * `reconcileWorker` runs. If one does, every operation that reads or writes the
+ * contents is refused — reads included, because a backup or a copy of another
+ * team's database is the whole of the exposure and no less so for being
+ * read-only.
+ *
+ * Two applications that genuinely share a volume are told to rename it in one of
+ * the manifests, which is the only way to make the storage attributable at all.
+ * The residual gap is a shared volume nothing else declares *yet* — there is no
+ * ownership record for a name Rudder did not generate, so there is nothing
+ * better to ask.
+ */
+export async function assertNotSharedWithOthers(
+  app: typeof applications.$inferSelect,
+  worker: typeof workers.$inferSelect,
+  volume: AppVolume,
+  action: SharedVolumeAction,
+): Promise<void> {
+  if (volume.origin !== 'shared') return;
+
+  const others = await otherAppsUsing(volume.name, app.id, worker);
+  if (others.length === 0) return;
+
+  throw new AuthorizationError(
+    `"${volume.name}" is not scoped to this application — it is also used by ` +
+      `${others.map((n) => `"${n}"`).join(', ')} on worker "${worker.name}". ` +
+      `${SHARED_CONSEQUENCE[action]}. Rename the volume in one of the manifests first.`,
+    409,
+  );
 }

@@ -417,7 +417,8 @@
     'app-scoped': 'Created by Rudder for this application, and named after it.',
     shared:
       'The manifest names this volume outright, so it is not scoped to this application — ' +
-      'another application naming it gets the same data.',
+      'another application naming it gets the same data. If one does, every operation here is ' +
+      "refused: the storage is not this application's alone to back up, restore or delete.",
   };
 
   async function fetchStorage(force = false) {

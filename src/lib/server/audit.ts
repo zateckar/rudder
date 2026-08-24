@@ -85,7 +85,19 @@ const OPERATION_BY_SEGMENT: Record<string, string | null> = {
   'traefik-config': 'CONFIGURE_TRAEFIK',
   restore: 'RESTORE_VOLUME',
   copy: 'COPY_VOLUME',
+  backup: 'BACKUP_VOLUME',
 };
+
+/**
+ * Reads recorded despite the trail otherwise being writes only.
+ *
+ * Auditing every GET would bury everything worth finding under page loads, which
+ * is why the hook filters on the method. A volume backup is the exception worth
+ * making: it takes the entire contents of a volume off the worker and hands them
+ * to whoever asked, so as an exposure it is a copy, and the fact that HTTP
+ * spells it GET says nothing about that.
+ */
+export const AUDITED_READS: ReadonlySet<string> = new Set(['BACKUP_VOLUME']);
 
 /** The first path segment of an `/api/` route mapped to what it operates on. */
 const RESOURCE_BY_API_ROOT: Record<string, string> = {

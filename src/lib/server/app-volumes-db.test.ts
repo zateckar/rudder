@@ -1,7 +1,14 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
 import { db } from '$lib/db';
 import { applications, containers, teams, workers } from '$lib/db/schema';
-import { otherAppsUsing, runningContainerNames } from './app-volumes';
+import {
+  assertNotSharedWithOthers,
+  otherAppsUsing,
+  runningContainerNames,
+  type AppVolume,
+  type SharedVolumeAction,
+} from './app-volumes';
+import { AuthorizationError } from './auth';
 
 /**
  * The restore guard's query.
@@ -147,5 +154,96 @@ describe('otherAppsUsing', () => {
 
   test('a volume nothing declares is free to delete', async () => {
     expect(await otherAppsUsing('unreferenced', APP_ID, worker)).toEqual([]);
+  });
+});
+
+/**
+ * The guard every operation that touches contents goes through.
+ *
+ * Being *declared* is not ownership. A manifest is authored by an ordinary team
+ * member and a non-relative compose source is passed through verbatim, so an
+ * application can name `pgdata` — or another team's `rudder-<app8>-pgdata` —
+ * and have it resolve as one of its own volumes. Delete was the only operation
+ * that asked; backup read the contents out, and restore force-removed and
+ * recreated the volume while checking only the *asking* application's
+ * containers for whether anything was running.
+ */
+describe('assertNotSharedWithOthers', () => {
+  const worker = { id: WORKER_ID, name: 'guard-worker', hostname: 'guard.example.com' } as any;
+  const app = { id: APP_ID, name: 'guarded' } as any;
+
+  const volume = (over: Partial<AppVolume>): AppVolume => ({
+    name: 'pgdata',
+    label: 'pgdata',
+    origin: 'shared',
+    declared: true,
+    present: true,
+    sizeBytes: 1024,
+    mountpoint: '/var/lib/containers/storage/volumes/pgdata/_data',
+    targets: [],
+    registryId: null,
+    sizeLimit: null,
+    copies: [],
+    ...over,
+  });
+
+  const refusal = async (action: SharedVolumeAction, v = volume({})) => {
+    try {
+      await assertNotSharedWithOthers(app, worker, v, action);
+    } catch (e) {
+      return e as AuthorizationError;
+    }
+    return null;
+  };
+
+  test('refuses every operation that reads or writes a shared volume', async () => {
+    // Reads included. A backup or a copy of the neighbour's database is the
+    // whole of the exposure, and no less so for being read-only.
+    for (const action of ['delete', 'restore', 'back up', 'copy'] as const) {
+      const error = await refusal(action);
+      expect(error).toBeInstanceOf(AuthorizationError);
+      expect(error!.statusCode).toBe(409);
+      // Named, so the user can go and rename it in the right manifest.
+      expect(error!.message).toContain('"neighbour"');
+      expect(error!.message).toContain('guard-worker');
+    }
+  });
+
+  test('says what the operation would have done to the other application', async () => {
+    // One refusal reused across four verbs would read as boilerplate; the point
+    // is that the user understands whose data was at stake and how.
+    expect((await refusal('delete'))!.message).toContain('delete their data too');
+    expect((await refusal('restore'))!.message).toContain('overwrite their data');
+    expect((await refusal('back up'))!.message).toContain('hand you their data');
+    expect((await refusal('copy'))!.message).toContain('copy of their data');
+  });
+
+  test('allows a volume whose name proves it belongs to this application', async () => {
+    // `app-scoped` and `registry` names are derived from the application id, so
+    // no other application can be behind one — and the database is not even
+    // consulted.
+    for (const origin of ['app-scoped', 'registry'] as const) {
+      expect(
+        await refusal('delete', volume({ origin, name: 'rudder-aaaaaaaa-db-data' })),
+      ).toBeNull();
+    }
+  });
+
+  test('allows a shared volume no other application declares', async () => {
+    // The residual gap, and deliberately so: there is no ownership record for a
+    // name Rudder did not generate, so "nobody else claims it" is the most that
+    // can be asked.
+    expect(await refusal('restore', volume({ name: 'unreferenced' }))).toBeNull();
+  });
+
+  test('a copy is app-scoped by construction and never blocked', async () => {
+    // `rudder-copy-<app8>-…` is generated here, so a copy can hold no other
+    // application's data and deleting one is always the caller's own business.
+    expect(
+      await refusal(
+        'delete',
+        volume({ origin: 'app-scoped', name: 'rudder-copy-aaaaaaaa-pgdata-1700000000000' }),
+      ),
+    ).toBeNull();
   });
 });

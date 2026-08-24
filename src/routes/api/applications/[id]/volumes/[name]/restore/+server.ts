@@ -8,7 +8,12 @@ import { LockError, withLock, workerDeployLock } from '$lib/server/locks';
 /**
  * Write a tar archive back into a volume.
  *
- * The destructive one. Two guards, both refusals rather than warnings:
+ * The destructive one. Three guards, all refusals rather than warnings:
+ *
+ * - **The volume must be this application's alone.** `requireAppVolume` refuses
+ *   a volume another application declares — `replace` force-removes and
+ *   recreates it, so on a shared name this would destroy a second application's
+ *   data, and the running-container check below cannot see *their* containers.
  *
  * - **Nothing of the application may be running.** A restore overwrites files
  *   under whatever has them open; on a database that produces a corrupt store
@@ -24,7 +29,7 @@ import { LockError, withLock, workerDeployLock } from '$lib/server/locks';
  */
 export const POST: RequestHandler = route(async (event) => {
   const { application } = await requireApplication(event, event.params.id!);
-  const { worker, volume } = await requireAppVolume(application, event.params.name!);
+  const { worker, volume } = await requireAppVolume(application, event.params.name!, 'restore');
 
   const requested = event.url.searchParams.get('mode') ?? 'replace';
   if (requested !== 'replace' && requested !== 'merge') {

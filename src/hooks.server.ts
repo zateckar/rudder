@@ -4,7 +4,7 @@ import { db } from '$lib/db';
 import { users, auditLogs, apiKeys } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { getSessionIdFromCookies, validateSession } from '$lib/auth';
-import { classifyRequest, isAuditable } from '$lib/server/audit';
+import { AUDITED_READS, classifyRequest, isAuditable } from '$lib/server/audit';
 import { touchApiKey } from '$lib/server/api-keys';
 import { env } from '$env/dynamic/private';
 import { hashKey } from '$lib/server/encryption';
@@ -147,7 +147,7 @@ const authentication: Handle = async ({ event, resolve }) => {
     event.request.method !== 'HEAD' &&
     event.request.method !== 'OPTIONS';
 
-  if (isMutation && (userId || event.locals.apiUser)) {
+  if (userId || event.locals.apiUser) {
     const url = new URL(event.request.url);
     if (isAuditable(url.pathname)) {
       // What was done, not which HTTP verb carried it — see classifyRequest.
@@ -156,6 +156,11 @@ const authentication: Handle = async ({ event, resolve }) => {
         url.pathname,
         url.search,
       );
+
+      // Classified first, because whether a *read* is worth recording depends on
+      // what it reads and not on its method: a volume backup streams a whole
+      // volume to the caller. See `AUDITED_READS`.
+      if (!isMutation && !AUDITED_READS.has(action)) return response;
 
       try {
         await db.insert(auditLogs).values({

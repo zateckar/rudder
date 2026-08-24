@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { classifyRequest, isAuditable } from './audit';
+import { AUDITED_READS, classifyRequest, isAuditable } from './audit';
 
 const APP = '3f7c1e2a-9b4d-4c8e-8f1a-2d5b6c7e8f90';
 const WORKER = '04cfddf7-a955-4b1c-bc88-ef03a3737f2c';
@@ -21,6 +21,35 @@ describe('isAuditable', () => {
     expect(isAuditable(`/api/workers/${WORKER}`)).toBe(true);
     expect(isAuditable('/api/workers/provision')).toBe(true);
     expect(isAuditable('/api/applications/deploy')).toBe(true);
+  });
+});
+
+describe('volume storage', () => {
+  const VOLUME = 'rudder-3f7c1e2a-db-data';
+  const under = (suffix = '') =>
+    `/api/applications/${APP}/volumes/${VOLUME}${suffix}`;
+
+  test('files storage operations under the volume, not the application', () => {
+    // `DELETE /api/applications/:id/volumes/:name` destroys data and changes
+    // nothing about the application, so it belongs with the rest of the storage
+    // trail rather than among that application's deploys.
+    expect(classifyRequest('DELETE', under()).resourceType).toBe('volume');
+    expect(classifyRequest('POST', under('/restore')).action).toBe('RESTORE_VOLUME');
+    expect(classifyRequest('POST', under('/copy')).action).toBe('COPY_VOLUME');
+  });
+
+  test('a backup is audited, though it is a GET', () => {
+    // The hook records writes only, which would have left the one operation
+    // that takes a volume's entire contents off the worker with no trail. The
+    // exposure is a copy; the method it is spelled with says nothing about that.
+    expect(classifyRequest('GET', under('/backup')).action).toBe('BACKUP_VOLUME');
+    expect(AUDITED_READS.has('BACKUP_VOLUME')).toBe(true);
+  });
+
+  test('ordinary reads stay out of the trail', () => {
+    // Auditing every GET would bury everything worth finding under page loads.
+    expect(AUDITED_READS.has(classifyRequest('GET', under()).action)).toBe(false);
+    expect(AUDITED_READS.has(classifyRequest('GET', `/api/applications/${APP}`).action)).toBe(false);
   });
 });
 

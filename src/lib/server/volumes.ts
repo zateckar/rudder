@@ -142,7 +142,34 @@ export function isAppScopedVolume(name: string, appId: string): boolean {
   return name.startsWith(prefixFor(appId));
 }
 
-/** One entry of a single-container application's `volumes` JSON column. */
+/**
+ * True when a mount source names a host path rather than a volume.
+ *
+ * An absolute path is a bind mount — the user knows their worker's filesystem,
+ * and the mount policy decides whether they may use it. Everything else,
+ * including a relative or `~`-prefixed path, becomes a named volume: a bind to
+ * `./data` would resolve against the *control plane's* working directory, which
+ * is not where the container runs.
+ *
+ * This is the only rule for telling the two apart, and it applies to every
+ * deployment format. Compose asks it of each `volumes:` entry; single-container
+ * applications ask it of `AppVolumeMount.hostPath`.
+ */
+export function isHostPathSource(source: string): boolean {
+  return source.startsWith('/');
+}
+
+/**
+ * One entry of a single-container application's `volumes` JSON column.
+ *
+ * Either a reference into the volume registry (`volumeId`), or a source and a
+ * target. `hostPath` is misnamed and has to stay so — it is what every existing
+ * row calls the field — but it holds a *source*, and `isHostPathSource` decides
+ * whether that source is a host path or a named volume. Adoption in particular
+ * fills it from a container's `HostConfig.Binds`, where Podman reports named
+ * volumes and host paths in the same position: `pg-data:/var/lib/postgresql/data`
+ * and `/srv/data:/data` are indistinguishable until the rule is applied.
+ */
 export interface AppVolumeMount {
   /** A host path when absolute, otherwise a named volume. */
   hostPath?: string;

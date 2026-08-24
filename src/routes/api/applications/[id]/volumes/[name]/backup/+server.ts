@@ -20,7 +20,7 @@ import { toDnsLabel } from '$lib/server/domains';
  */
 export const GET: RequestHandler = route(async (event) => {
   const { application } = await requireApplication(event, event.params.id!);
-  const { worker, volume } = await requireAppVolume(application, event.params.name!);
+  const { worker, volume } = await requireAppVolume(application, event.params.name!, 'back up');
 
   if (!volume.present) {
     return new Response(
@@ -42,25 +42,44 @@ export const GET: RequestHandler = route(async (event) => {
     return release();
   };
 
-  const body = new ReadableStream<Uint8Array>({
-    start(controller) {
-      stream.on('data', (chunk: Buffer) => controller.enqueue(new Uint8Array(chunk)));
-      stream.on('end', () => {
-        controller.close();
-        void releaseOnce();
-      });
-      stream.on('error', (err) => {
-        controller.error(err);
-        void releaseOnce();
-      });
+  const body = new ReadableStream<Uint8Array>(
+    {
+      start(controller) {
+        stream.on('data', (chunk: Buffer) => {
+          controller.enqueue(new Uint8Array(chunk));
+          // Backpressure, and the whole reason this is streamed at all. The
+          // worker is typically on the LAN and the browser at the other end of
+          // a WAN link, so without pausing, every chunk Podman can produce
+          // queues in memory here and the control plane holds the entire
+          // archive after all.
+          if ((controller.desiredSize ?? 1) <= 0) stream.pause();
+        });
+        stream.on('end', () => {
+          controller.close();
+          void releaseOnce();
+        });
+        stream.on('error', (err) => {
+          controller.error(err);
+          void releaseOnce();
+        });
+      },
+      pull() {
+        // The consumer has drained below the mark. A `resume` on a stream that
+        // was never paused is a no-op, so this needs no state of its own.
+        stream.resume();
+      },
+      cancel() {
+        // The browser went away mid-download. Without this the helper container
+        // would sit on the worker holding the volume open until its lock expired.
+        stream.destroy();
+        return releaseOnce();
+      },
     },
-    cancel() {
-      // The browser went away mid-download. Without this the helper container
-      // would sit on the worker holding the volume open until its lock expired.
-      stream.destroy();
-      return releaseOnce();
-    },
-  });
+    // Counted in bytes rather than chunks: a chunk-counting default would hold
+    // one chunk of whatever size Podman happened to send, which says nothing
+    // about memory. A megabyte is enough to keep the socket busy.
+    new ByteLengthQueuingStrategy({ highWaterMark: 1024 * 1024 }),
+  );
 
   // Both parts through `toDnsLabel`: a bare compose volume name comes straight
   // from a manifest, and this value is interpolated into a response header.
