@@ -28,6 +28,7 @@ import {
   domainFormatError,
   routerName,
   toDnsLabel,
+  traefikRouterName,
 } from '../domains';
 
 /**
@@ -235,7 +236,11 @@ export function createRouteAssigner(ctx: PlanContext) {
 
     return {
       domain,
-      routerName: isPrimary ? routerName(ctx.appName) : routerName(ctx.appName, key),
+      // Carries the application id: a router name is global on a worker and an
+      // application name is not. See `traefikRouterName`.
+      routerName: isPrimary
+        ? traefikRouterName(ctx.appId, ctx.appName)
+        : traefikRouterName(ctx.appId, ctx.appName, key),
       hostPort,
       definesRouter: true,
     };

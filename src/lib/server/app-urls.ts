@@ -15,6 +15,7 @@
  * explicit domain.
  */
 import type { containers } from '$lib/db/schema';
+import { routerDisplayName } from './domains';
 
 type ContainerRow = typeof containers.$inferSelect;
 
@@ -40,8 +41,12 @@ function* routerHosts(row: ContainerRow): Generator<{ router: string; host: stri
     const host = typeof value === 'string' ? value.match(HOST_RULE)?.[1] : undefined;
     if (!host) continue;
     yield {
-      // `shop-secure` and `shop-secure-ws` are the same service to a reader.
-      router: key.slice('traefik.http.routers.'.length, -'.rule'.length).replace(/-secure(-ws)?$/, ''),
+      // `shop-secure` and `shop-secure-ws` are the same service to a reader, and
+      // the `-<app8>` a router identifier carries is not something to show them
+      // either — see `traefikRouterName`.
+      router: routerDisplayName(
+        key.slice('traefik.http.routers.'.length, -'.rule'.length).replace(/-secure(-ws)?$/, ''),
+      ),
       host,
     };
   }
@@ -78,7 +83,7 @@ export function serviceUrls(
     if (row.domain) {
       const url = `https://${row.domain}`;
       if (!byUrl.has(url)) {
-        byUrl.set(url, { name: row.routerName ?? row.name, url });
+        byUrl.set(url, { name: routerDisplayName(row.routerName ?? row.name), url });
       }
     }
     const labels = parseLabels(row.labels);

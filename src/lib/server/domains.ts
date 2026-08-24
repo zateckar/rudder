@@ -61,6 +61,57 @@ export function routerName(appName: string, serviceName?: string): string {
 }
 
 /**
+ * The Traefik router and service identifier for one of an application's routes.
+ *
+ * `routerName` above disambiguates *within* an application — two of its own
+ * services called `web` and `api`. It cannot disambiguate *between* them,
+ * because it is derived from the application name and application names are not
+ * unique: `/applications/new` and the Kubernetes API both enforce uniqueness per
+ * team, and the edit form enforces none at all. Two teams each with a `web`,
+ * scheduled onto one worker, therefore produced the same router identifier —
+ * which is global on a worker, exactly as `plannedContainerName` already notes
+ * container names are.
+ *
+ * What that cost, in both routing modes:
+ *
+ * - **http** — `routeGroupsForWorker` keys its groups on this name, so the
+ *   second application did not get a router of its own. Its container port was
+ *   appended to the *first* application's load balancer, and requests for one
+ *   team's hostname were round-robined into the other team's container.
+ * - **labels** — two containers declared `traefik.http.routers.web.rule` with
+ *   different `Host()` rules. Traefik's docker provider treats that as a
+ *   conflicting definition and drops the router, taking both applications down.
+ *
+ * So the application id goes in, the same eight hex digits every other
+ * per-application name in the system carries. Hostnames are untouched: this is
+ * an internal identifier and `applications.domain` remains globally unique on
+ * its own. `networkAliases` deliberately keeps using the bare `routerName` —
+ * those are DNS names inside the application's own network, which is already
+ * per-application, and suffixing them would break `<app>-<service>` resolution
+ * between a manifest's own containers.
+ */
+export function traefikRouterName(
+  appId: string,
+  appName: string,
+  serviceName?: string,
+): string {
+  return `${routerName(appName, serviceName)}-${appId.slice(0, 8)}`;
+}
+
+/** The `-<app8>` suffix `traefikRouterName` adds, for turning one back into a label. */
+const ROUTER_ID_SUFFIX = /-[0-9a-f]{8}$/;
+
+/**
+ * A router identifier as something to show a person.
+ *
+ * The suffix exists to keep two teams' `web` apart on a worker; it means
+ * nothing to whoever is reading the application's page.
+ */
+export function routerDisplayName(name: string): string {
+  return name.replace(ROUTER_ID_SUFFIX, '');
+}
+
+/**
  * A hostname label: alphanumeric, inner hyphens, at most 63 characters.
  *
  * Exported so `schemas.domain` can be built from the same pattern rather than

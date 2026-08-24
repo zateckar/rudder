@@ -3,8 +3,10 @@ import {
   buildAppDomain,
   buildServiceDomain,
   domainFormatError,
+  routerDisplayName,
   routerName,
   toDnsLabel,
+  traefikRouterName,
 } from './domains';
 
 describe('toDnsLabel', () => {
@@ -176,5 +178,45 @@ describe('routerName', () => {
   test('distinguishes the same service name across different apps', () => {
     // Two apps each with a "web" service must not collide on one Traefik router.
     expect(routerName('shop', 'web')).not.toBe(routerName('blog', 'web'));
+  });
+
+  test('does not distinguish two applications that share a name', () => {
+    // The gap `traefikRouterName` exists to close: this is derived from the
+    // application *name*, and names are unique per team, not per installation.
+    expect(routerName('web')).toBe(routerName('web'));
+  });
+});
+
+describe('traefikRouterName', () => {
+  const A = 'abcdef12-3456-7890-abcd-ef1234567890';
+  const B = '99887766-3456-7890-abcd-ef1234567890';
+
+  test('keeps two teams’ same-named applications apart', () => {
+    expect(traefikRouterName(A, 'web')).toBe('web-abcdef12');
+    expect(traefikRouterName(B, 'web')).toBe('web-99887766');
+    expect(traefikRouterName(A, 'web')).not.toBe(traefikRouterName(B, 'web'));
+  });
+
+  test('still disambiguates services within one application', () => {
+    expect(traefikRouterName(A, 'shop', 'api')).toBe('shop-api-abcdef12');
+    expect(traefikRouterName(A, 'shop', 'api')).not.toBe(traefikRouterName(A, 'shop'));
+  });
+
+  test('is stable for one application, so replicas group into one service', () => {
+    expect(traefikRouterName(A, 'shop')).toBe(traefikRouterName(A, 'shop'));
+  });
+});
+
+describe('routerDisplayName', () => {
+  test('takes the identifier back to something worth showing', () => {
+    expect(routerDisplayName('shop-abcdef12')).toBe('shop');
+    expect(routerDisplayName('shop-api-abcdef12')).toBe('shop-api');
+  });
+
+  test('leaves a name without the suffix alone', () => {
+    // Routers written before the identifier carried an id, and any label that
+    // simply happens not to end in eight hex digits.
+    expect(routerDisplayName('shop')).toBe('shop');
+    expect(routerDisplayName('shop-api')).toBe('shop-api');
   });
 });

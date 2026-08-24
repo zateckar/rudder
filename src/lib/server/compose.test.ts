@@ -443,14 +443,17 @@ services:
   api: { image: nginx, ports: ["80"] }
 `, { baseDomain: 'apps.example.com' });
 
+    // The router name carries the application id and the hostname does not:
+    // hostnames are already globally unique, router names are global on a
+    // worker and application names are not. See `traefikRouterName`.
     expect(containers[0].route).toMatchObject({
       domain: 'shop.apps.example.com',
-      routerName: 'shop',
+      routerName: 'shop-abcdef12',
       definesRouter: true,
     });
     expect(containers[1].route).toMatchObject({
       domain: 'shop-api.apps.example.com',
-      routerName: 'shop-api',
+      routerName: 'shop-api-abcdef12',
     });
   });
 

@@ -46,13 +46,55 @@ describe('createRouteAssigner — hostnames', () => {
     const assign = createRouteAssigner(ctxFor({ appName: 'My Shop', baseDomain: null }));
     const route = assign('web', 31000);
     expect(route.domain).toBe('my-shop');
-    expect(route.routerName).toBe('my-shop');
+    expect(route.routerName).toBe('my-shop-11111111');
   });
 
   test('normalises the secondary fallback too', () => {
     const assign = createRouteAssigner(ctxFor({ appName: 'My Shop', baseDomain: null }));
     assign('web', 31000);
     expect(assign('API v2', 31001).domain).toBe('my-shop-api-v2');
+  });
+});
+
+/**
+ * Router names are global on a worker; application names are not.
+ *
+ * `/applications/new` and the Kubernetes API both enforce uniqueness per team,
+ * and the edit form enforces none at all — so two teams each running a `web`
+ * on one worker is ordinary, not contrived. Without the application id in the
+ * identifier, `routeGroupsForWorker` merged them into a single router and
+ * appended one team's container to the other team's load balancer.
+ */
+describe('createRouteAssigner — router identifiers', () => {
+  const OTHER = '99999999-2222-3333-4444-555555555555';
+
+  test('two applications with the same name get different routers', () => {
+    const mine = createRouteAssigner(ctxFor())('web', 31000);
+    const theirs = createRouteAssigner(ctxFor({ appId: OTHER }))('web', 31001);
+
+    expect(mine.routerName).not.toBe(theirs.routerName);
+    expect(mine.routerName).toBe('shop-11111111');
+    expect(theirs.routerName).toBe('shop-99999999');
+  });
+
+  test('a secondary service carries it too', () => {
+    const assign = createRouteAssigner(ctxFor());
+    assign('web', 31000);
+    expect(assign('api', 31001).routerName).toBe('shop-api-11111111');
+  });
+
+  test('replicas of one application share a router, so Traefik balances them', () => {
+    // Same application, same name: the grouping in `routeGroupsForWorker` is
+    // what turns several containers into one service with several servers.
+    const ctx = ctxFor();
+    expect(createRouteAssigner(ctx)('web', 31000).routerName).toBe(
+      createRouteAssigner(ctx)('web', 31001).routerName,
+    );
+  });
+
+  test('the hostname is untouched — only the identifier carries the id', () => {
+    const route = createRouteAssigner(ctxFor())('web', 31000);
+    expect(route.domain).toBe('shop.apps.example.com');
   });
 });
 
