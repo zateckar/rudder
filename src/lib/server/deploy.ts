@@ -28,7 +28,7 @@ import { ensureAppNetwork, teardownAppNetwork } from '$lib/server/networks';
 import { env } from '$lib/server/env';
 import { MountPolicyError, realizeMounts, type MountIntent } from '$lib/server/mounts';
 // Deploys are serialized per worker; see `workerDeployLock`.
-import { LockError, withLock } from '$lib/server/locks';
+import { LockError, withLock, workerDeployLock } from '$lib/server/locks';
 import {
   parseDigestRecord,
   pinnedImageFor,
@@ -597,24 +597,6 @@ export interface DeployOptions {
    * naming it rather than silently running something else.
    */
   pinnedDigests?: string | null;
-}
-
-/**
- * Serialize everything that mutates one worker's containers.
- *
- * Keyed on the worker, not the application, because the contended resource is
- * the worker's host ports: `reservedPortsForWorker` reads the `containers`
- * rows, and a deploy does not write one until well after it has allocated. Two
- * deploys of *different* applications that overlap on one worker can therefore
- * be handed the same port, and the second container fails to bind. Two deploys
- * of the *same* application additionally compute the same `nextGeneration` from
- * the same snapshot and collide on the container name.
- *
- * Not hypothetical: `/api/applications/[id]/webhook/trigger` runs a full deploy
- * synchronously and has no rate limit, so an ordinary CI retry is enough.
- */
-function workerDeployLock(workerId: string): string {
-  return `deploy:worker:${workerId}`;
 }
 
 /**

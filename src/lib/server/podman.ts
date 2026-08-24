@@ -262,6 +262,25 @@ export interface Image {
   Size: number;
 }
 
+/**
+ * A named Podman volume, in the one shape both APIs are normalised into.
+ *
+ * Lowercased fields, unlike the pass-through `Container` and `Image` above,
+ * because there is no single upstream spelling to be faithful to: libpod and the
+ * Docker-compatible route disagree, and `listVolumes` reconciles them.
+ *
+ * No size field. Podman reports volume usage only in aggregate, through
+ * `system/df` — see `volumeUsage`.
+ */
+export interface PodmanVolume {
+  name: string;
+  /** Where the volume lives on the worker's filesystem. */
+  mountpoint: string | null;
+  /** As Podman formats it — an RFC 3339 string, not a Date. */
+  createdAt: string | null;
+  labels: Record<string, string>;
+}
+
 export interface ContainerStats {
   cpu_stats: {
     cpu_usage: {
@@ -353,6 +372,42 @@ export interface ImageHistoryEntry {
   Tags: string[];
   Size: number;
   Comment: string;
+}
+
+/** One volume's disk usage, in the one shape `systemDf` callers may rely on. */
+export interface VolumeDiskUsage {
+  Name: string;
+  UsageData: { Size: number };
+}
+
+/**
+ * Reconcile the two spellings of a `system/df` volume entry.
+ *
+ * The two APIs disagree and the disagreement was silently costing every reader
+ * the number it wanted: libpod answers `{VolumeName, Size}`, the
+ * Docker-compatible route answers `{Name, UsageData: {Size}}`, and all three
+ * call sites read `v.UsageData?.Size`. libpod is the route actually taken, so
+ * volume disk usage reported as 0 bytes on every real Podman worker — on the
+ * worker detail page, in the metrics sweep, and in the collection endpoint.
+ *
+ * Both spellings are accepted rather than one asserted: which shape a given
+ * Podman build answers with is not worth pinning a number to.
+ */
+export function normalizeVolumeUsage(raw: unknown): VolumeDiskUsage[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((v: any) => ({
+    Name: v?.VolumeName ?? v?.Name ?? '',
+    UsageData: { Size: v?.Size ?? v?.UsageData?.Size ?? 0 },
+  }));
+}
+
+/** A normalised `system/df` response as a name → bytes map. */
+export function volumeUsageMap(df: unknown): Map<string, number> {
+  const sizes = new Map<string, number>();
+  for (const entry of normalizeVolumeUsage((df as any)?.VolumesDiskUsage)) {
+    if (entry.Name) sizes.set(entry.Name, entry.UsageData.Size);
+  }
+  return sizes;
 }
 
 export class PodmanClient {
@@ -579,7 +634,11 @@ export class PodmanClient {
 
   async systemDf(): Promise<any> {
     try {
-      return await this.request<any>('/libpod/system/df');
+      const libpodDf = await this.request<any>('/libpod/system/df');
+      return {
+        ...libpodDf,
+        VolumesDiskUsage: normalizeVolumeUsage(libpodDf?.VolumesDiskUsage),
+      };
     } catch (err: unknown) {
       // Fallback to Docker-compatible endpoint if libpod returns 404
       if (PodmanApiError.hasStatus(err, 404)) {
@@ -595,15 +654,23 @@ export class PodmanClient {
             Names: c.Names,
             Size: c.SizeRootFs ?? 0,
           })),
-          VolumesDiskUsage: (dockerDf.Volumes || []).map((v: any) => ({
-            Name: v.Name,
-            UsageData: { Size: v.UsageData?.Size ?? 0 },
-          })),
+          VolumesDiskUsage: normalizeVolumeUsage(dockerDf.Volumes),
           _raw: dockerDf,
         };
       }
       throw err;
     }
+  }
+
+  /**
+   * Every volume's disk usage on this worker, by name.
+   *
+   * One `system/df` per caller rather than one per volume: Podman has no
+   * per-volume size endpoint at all — `volumes/{name}/json` reports the
+   * mountpoint and labels and nothing about how much is under it.
+   */
+  async volumeUsage(): Promise<Map<string, number>> {
+    return volumeUsageMap(await this.systemDf());
   }
 
   async systemPrune(all: boolean = true): Promise<any> {
@@ -870,6 +937,243 @@ export class PodmanClient {
       // asked for.
       if (!PodmanApiError.hasStatus(e, 404)) throw e;
     }
+  }
+
+  // ── Volumes ────────────────────────────────────────────────────────────────
+  //
+  // Podman creates a named volume implicitly the first time a container mounts
+  // one, which is how every compose application's storage comes into being
+  // without anything here being called. These exist so that storage can also be
+  // listed, measured, copied and removed — the operations Rudder had no way to
+  // perform on data it had created.
+
+  /**
+   * Call a libpod volume route, falling back to the Docker-compatible one.
+   *
+   * The libpod volume API is **only served under a version prefix**. Verified
+   * against a real worker: `/libpod/volumes/json`, `/libpod/volumes/create`,
+   * `/libpod/volumes/{name}/json` and `DELETE /libpod/volumes/{name}` all answer
+   * a bare `404 Not Found`, while the same paths under `/v4.0.0/` work. The
+   * version is spelled the same way `systemPrune` already spells it.
+   *
+   * That is the reason this is a method rather than four inline try/catches, and
+   * the reason `removeVolume` reads the error from the *fallback* rather than the
+   * first attempt. A 404 from a route that does not exist and a 404 meaning "no
+   * such volume" are indistinguishable by status, so a caller that treats 404 as
+   * "already gone" silently reports success for every delete it never sent — the
+   * bug this shape exists to make impossible. Whatever this throws came from a
+   * route that is definitely there: `/volumes/{name}` is part of the Docker API
+   * every Podman serves.
+   */
+  private async volumeRequest<T>(
+    path: string,
+    dockerPath: string,
+    options: RequestInit = {},
+  ): Promise<T> {
+    try {
+      return await this.request<T>(`/v4.0.0/libpod/volumes${path}`, options);
+    } catch (err: unknown) {
+      if (!PodmanApiError.hasStatus(err, 404)) throw err;
+      return this.request<T>(`/volumes${dockerPath}`, options);
+    }
+  }
+
+  private static toVolume(raw: any, fallbackName = ''): PodmanVolume {
+    return {
+      name: raw?.Name ?? fallbackName,
+      mountpoint: raw?.Mountpoint ?? null,
+      createdAt: raw?.CreatedAt ?? null,
+      labels: raw?.Labels ?? {},
+    };
+  }
+
+  /**
+   * Every named volume on this worker.
+   *
+   * libpod answers a bare array; the Docker route wraps the same objects in
+   * `{Volumes: [...]}`. Normalised so callers never branch on which replied.
+   */
+  async listVolumes(): Promise<PodmanVolume[]> {
+    const raw = await this.volumeRequest<any>('/json', '');
+    const list = Array.isArray(raw) ? raw : (raw?.Volumes ?? []);
+    return list.map((v: any) => PodmanClient.toVolume(v));
+  }
+
+  /**
+   * Create a named volume.
+   *
+   * Already there is the same outcome as having just made it — the same reading
+   * `createNetwork` takes of a 409, and the one that matters here: a restore
+   * recreates the volume it is about to fill, and a concurrent deploy may have
+   * got there first.
+   */
+  async createVolume(name: string, labels?: Record<string, string>): Promise<void> {
+    try {
+      await this.volumeRequest('/create', '/create', {
+        method: 'POST',
+        body: JSON.stringify({ Name: name, Labels: labels ?? {} }),
+      });
+    } catch (e: unknown) {
+      if (PodmanApiError.hasStatus(e, 409)) return;
+      throw e;
+    }
+  }
+
+  /**
+   * Remove a named volume and everything written to it.
+   *
+   * A volume that is already gone is a success, as with `removeNetwork` — and
+   * safe to read that way here only because `volumeRequest` guarantees the 404
+   * came from a route that exists. A 409 — Podman refusing because a container
+   * still mounts it — is deliberately let through: that is a rule the caller has
+   * broken and can act on, and `route()` relays a 4xx from Podman as itself.
+   * `force` is the caller's explicit override, never the default.
+   */
+  async removeVolume(name: string, force: boolean = false): Promise<void> {
+    const encoded = encodeURIComponent(name);
+    try {
+      await this.volumeRequest(
+        `/${encoded}?force=${force}`,
+        `/${encoded}?force=${force}`,
+        { method: 'DELETE' },
+      );
+    } catch (e: unknown) {
+      if (PodmanApiError.hasStatus(e, 404)) return;
+      throw e;
+    }
+  }
+
+  /** Mountpoint, labels and creation time for one volume. Says nothing about size. */
+  async inspectVolume(name: string): Promise<PodmanVolume> {
+    const encoded = encodeURIComponent(name);
+    return PodmanClient.toVolume(
+      await this.volumeRequest<any>(`/${encoded}/json`, `/${encoded}`),
+      name,
+    );
+  }
+
+  /**
+   * Block until a container exits, and report its status code.
+   *
+   * `timeoutMs: null` for the same reason a followed log stream needs it: the
+   * request is idle by design for as long as the container runs, so a socket
+   * inactivity timeout would kill exactly the copies that are doing work.
+   */
+  async waitContainer(id: string): Promise<number> {
+    const { module: reqModule, options: reqOptions } = this.plan(
+      `/containers/${id}/wait`,
+      'POST',
+      { timeoutMs: null },
+    );
+
+    return new Promise<number>((resolve, reject) => {
+      const req = reqModule.request(reqOptions, (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          if (res.statusCode && res.statusCode >= 400) {
+            reject(PodmanApiError.fromResponse(res.statusCode, data));
+            return;
+          }
+          try {
+            const parsed = JSON.parse(data);
+            // libpod answers with a bare integer; Docker with {StatusCode}.
+            resolve(typeof parsed === 'number' ? parsed : (parsed?.StatusCode ?? 0));
+          } catch {
+            reject(new Error(`Could not read the exit status of container ${id}: ${data}`));
+          }
+        });
+      });
+      req.on('error', reject);
+      req.end();
+    });
+  }
+
+  /**
+   * Read a directory out of a container as a tar stream.
+   *
+   * The read counterpart of `putArchive`, and the mechanism behind `docker cp`.
+   * Returns the response rather than a buffer: a volume backup is arbitrarily
+   * large, and the control plane must not hold one in memory to hand it to the
+   * browser. Entries come back prefixed with the basename of `path`, so a
+   * `path` of `/volume` produces `volume/...` — which is what makes the round
+   * trip through `putArchiveStream(id, '/')` land the files back where they were.
+   */
+  async getArchiveStream(id: string, path: string): Promise<http.IncomingMessage> {
+    const { module: reqModule, options: reqOptions } = this.plan(
+      `/containers/${id}/archive?path=${encodeURIComponent(path)}`,
+      'GET',
+      { timeoutMs: null },
+    );
+
+    return new Promise<http.IncomingMessage>((resolve, reject) => {
+      const req = reqModule.request(reqOptions, (res) => {
+        if (res.statusCode && res.statusCode >= 400) {
+          let data = '';
+          res.on('data', (chunk) => { data += chunk; });
+          res.on('end', () => reject(PodmanApiError.fromResponse(res.statusCode!, data)));
+          return;
+        }
+        resolve(res);
+      });
+      req.on('error', reject);
+      req.end();
+    });
+  }
+
+  /**
+   * Extract a tar stream into a container, without buffering it.
+   *
+   * `putArchive` takes a Buffer, which is right for the few kilobytes of secret
+   * files it was written for and wrong for a restored volume. Chunked transfer
+   * encoding — no Content-Length — because the size is not known until the
+   * upload ends.
+   */
+  async putArchiveStream(
+    id: string,
+    destPath: string,
+    body: ReadableStream<Uint8Array>,
+  ): Promise<void> {
+    const { module: reqModule, options: reqOptions } = this.plan(
+      `/containers/${id}/archive?path=${encodeURIComponent(destPath)}`,
+      'PUT',
+      { headers: { 'Content-Type': 'application/x-tar' }, timeoutMs: null },
+    );
+
+    return new Promise<void>((resolve, reject) => {
+      const req = reqModule.request(reqOptions, (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          if (res.statusCode && res.statusCode >= 400) {
+            reject(PodmanApiError.fromResponse(res.statusCode, data));
+            return;
+          }
+          resolve();
+        });
+      });
+      req.on('error', reject);
+
+      (async () => {
+        const reader = body.getReader();
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!req.write(value)) {
+              await new Promise<void>((r) => req.once('drain', () => r()));
+            }
+          }
+          req.end();
+        } catch (e) {
+          // Destroying the request is what makes a truncated upload a failure
+          // rather than a half-extracted volume Podman thinks it finished.
+          req.destroy(e instanceof Error ? e : new Error(String(e)));
+        } finally {
+          reader.releaseLock();
+        }
+      })();
+    });
   }
 
   async listImages(): Promise<Image[]> {

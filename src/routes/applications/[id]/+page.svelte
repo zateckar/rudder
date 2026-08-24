@@ -371,6 +371,228 @@
     }
   });
 
+  // ── Storage ───────────────────────────────────────────────────────────────
+  //
+  // Every volume the application uses, whatever it was deployed from. The
+  // volume registry only ever reached single-container applications, so a
+  // compose file's storage — real Podman volumes, named by Rudder, holding data
+  // across redeploys — had no representation anywhere in the UI at all. The
+  // server derives this from the same intent a deploy acts on; see
+  // `appStorage`.
+  interface VolumeCopy {
+    name: string;
+    /** Epoch milliseconds, read back out of the copy's own name. */
+    at: number;
+    sizeBytes: number | null;
+  }
+  interface AppVolume {
+    name: string;
+    label: string;
+    origin: 'registry' | 'app-scoped' | 'shared';
+    declared: boolean;
+    present: boolean;
+    sizeBytes: number | null;
+    mountpoint: string | null;
+    targets: { container: string; path: string; mode: string }[];
+    registryId: string | null;
+    sizeLimit: number | null;
+    copies: VolumeCopy[];
+  }
+  interface AppStorage {
+    volumes: AppVolume[];
+    otherMounts: { kind: 'bind' | 'tmpfs'; source: string | null; target: string; container: string }[];
+    unreachable: string | null;
+    manifestError: string | null;
+  }
+
+  let storage = $state<AppStorage | null>(null);
+  let storageLoading = $state(false);
+  let storageLoaded = $state(false);
+  let storageError = $state<string | null>(null);
+  /** Keyed by volume name, so two rows can never share a spinner. */
+  let volumeBusy = $state<Record<string, string | null>>({});
+
+  const ORIGIN_HINT: Record<AppVolume['origin'], string> = {
+    registry: 'Declared in the volume registry and mounted by name.',
+    'app-scoped': 'Created by Rudder for this application, and named after it.',
+    shared:
+      'The manifest names this volume outright, so it is not scoped to this application — ' +
+      'another application naming it gets the same data.',
+  };
+
+  async function fetchStorage(force = false) {
+    if (storageLoading) return;
+    if (storageLoaded && !force) return;
+    storageLoading = true;
+    storageError = null;
+    try {
+      const res = await fetch(`/api/applications/${data.application.id}/volumes`);
+      const body = await res.json();
+      if (res.ok) {
+        storage = body;
+      } else {
+        storageError = body.error || 'Could not load storage';
+      }
+    } catch (e: any) {
+      storageError = e.message;
+    } finally {
+      storageLoading = false;
+      storageLoaded = true;
+    }
+  }
+
+  $effect(() => {
+    if (activeTab === 'storage') fetchStorage();
+  });
+
+  /** How much of the volume's size figure we actually know. */
+  function volumeSize(v: { sizeBytes: number | null; present?: boolean }): string {
+    if (v.sizeBytes === null) return '—';
+    return formatBytes(v.sizeBytes);
+  }
+
+  async function volumeAction(
+    name: string,
+    label: string,
+    url: string,
+    method: string,
+    body?: BodyInit,
+  ) {
+    volumeBusy[name] = label;
+    try {
+      const res = await fetch(url, { method, ...(body === undefined ? {} : { body }) });
+      const result = await res.json();
+      if (res.ok) {
+        showToast('success', result.message || 'Done');
+        await fetchStorage(true);
+        return true;
+      }
+      // These refusals are paragraphs — which containers to stop, which other
+      // application shares the volume — so they go in the detail modal rather
+      // than a toast that truncates them.
+      showDetail(`${label} failed`, [result.error || 'The request was refused.']);
+      return false;
+    } catch (e: any) {
+      showDetail(`${label} failed`, [e.message]);
+      return false;
+    } finally {
+      volumeBusy[name] = null;
+    }
+  }
+
+  async function deleteVolume(v: AppVolume, isCopy: boolean) {
+    const consequence = isCopy
+      ? `The copy "${v.name}" and its contents are removed. The volume it was taken from is not touched.`
+      : `Everything written to "${v.name}" is deleted from worker "${data.worker?.name ?? ''}". ` +
+        `There is no undo, and no backup is taken. Take a copy or download a backup first if you ` +
+        `might want the data.` +
+        (v.declared
+          ? ` The application still declares this volume, so the next deploy recreates it empty.`
+          : '');
+    const ok = await confirmAction({
+      title: isCopy ? 'Delete this copy?' : `Delete "${v.label}" and its data?`,
+      body: consequence,
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
+
+    const url = `/api/applications/${data.application.id}/volumes/${encodeURIComponent(v.name)}`;
+    const done = await volumeAction(v.name, 'Delete', url, 'DELETE');
+    if (done || isCopy) return;
+
+    // Podman refuses to remove a volume a container still mounts. Offering the
+    // override separately keeps it an explicit second decision rather than
+    // something the first click quietly did.
+    const forced = await confirmAction({
+      title: 'Force the delete?',
+      body:
+        `Podman refused because a container still mounts "${v.name}". Forcing removes the volume ` +
+        `anyway; anything still reading or writing it will see its files vanish.`,
+      confirmLabel: 'Force delete',
+      danger: true,
+    });
+    if (!forced) return;
+    await volumeAction(v.name, 'Force delete', `${url}?force=1`, 'DELETE');
+  }
+
+  async function copyVolume(v: AppVolume) {
+    await volumeAction(
+      v.name,
+      'Copy',
+      `/api/applications/${data.application.id}/volumes/${encodeURIComponent(v.name)}/copy`,
+      'POST',
+    );
+  }
+
+  async function restoreCopy(copy: VolumeCopy, onto: AppVolume) {
+    const ok = await confirmAction({
+      title: `Restore "${onto.label}" from this copy?`,
+      body:
+        `"${onto.name}" is emptied and replaced with the copy taken on ` +
+        `${new Date(copy.at).toLocaleString()}. Anything written since then is lost. The ` +
+        `application has to be stopped — the restore is refused otherwise.`,
+      confirmLabel: 'Restore',
+      danger: true,
+    });
+    if (!ok) return;
+    const done = await volumeAction(
+      copy.name,
+      'Restore',
+      `/api/applications/${data.application.id}/volumes/${encodeURIComponent(copy.name)}/copy`,
+      'PUT',
+    );
+    if (done) reloadWithFreshDrift(200);
+  }
+
+  // ── Restore from an uploaded archive ─────────────────────────────────────
+  let showRestoreModal = $state(false);
+  let restoreTarget = $state<AppVolume | null>(null);
+  let restoreFile = $state<File | null>(null);
+  let restoreMode = $state<'replace' | 'merge'>('replace');
+  let restoreUploading = $state(false);
+
+  function openRestore(v: AppVolume) {
+    restoreTarget = v;
+    restoreFile = null;
+    restoreMode = 'replace';
+    showRestoreModal = true;
+  }
+
+  async function submitRestore() {
+    if (!restoreTarget || !restoreFile) return;
+    const target = restoreTarget;
+    const ok = await confirmAction({
+      title: `Restore "${target.label}" from ${restoreFile.name}?`,
+      body:
+        restoreMode === 'replace'
+          ? `"${target.name}" is emptied first, so the result is exactly what is in the archive. ` +
+            `Everything currently in it is lost.`
+          : `The archive is extracted over "${target.name}". Files it does not mention are left ` +
+            `where they are, which can leave a mixture of old and new — for a database, a state ` +
+            `that never existed.`,
+      confirmLabel: 'Restore',
+      danger: true,
+    });
+    if (!ok) return;
+
+    restoreUploading = true;
+    const done = await volumeAction(
+      target.name,
+      'Restore',
+      `/api/applications/${data.application.id}/volumes/${encodeURIComponent(target.name)}` +
+        `/restore?mode=${restoreMode}`,
+      'POST',
+      restoreFile,
+    );
+    restoreUploading = false;
+    if (done) {
+      showRestoreModal = false;
+      restoreTarget = null;
+      reloadWithFreshDrift(200);
+    }
+  }
+
   // ── App-level actions ────────────────────────────────────────────────────
   //
   // Which controls to show is decided in lifecycle-controls.ts, so the rules
@@ -974,7 +1196,7 @@
 
 <!-- ── Tabs ────────────────────────────────────────────────────────────── -->
 <div class="tabs">
-  {#each [['containers','Containers'],['metrics','Metrics'],['config','Configuration'],['deployments','Deployments']] as [id, label]}
+  {#each [['containers','Containers'],['metrics','Metrics'],['storage','Storage'],['config','Configuration'],['deployments','Deployments']] as [id, label]}
     <button class:active={activeTab === id} onclick={() => activeTab = id}>{label}</button>
   {/each}
 </div>
@@ -1430,6 +1652,194 @@
       </div>
     {/if}
 
+  <!-- ── Storage tab ─────────────────────────────────────────────────────────
+       Volumes for every deployment format, not just single-container ones.
+       A compose file's `./data` is a real Podman volume that Rudder created and
+       named; until now nothing in the UI could show it, size it or delete it. -->
+  {:else if activeTab === 'storage'}
+    {#if storageLoading && !storageLoaded}
+      <div class="empty-row"><p class="loading-text">Reading volumes from the worker…</p></div>
+    {:else if storageError}
+      <div class="empty-row"><p class="error-text">{storageError}</p></div>
+    {:else if storage}
+      {#if storage.manifestError}
+        <div class="storage-notice">
+          <strong>This application's manifest no longer parses,</strong> so nothing is listed as
+          declared. Anything found on the worker is still shown below — it still holds data.
+          <span class="storage-notice-detail">{storage.manifestError}</span>
+        </div>
+      {/if}
+      {#if storage.unreachable}
+        <div class="storage-notice">{storage.unreachable}</div>
+      {/if}
+
+      <div class="storage-bar">
+        <span class="storage-summary">
+          {storage.volumes.length} volume{storage.volumes.length === 1 ? '' : 's'}
+          {#if storage.volumes.some((v) => v.sizeBytes !== null)}
+            · {formatBytes(storage.volumes.reduce((s, v) => s + (v.sizeBytes ?? 0), 0))} on disk
+          {/if}
+        </span>
+        <button class="btn-act" onclick={() => fetchStorage(true)} disabled={storageLoading}
+          title="Re-read the volume list and sizes from the worker">
+          {storageLoading ? 'Refreshing…' : 'Refresh'}
+        </button>
+      </div>
+
+      {#if storage.volumes.length === 0}
+        <div class="empty-row">
+          <p>This application uses no named volumes.</p>
+          {#if storage.otherMounts.length > 0}
+            <p class="small">
+              It does mount {storage.otherMounts.length} host path{storage.otherMounts.length === 1 ? '' : 's'}
+              or scratch director{storage.otherMounts.length === 1 ? 'y' : 'ies'}, listed below.
+            </p>
+          {/if}
+        </div>
+      {:else}
+        <div class="volumes-list">
+          {#each storage.volumes as vol (vol.name)}
+            {@const busy = volumeBusy[vol.name]}
+            <div class="volume-card" class:volume-orphan={!vol.declared}>
+              <div class="volume-head">
+                <div class="volume-title">
+                  <h3>{vol.label}</h3>
+                  <span class="origin-badge origin-{vol.origin}" title={ORIGIN_HINT[vol.origin]}>
+                    {vol.origin === 'app-scoped' ? 'this app' : vol.origin}
+                  </span>
+                  {#if !vol.declared}
+                    <span class="orphan-badge" title="Nothing in the current manifest mounts this volume. It is left over from a previous configuration and still holds data.">
+                      not declared
+                    </span>
+                  {/if}
+                  {#if !vol.present}
+                    <span class="pending-badge" title="Declared by the manifest, but not on the worker yet. Podman creates a volume the first time a container mounts it.">
+                      not created yet
+                    </span>
+                  {/if}
+                </div>
+                <div class="volume-actions">
+                  {#if vol.present}
+                    <!-- A plain link, not a fetch: the browser streams the tar
+                         straight to disk instead of the page buffering it. -->
+                    <a
+                      class="btn-act"
+                      href="/api/applications/{data.application.id}/volumes/{encodeURIComponent(vol.name)}/backup"
+                      download
+                      title="Download the whole volume as a tar archive"
+                    >Backup</a>
+                    <button class="btn-act" onclick={() => copyVolume(vol)} disabled={!!busy}
+                      title="Copy the volume on the worker, as a safety net before a risky change">
+                      {busy === 'Copy' ? 'Copying…' : 'Copy'}
+                    </button>
+                  {/if}
+                  <button class="btn-act" onclick={() => openRestore(vol)} disabled={!!busy}
+                    title="Upload a tar archive back into this volume">Restore…</button>
+                  {#if vol.present}
+                    <button class="btn-act btn-stop" onclick={() => deleteVolume(vol, false)} disabled={!!busy}
+                      title="Delete the volume and everything written to it">
+                      {busy?.includes('elete') ? 'Deleting…' : 'Delete'}
+                    </button>
+                  {/if}
+                </div>
+              </div>
+
+              <div class="volume-meta">
+                <div class="meta-item">
+                  <span class="meta-label">Size</span>
+                  <span class="meta-value">
+                    {volumeSize(vol)}
+                    {#if vol.sizeLimit}
+                      <span class="text-muted"> / {formatBytes(vol.sizeLimit)} intended</span>
+                    {/if}
+                  </span>
+                </div>
+                <div class="meta-item">
+                  <span class="meta-label">Podman name</span>
+                  <span class="meta-value mono">{vol.name}</span>
+                </div>
+                {#if vol.mountpoint}
+                  <div class="meta-item">
+                    <span class="meta-label">On the worker</span>
+                    <span class="meta-value mono">{vol.mountpoint}</span>
+                  </div>
+                {/if}
+              </div>
+
+              {#if vol.targets.length > 0}
+                <div class="mount-chips">
+                  {#each vol.targets as t}
+                    <span class="mount-chip" title="Mounted by {t.container} at {t.path} ({t.mode})">
+                      <span class="chip-svc">{t.container}</span>
+                      <span class="chip-path mono">{t.path}</span>
+                      <span class="chip-mode">{t.mode}</span>
+                    </span>
+                  {/each}
+                </div>
+              {/if}
+
+              {#if vol.copies.length > 0}
+                <div class="copies">
+                  <p class="copies-title">
+                    {vol.copies.length} cop{vol.copies.length === 1 ? 'y' : 'ies'} on this worker
+                  </p>
+                  {#each vol.copies as copy (copy.name)}
+                    {@const copyBusy = volumeBusy[copy.name]}
+                    <div class="copy-row">
+                      <span class="copy-when">{new Date(copy.at).toLocaleString()}</span>
+                      <span class="copy-size">{volumeSize(copy)}</span>
+                      <span class="copy-name mono">{copy.name}</span>
+                      <span class="copy-actions">
+                        <a
+                          class="btn-act btn-xs"
+                          href="/api/applications/{data.application.id}/volumes/{encodeURIComponent(copy.name)}/backup"
+                          download
+                          title="Download this copy as a tar archive"
+                        >Backup</a>
+                        <button class="btn-act btn-xs" onclick={() => restoreCopy(copy, vol)} disabled={!!copyBusy}
+                          title="Replace the volume's contents with this copy">
+                          {copyBusy === 'Restore' ? 'Restoring…' : 'Restore'}
+                        </button>
+                        <button class="btn-act btn-stop btn-xs" onclick={() => deleteVolume({ ...vol, name: copy.name, label: vol.label, copies: [] }, true)} disabled={!!copyBusy}
+                          title="Delete this copy">Delete</button>
+                      </span>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {/if}
+
+      <!-- Storage that is not a named volume. Listed so the tab does not read as
+           "no storage" for an application that host-mounts everything. Neither
+           can be sized, copied or deleted here: one is somebody else's
+           directory, the other is memory. -->
+      {#if storage.otherMounts.length > 0}
+        <div class="other-mounts">
+          <h4>Other mounts</h4>
+          <table class="mini-table">
+            <thead><tr><th>Type</th><th>Source</th><th>Mounted at</th><th>Container</th></tr></thead>
+            <tbody>
+              {#each storage.otherMounts as m}
+                <tr>
+                  <td>{m.kind === 'bind' ? 'host path' : 'tmpfs'}</td>
+                  <td class="mono">{m.source ?? '—'}</td>
+                  <td class="mono">{m.target}</td>
+                  <td>{m.container}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+          <p class="img-note">
+            A host path belongs to the worker's filesystem and a tmpfs is memory that is gone when
+            the container stops. Neither is backed up, copied or deleted from here.
+          </p>
+        </div>
+      {/if}
+    {/if}
+
   <!-- ── Configuration tab ──────────────────────────────────────────────── -->
   {:else if activeTab === 'config'}
     {#if data.containers.length === 0}
@@ -1680,6 +2090,65 @@
       {scaleBusy ? 'Scaling...' : 'Apply'}
     </button>
   </div>
+</Modal>
+
+<!-- ── Restore-from-archive modal ─────────────────────────────────────────
+     Separate from the confirmation dialog because it has to collect two things
+     first — the archive and the mode — and the consequence depends on both. -->
+<Modal
+  bind:open={showRestoreModal}
+  onclose={() => (restoreTarget = null)}
+  maxWidth="560px"
+  title="Restore a volume from an archive"
+>
+  {#if restoreTarget}
+    <p class="help-text">
+      Upload a tar archive produced by <strong>Backup</strong> on this volume. The application has
+      to be stopped: the restore is refused while any of its containers are running, because
+      writing over files a process has open can leave the data in a state that never existed.
+    </p>
+    <div class="form-group">
+      <span class="restore-target-label">Restoring into</span>
+      <code class="restore-target">{restoreTarget.name}</code>
+    </div>
+    <div class="form-group">
+      <label for="restoreFile">Archive (.tar)</label>
+      <input
+        id="restoreFile"
+        type="file"
+        accept=".tar,application/x-tar"
+        disabled={restoreUploading}
+        onchange={(e) => (restoreFile = (e.currentTarget as HTMLInputElement).files?.[0] ?? null)}
+      />
+      {#if restoreFile}
+        <p class="field-hint">{restoreFile.name} — {formatBytes(restoreFile.size)}</p>
+      {/if}
+    </div>
+    <div class="form-group">
+      <span class="restore-target-label">How</span>
+      <label class="radio-row">
+        <input type="radio" value="replace" bind:group={restoreMode} disabled={restoreUploading} />
+        <span>
+          <strong>Replace</strong> — empty the volume first, so the result is exactly the archive.
+        </span>
+      </label>
+      <label class="radio-row">
+        <input type="radio" value="merge" bind:group={restoreMode} disabled={restoreUploading} />
+        <span>
+          <strong>Merge</strong> — extract over what is there. Files the archive does not mention
+          stay put, which can mix old and new.
+        </span>
+      </label>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-secondary" onclick={() => (showRestoreModal = false)} disabled={restoreUploading}
+        title="Close without restoring">Cancel</button>
+      <button class="btn-primary" onclick={submitRestore} disabled={!restoreFile || restoreUploading}
+        title="Upload the archive and restore the volume">
+        {restoreUploading ? 'Restoring…' : 'Restore'}
+      </button>
+    </div>
+  {/if}
 </Modal>
 
 <style>
@@ -1986,6 +2455,119 @@
     background: var(--red-subtle); color: var(--red-text); border: 1px solid var(--red);
     border-radius: var(--radius-sm); padding: 8px 12px; font-size: 13px; margin-bottom: 12px;
   }
+
+  /* ── Storage tab ──────────────────────────────────────────────────── */
+  .storage-notice {
+    background: var(--bg-overlay); border: 1px solid var(--border-default);
+    border-left: 3px solid var(--yellow);
+    border-radius: var(--radius-sm); padding: 10px 14px; margin-bottom: 12px;
+    font-size: 13px; color: var(--text-secondary); line-height: 1.5;
+  }
+  .storage-notice-detail {
+    display: block; margin-top: 4px; font-family: var(--font-mono);
+    font-size: 11px; color: var(--text-muted); word-break: break-word;
+  }
+
+  .storage-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; margin-bottom: 12px;
+  }
+  .storage-summary { font-size: 13px; color: var(--text-secondary); }
+
+  .volumes-list { display: flex; flex-direction: column; gap: 12px; }
+  .volume-card {
+    background: var(--bg-raised); border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg); padding: 16px 18px;
+  }
+  /* A volume nothing declares any more still holds data and still costs disk;
+     dimmed rather than hidden, because it is the one most likely to be deleted. */
+  .volume-card.volume-orphan { border-style: dashed; }
+
+  .volume-head {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap;
+  }
+  .volume-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .volume-title h3 {
+    margin: 0; font-size: 15px; font-weight: 600; color: var(--text-primary);
+    font-family: var(--font-mono);
+  }
+  .volume-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+  .origin-badge, .orphan-badge, .pending-badge {
+    padding: 1px 7px; border-radius: 10px; font-size: 10px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.03em; white-space: nowrap;
+  }
+  .origin-registry { background: var(--accent-subtle); color: var(--accent); }
+  .origin-app-scoped { background: var(--bg-overlay); color: var(--text-muted); }
+  /* Not namespaced to this application, so deleting it may take another
+     application's data with it. Coloured as the warning it is. */
+  .origin-shared { background: var(--red-subtle); color: var(--red-text); }
+  .orphan-badge { background: var(--bg-overlay); color: var(--text-muted); }
+  .pending-badge { background: var(--bg-overlay); color: var(--text-muted); }
+
+  .volume-meta {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 12px; margin-top: 12px;
+  }
+
+  .mount-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+  .mount-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--bg-overlay); border: 1px solid var(--border-subtle);
+    border-radius: 12px; padding: 2px 10px; font-size: 11px;
+  }
+  .chip-svc { font-weight: 600; color: var(--text-secondary); }
+  .chip-path { color: var(--text-muted); }
+  .chip-mode { color: var(--text-muted); text-transform: uppercase; font-size: 9px; }
+
+  .copies {
+    margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border-subtle);
+  }
+  .copies-title {
+    margin: 0 0 8px; font-size: 10px; font-weight: 600; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .copy-row {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 6px 0; font-size: 12px; color: var(--text-secondary);
+  }
+  .copy-when { min-width: 150px; }
+  .copy-size { min-width: 70px; color: var(--text-muted); }
+  .copy-name {
+    flex: 1; min-width: 180px; color: var(--text-muted);
+    font-size: 11px; word-break: break-all;
+  }
+  .copy-actions { display: flex; gap: 4px; }
+  .btn-xs { font-size: 11px; padding: 2px 8px; }
+
+  .other-mounts {
+    margin-top: 20px; background: var(--bg-raised);
+    border: 1px solid var(--border-subtle); border-radius: var(--radius-lg);
+    padding: 14px 18px;
+  }
+  .other-mounts h4 {
+    margin: 0 0 10px; font-size: 11px; font-weight: 600; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .other-mounts table { width: 100%; border-collapse: collapse; font-size: 12px; }
+
+  /* ── Restore modal ─────────────────────────────────────────────────── */
+  .restore-target-label {
+    font-size: 11px; font-weight: 600; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px;
+  }
+  .restore-target {
+    font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary);
+    background: var(--bg-overlay); border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm); padding: 6px 10px; word-break: break-all;
+  }
+  .radio-row {
+    display: flex; align-items: flex-start; gap: 8px; padding: 5px 0;
+    font-size: 12px; color: var(--text-secondary); line-height: 1.45; cursor: pointer;
+  }
+  .radio-row input { margin-top: 2px; flex-shrink: 0; }
+  .field-hint { margin: 6px 0 0; font-size: 12px; color: var(--text-muted); }
 
   /* ── Deployments tab ──────────────────────────────────────────────── */
   .deployments-list {

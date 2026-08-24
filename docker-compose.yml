@@ -43,6 +43,13 @@ services:
       # Comma-separated host directories applications may bind-mount.
       # Empty (default) disables host path mounts; named volumes still work.
       - ALLOWED_HOST_MOUNT_PREFIXES=${ALLOWED_HOST_MOUNT_PREFIXES:-}
+      # Image for the throwaway container that backs up, restores and copies a
+      # volume. Needs a shell and `cp`; pulled on the worker on first use.
+      - VOLUME_TOOL_IMAGE=${VOLUME_TOOL_IMAGE:-docker.io/library/busybox:1.36}
+      # Caps a volume restore upload, which sends the whole archive in one
+      # request. adapter-node's own default is 512K, which rejects any real
+      # restore before the route runs.
+      - BODY_SIZE_LIMIT=${BODY_SIZE_LIMIT:-4G}
     volumes:
       - rudder-data:/app/data
     networks:

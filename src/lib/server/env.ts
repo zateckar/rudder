@@ -93,6 +93,16 @@ const envSchema = z.object({
    */
   ALLOWED_HOST_MOUNT_PREFIXES: z.string().default(''),
   /**
+   * Image for the throwaway container that backs up, restores and copies a
+   * volume's contents.
+   *
+   * Podman exposes no way to read a volume except through a container that
+   * mounts it, so these operations need *some* image on the worker. It has to
+   * provide a shell and `cp` — the copy path runs `cp -a` — and should be as
+   * small as possible; it is pulled on first use. See src/lib/server/volume-ops.ts.
+   */
+  VOLUME_TOOL_IMAGE: z.string().min(1).default('docker.io/library/busybox:1.36'),
+  /**
    * Allow talking to a worker's Podman API without mTLS, *and* stop verifying the
    * certificate the worker presents.  The API is root-equivalent on the worker
    * and an unverified server certificate means anything on the network path can

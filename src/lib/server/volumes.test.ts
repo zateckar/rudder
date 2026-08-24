@@ -1,10 +1,16 @@
 import { describe, expect, test } from 'bun:test';
 import {
   composeVolumeName,
+  isAppScopedVolume,
+  isCopyOfApp,
   isHostPathSource,
+  parseVolumeCopyName,
   registryVolumeName,
   singleMountIntents,
+  stripAppPrefix,
   volumeBaseName,
+  volumeCopyBase,
+  volumeCopyName,
 } from './volumes';
 
 const APP_ID = 'abcdef12-3456-7890-abcd-ef1234567890';
@@ -35,6 +41,87 @@ describe('volumeBaseName', () => {
 
   test('never returns an empty name', () => {
     expect(volumeBaseName('./', '/')).toBe('vol');
+  });
+});
+
+describe('copy names', () => {
+  const OTHER_APP = '0badcafe-1111-2222-3333-444455556666';
+
+  test('a copy is named after its source, its app and the moment it was taken', () => {
+    expect(volumeCopyName(APP_ID, 'rudder-abcdef12-db-data', 1_700_000_000_000)).toBe(
+      'rudder-copy-abcdef12-db-data-1700000000000',
+    );
+  });
+
+  test('the application prefix is stripped before naming a copy', () => {
+    // Otherwise the prefix appears twice and the name says nothing extra.
+    expect(volumeCopyBase(APP_ID, 'rudder-abcdef12-pgdata')).toBe('pgdata');
+    // A bare compose volume has no prefix to strip.
+    expect(volumeCopyBase(APP_ID, 'pgdata')).toBe('pgdata');
+  });
+
+  test('a copy round-trips through its own name', () => {
+    const name = volumeCopyName(APP_ID, 'rudder-abcdef12-db-data', 1_700_000_000_000);
+    expect(parseVolumeCopyName(name)).toEqual({
+      appId8: 'abcdef12',
+      base: 'db-data',
+      at: 1_700_000_000_000,
+    });
+  });
+
+  test('the base is matched lazily, so the stamp keeps all of its digits', () => {
+    // Greedily, a base of `db-data` and a stamp of 1700000000000 parse as a base
+    // of `db-data-170000000000` and a stamp of 0 — and the copy then appears to
+    // have been taken in 1970.
+    expect(parseVolumeCopyName('rudder-copy-abcdef12-db-data-1700000000000')?.at).toBe(
+      1_700_000_000_000,
+    );
+    // A base that itself ends in digits must not lose them either.
+    expect(parseVolumeCopyName('rudder-copy-abcdef12-data2-1700000000000')).toEqual({
+      appId8: 'abcdef12',
+      base: 'data2',
+      at: 1_700_000_000_000,
+    });
+    // Nor one containing a dash-digit segment.
+    expect(parseVolumeCopyName('rudder-copy-abcdef12-v-1-1700000000000')).toEqual({
+      appId8: 'abcdef12',
+      base: 'v-1',
+      at: 1_700_000_000_000,
+    });
+  });
+
+  test('a copy is never mistaken for a volume an application runs on', () => {
+    // The load-bearing property: `rudder-copy-` cannot collide with
+    // `rudder-<app8>-`, because an application id is UUID hex and `o`, `p` and
+    // `y` are not hex digits. Without this, a copy taken last week reads as a
+    // stray volume to be cleaned away.
+    const copy = volumeCopyName(APP_ID, 'rudder-abcdef12-db-data', 1_700_000_000_000);
+    expect(isAppScopedVolume(copy, APP_ID)).toBe(false);
+    expect(parseVolumeCopyName('rudder-abcdef12-db-data')).toBeNull();
+  });
+
+  test('a copy belongs to exactly one application', () => {
+    const copy = volumeCopyName(APP_ID, 'rudder-abcdef12-db-data', 1);
+    expect(isCopyOfApp(copy, APP_ID)).toBe(true);
+    expect(isCopyOfApp(copy, OTHER_APP)).toBe(false);
+  });
+
+  test('anything that is not a copy name parses as null', () => {
+    expect(parseVolumeCopyName('pgdata')).toBeNull();
+    expect(parseVolumeCopyName('rudder-copy-')).toBeNull();
+    // Eight hex digits exactly; a shorter id would make the split ambiguous.
+    expect(parseVolumeCopyName('rudder-copy-abc-data-1')).toBeNull();
+    // No stamp.
+    expect(parseVolumeCopyName('rudder-copy-abcdef12-data')).toBeNull();
+  });
+});
+
+describe('stripAppPrefix', () => {
+  test('removes the prefix this application owns, and nothing else', () => {
+    expect(stripAppPrefix(APP_ID, 'rudder-abcdef12-pgdata')).toBe('pgdata');
+    // Another application's volume keeps its name: it is not ours to relabel.
+    expect(stripAppPrefix(APP_ID, 'rudder-99999999-pgdata')).toBe('rudder-99999999-pgdata');
+    expect(stripAppPrefix(APP_ID, 'pgdata')).toBe('pgdata');
   });
 });
 

@@ -13,6 +13,7 @@ Container orchestration platform built with SvelteKit, Drizzle ORM, and SQLite. 
 - **Health checks** -- configurable container health checks with status display
 - **Image management** -- list, pull, and remove images on workers
 - **Network management** -- create, list, and delete Podman networks on workers
+- **Volume management** -- every application has a Storage tab listing the volumes it actually uses, whatever it was deployed from, with real sizes and controls to back up, restore, copy and delete them (see [Storage](#storage))
 
 ### Deployment & CI/CD
 - **Blue/green deploys** -- on workers using control-plane routing, the new containers are created and verified alongside the running ones and traffic only moves once they are up; a failed deploy leaves the previous version serving (see [Zero-downtime deploys](#zero-downtime-deploys))
@@ -204,6 +205,8 @@ The GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatical
 | `SESSION_MAX_AGE` | No | `604800` (7 days) | Session lifetime in seconds. |
 | `DATABASE_URL` | No | `./data/rudder.db` | SQLite database path. Accepts a bare path or `file:` URL; generated secrets and `known_hosts` are stored alongside it. |
 | `ALLOWED_HOST_MOUNT_PREFIXES` | No | — | Comma-separated host directories applications may bind-mount. Empty disables host mounts. `/proc`, `/etc`, `/dev`, `/usr` and similar are always denied. |
+| `VOLUME_TOOL_IMAGE` | No | `docker.io/library/busybox:1.36` | Image for the throwaway container that backs up, restores and copies a volume. Podman exposes no way to read a volume except through a container that mounts it, so these operations need one; it must provide a shell and `cp`, and is pulled on the worker on first use. |
+| `BODY_SIZE_LIMIT` | No | `512K` (adapter-node's own default) | Largest request body accepted. This is what caps a **volume restore**, which uploads the whole archive in one request — at the default, any real restore is rejected before the route runs. Accepts `K`/`M`/`G` or `Infinity`. If you are behind a proxy, raise its limit too (`nginx.ingress.kubernetes.io/proxy-body-size`), or the proxy rejects the upload first with a 413 that says nothing about volumes. |
 | `ALLOW_INSECURE_PODMAN` | No | `false` | Permit talking to a worker's Podman API without mTLS, **and** skip verification of the worker's TLS certificate. Development only — with this set, anything on the network path can impersonate a worker and drive its root-equivalent API. |
 | `WORKER_REGISTRATION_SECRET` | No | — | Enables worker self-registration (`POST /api/workers/register`). Shared by every worker, so it only switches the endpoint on: the request must *also* carry the worker's own `configToken` as `workerToken`, which is what identifies which worker is calling. |
 | `OIDC_GOOGLE_CLIENT_ID` | No | — | Google OAuth client ID. |
@@ -408,6 +411,89 @@ own Traefik router serves are all read off the container and carried over.
 
 ---
 
+## Storage
+
+Every deployment format produces storage, and it is all listed on an
+application's **Storage** tab — with its real size on the worker, and controls to
+back it up, copy it, restore it and delete it.
+
+### Where a volume's name comes from
+
+Three rules, all in `src/lib/server/volumes.ts`, which is the only place any of
+them is written down:
+
+| Written as | Becomes | Scope |
+| --- | --- | --- |
+| A registry volume referenced by a single-container app | `rudder-<app8>-<name>` | The application |
+| A compose `./data:/var/lib/x` (relative or `~`) | `rudder-<app8>-<service>-<base>` | One service of the application |
+| A compose `pgdata:/var/lib/x` (a bare name) | `pgdata`, **exactly as written** | Nothing — see below |
+| A copy, taken on request | `rudder-copy-<app8>-<base>-<epochMs>` | The application; nothing runs on it |
+
+The first two may never change. A volume's name is the only thing tying a running
+application to the data it wrote last week, so renaming one leaves Podman
+creating a fresh empty volume while the old data sits on the worker under a name
+nothing refers to.
+
+**A bare compose volume name is not namespaced.** `pgdata:/data` creates a volume
+called `pgdata` on the worker, and any other application naming `pgdata` gets the
+same data — which is sometimes what a compose file means and is usually a
+surprise. Rudder marks these `shared` on the Storage tab and refuses to delete
+one while another application on the same worker declares it, naming that
+application.
+
+A Kubernetes manifest produces no named volumes at all: `emptyDir` becomes a
+tmpfs, `hostPath` a bind mount, and `configMap`/`secret` become files. See
+[what a manifest does and does not get](#what-a-manifest-does-and-does-not-get).
+
+### Backup, restore and copy
+
+Podman has no export or import for a volume — the API exposes nothing that reads
+one. Each of these therefore runs a throwaway container on the worker with the
+volume mounted (`VOLUME_TOOL_IMAGE`), which is the same mechanism behind
+`docker cp`:
+
+- **Backup** streams a `.tar` of the volume to your browser. Nothing is buffered
+  on the control plane, and the application does not need to be stopped — a live
+  backup carries the usual caveat that it is a snapshot of whatever was on disk.
+- **Restore** uploads one back. `replace` empties the volume first, so the result
+  is exactly the archive; `merge` extracts over what is there, leaving files the
+  archive does not mention where they are. Merge is for dropping a config
+  directory back without touching the data beside it, and is not a restore.
+- **Copy** duplicates the volume on the worker as `rudder-copy-…`. Nothing leaves
+  the machine, so it is the cheap safety net before a risky change. Copies are
+  listed under the volume they came from, and can be downloaded, restored or
+  deleted.
+
+Two guards, both refusals rather than warnings:
+
+- **Restore requires the application to be stopped.** Writing over files a
+  process has open is how a restore produces a corrupt database rather than the
+  state that was backed up. The refusal names the containers to stop.
+- **Restore and copy hold the worker's deploy lock**, so a deploy cannot recreate
+  containers onto the volume halfway through.
+
+`BODY_SIZE_LIMIT` caps a restore upload and defaults to 512 KB — see
+[Environment Variables](#environment-variables). Raise it, and your proxy's limit
+with it, before relying on restore.
+
+### Deleting a volume
+
+Deleting from the Storage tab deletes the volume and its data. There is no undo
+and no automatic backup, so take a copy or download one first.
+
+The `/volumes` page manages the *registry* — the declarations single-container
+applications reference — and offers both outcomes separately: **Remove entry**
+leaves the data on the worker (reachable from the application's Storage tab), and
+**Delete data** removes the volume as well. A registered volume is namespaced per
+application, so one entry referenced by two applications is two volumes on disk
+and both are removed.
+
+A volume the current manifest no longer mounts is still listed, marked
+*not declared*. It still holds data and still costs disk; before this it appeared
+nowhere at all.
+
+---
+
 ## kubectl Integration
 
 Rudder exposes a Kubernetes-compatible API at `/k8s/` that lets you manage deployments with standard `kubectl` commands.
@@ -461,6 +547,7 @@ to be discovered:
 | `envFrom`, `configMapKeyRef`, `secretKeyRef` | Resolved against ConfigMaps and Secrets **declared in the same manifest**. There is no cluster to look anything else up in, so a reference to an object that is not there is refused unless it is marked `optional`. |
 | `hostPath` | Allowed only under `ALLOWED_HOST_MOUNT_PREFIXES`, and refused by name otherwise. |
 | `persistentVolumeClaim`, `nfs`, `projected`, `downwardAPI`, `csi`, `ephemeral` | Refused, naming the kind. |
+| Persistent storage generally | There is none from a Kubernetes manifest: the kinds above are the only ones that ask for it, and they are refused. A Kubernetes application therefore has no named volumes to back up — its Storage tab lists only its binds and tmpfs mounts. Use `hostPath` under an allowed prefix, or deploy that part as a compose service. |
 | `fieldRef`, `resourceFieldRef` | Refused. They describe a Pod that does not exist here. |
 | `subPath` on a volume mount | Refused. |
 | `command` / `args` | Mapped onto the container's entrypoint and command — the same split OCI makes, under swapped names. |

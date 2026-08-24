@@ -83,6 +83,8 @@ const OPERATION_BY_SEGMENT: Record<string, string | null> = {
   webhook: 'CONFIGURE_WEBHOOK',
   trigger: 'TRIGGER',
   'traefik-config': 'CONFIGURE_TRAEFIK',
+  restore: 'RESTORE_VOLUME',
+  copy: 'COPY_VOLUME',
 };
 
 /** The first path segment of an `/api/` route mapped to what it operates on. */
@@ -176,7 +178,15 @@ export function classifyRequest(method: string, pathname: string, search = ''): 
     return { action: verbForMethod(method), resourceType: 'unknown', resourceId: null };
   }
 
-  const resourceType = (isApi ? RESOURCE_BY_API_ROOT : RESOURCE_BY_PAGE_ROOT)[route[0]] ?? 'unknown';
+  let resourceType = (isApi ? RESOURCE_BY_API_ROOT : RESOURCE_BY_PAGE_ROOT)[route[0]] ?? 'unknown';
+
+  // Storage under an application is *about the volume*, not the application:
+  // `DELETE /api/applications/:id/volumes/:name` destroys data and nothing about
+  // the application itself changes. Filed as `volume` so it sits with the rest
+  // of the storage trail rather than among that application's deploys.
+  if (isApi && route[0] === 'applications' && route[2] === 'volumes') {
+    resourceType = 'volume';
+  }
 
   // The last id-shaped segment is the thing being acted on: `/api/workers/:id/
   // prune` is about the worker, `/api/containers/:id/exec` about the container.

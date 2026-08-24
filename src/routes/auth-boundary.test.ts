@@ -585,7 +585,15 @@ describe('cross-team resource access', () => {
     });
 
     const { GET, DELETE } = await import('./api/volumes/[id]/+server.ts');
-    const event = { params: { id: ownVolumeId }, cookies: member.cookies, locals: member.locals } as any;
+    // A `url` because DELETE reads `?data=1` to decide whether to remove the
+    // Podman volume as well as the row. Absent, the default applies: the row
+    // goes and nothing on any worker is touched — which is what this asserts.
+    const event = {
+      params: { id: ownVolumeId },
+      url: new URL(`http://localhost/api/volumes/${ownVolumeId}`),
+      cookies: member.cookies,
+      locals: member.locals,
+    } as any;
 
     expect((await GET(event)).status).toBe(200);
     expect((await DELETE(event)).status).toBe(200);
@@ -601,6 +609,70 @@ describe('cross-team resource access', () => {
     expect((await DELETE(event)).status).toBe(404);
     // Still there, and an admin can still reach it.
     expect((await GET({ params: { id: orphanVolumeId }, cookies: admin.cookies, locals: admin.locals } as any)).status).toBe(200);
+  });
+
+  /**
+   * The application storage surface.
+   *
+   * Every route under `/api/applications/:id/volumes` takes a volume *name* out
+   * of the URL, and that name reaches Podman. A route that resolved it without
+   * first establishing that this application uses it would be a free hand on
+   * every volume on the worker — another team's database included, on a shared
+   * one. Both halves are asserted: the application must be reachable, and so
+   * must the volume.
+   */
+  describe('application volumes', () => {
+    const volumeEvent = (appId: string, name: string, actor: Actor, search = '') =>
+      ({
+        params: { id: appId, name },
+        url: new URL(
+          `http://localhost/api/applications/${appId}/volumes/${encodeURIComponent(name)}${search}`,
+        ),
+        cookies: actor.cookies,
+        locals: actor.locals,
+        request: new Request('http://localhost/x', { method: 'POST' }),
+      }) as any;
+
+    test('a member cannot list another team\'s application storage', async () => {
+      const { GET } = await import('./api/applications/[id]/volumes/+server.ts');
+      const response = await GET({
+        params: { id: otherAppId },
+        url: new URL(`http://localhost/api/applications/${otherAppId}/volumes`),
+        cookies: member.cookies,
+        locals: member.locals,
+      } as any);
+
+      expect(response.status).toBe(404);
+    });
+
+    test('a member cannot delete, back up, restore or copy another team\'s volume', async () => {
+      // 404 on the application, before the volume name is looked at — so the
+      // route is not an oracle for which volumes another team has either.
+      const name = 'rudder-deadbeef-db-data';
+      const [remove, backup, restore, copy] = await Promise.all([
+        import('./api/applications/[id]/volumes/[name]/+server.ts'),
+        import('./api/applications/[id]/volumes/[name]/backup/+server.ts'),
+        import('./api/applications/[id]/volumes/[name]/restore/+server.ts'),
+        import('./api/applications/[id]/volumes/[name]/copy/+server.ts'),
+      ]);
+
+      expect((await remove.DELETE(volumeEvent(otherAppId, name, member))).status).toBe(404);
+      expect((await remove.GET(volumeEvent(otherAppId, name, member))).status).toBe(404);
+      expect((await backup.GET(volumeEvent(otherAppId, name, member))).status).toBe(404);
+      expect((await restore.POST(volumeEvent(otherAppId, name, member))).status).toBe(404);
+      expect((await copy.POST(volumeEvent(otherAppId, name, member))).status).toBe(404);
+      expect((await copy.PUT(volumeEvent(otherAppId, name, member))).status).toBe(404);
+    });
+
+    test('an application with no worker cannot have its volumes acted on', async () => {
+      // `otherAppId` has no `workerId`, so there is nowhere for a volume to be.
+      // Refused with its own message rather than a Podman error three calls in.
+      const { DELETE } = await import('./api/applications/[id]/volumes/[name]/+server.ts');
+      const response = await DELETE(volumeEvent(otherAppId, 'anything', admin));
+
+      expect(response.status).toBe(409);
+      expect((await response.json()).error).toContain('not assigned to a worker');
+    });
   });
 
   test('a volume cannot be created without an owning team', async () => {
