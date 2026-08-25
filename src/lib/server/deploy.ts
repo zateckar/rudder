@@ -488,36 +488,98 @@ async function waitForConfigConvergence(workerId: string, since: Date): Promise<
 /**
  * Stop and remove containers, and delete their rows. Releases their ports.
  *
- * The row is deleted only once Podman confirms the container is gone. Deleting
- * it regardless meant a removal that failed — an unreachable worker mid-cutover
- * — took the port out of Rudder's ledger while the container was still bound to
+ * The row is deleted only once the container is confirmed gone. Deleting it
+ * regardless meant a removal that failed — an unreachable worker mid-cutover —
+ * took the port out of Rudder's ledger while the container was still bound to
  * it on the host. `reservedPortsForWorker` reads those rows, so the next deploy
  * would be handed the same port and fail to bind, naming a port no tracked
  * container held. Keeping the row is the safe direction to be wrong in: the
  * reconciler reports it, and the next sweep tries the removal again.
  *
- * Returns how many were actually reaped.
+ * **"Already gone" is confirmation, not failure.** A container Podman does not
+ * have is the goal state, reached by some other route — a manual `podman rm`, a
+ * prune, a host that came back without its containers, or this function itself
+ * having removed the container and then failed to delete the row. Treating it as
+ * an error was a loop that could never terminate: every sweep asked for a
+ * container that was not there, kept the row, and tried again on the next cycle.
+ * The row held its host port out of the allocator permanently, was offered as a
+ * fast-rollback target that could not work, and was invisible to the reconciler
+ * because draining rows were excluded from the diff. The only evidence was a
+ * warning on stdout. `ensureContainerRemoved` is where that judgement now lives,
+ * and it is careful about *which* 404 it accepts.
+ *
+ * Returns the Podman ids of the containers that are now gone, so a caller
+ * holding a container listing from before the sweep can drop them from it.
  */
 async function reapContainers(
   client: PodmanRestClient,
   rows: Array<typeof containers.$inferSelect>,
-): Promise<number> {
-  let reaped = 0;
+): Promise<string[]> {
+  const reaped: string[] = [];
   for (const row of rows) {
     try {
-      await client.removeContainer(row.containerId, true);
+      await client.ensureContainerRemoved(row.containerId, true);
     } catch (e: any) {
+      // One exception to "a failed removal keeps the row": a row the fleet sweep
+      // has already recorded as `missing`. That word is only ever written after
+      // a *successful* full container listing that did not contain this id — a
+      // listing that fails sets `observedIsReal` false and writes nothing — so
+      // it is better evidence than whatever this one delete just returned.
+      //
+      // Without this, a Podman whose 404 wording `isMissingContainer` does not
+      // recognise puts the row straight back into the trap: unremovable by the
+      // sweep, and unremovable by the operator, because the manual endpoint
+      // fails the same way.
+      if (!isAbsent(row.status)) {
+        await recordReapFailure(row, e);
+        continue;
+      }
       console.warn(
-        `[deploy] Could not remove superseded container ${row.name}:`,
-        e.message,
-        '— keeping its row so the host port stays reserved.',
+        `[deploy] Removing the record for ${row.name}, which the last container listing ` +
+          `did not contain, despite the delete failing:`,
+        e?.message ?? e,
       );
-      continue;
     }
+    // Outside the try above on purpose: if this throws, the container is gone
+    // and the row survives — exactly the state the 404 path now repairs, so the
+    // next sweep finishes the job instead of wedging on it.
     await db.delete(containers).where(eq(containers.id, row.id));
-    reaped += 1;
+    reaped.push(row.containerId);
   }
   return reaped;
+}
+
+/**
+ * Record that a reap attempt failed, so an unbounded retry becomes reportable.
+ *
+ * The counter is what `REAP_ATTEMPTS_BEFORE_REPORTING` compares against, and the
+ * message is what the reconciler shows the operator — without it, the only
+ * account of why a row will not go away is a `console.warn` nobody is reading.
+ *
+ * Deliberately does not touch `updatedAt`: that column is the retention clock
+ * `retentionExpired` measures from, and bumping it here would push the deadline
+ * out by one interval on every failure, so a row that kept failing would never
+ * be judged expired either.
+ */
+async function recordReapFailure(
+  row: typeof containers.$inferSelect,
+  error: any,
+): Promise<void> {
+  const message = error?.message ?? String(error);
+  const attempts = (row.reapAttempts ?? 0) + 1;
+  console.warn(
+    `[deploy] Could not remove superseded container ${row.name} (attempt ${attempts}):`,
+    message,
+    '— keeping its row so the host port stays reserved.',
+  );
+  try {
+    await db
+      .update(containers)
+      .set({ reapAttempts: attempts, reapError: message })
+      .where(eq(containers.id, row.id));
+  } catch (e: any) {
+    console.warn(`[deploy] Could not record the reap failure for ${row.name}:`, e?.message ?? e);
+  }
 }
 
 /**
@@ -525,8 +587,18 @@ async function reapContainers(
  *
  * Called at the start of each deploy and from the metrics loop, so a retained
  * generation is cleaned up whether or not the application is deployed again.
+ *
+ * Reports the Podman ids it removed as well as the count. The metrics loop lists
+ * every worker's containers *before* calling this and then hands that listing to
+ * the reconciler, so without the ids a container this sweep had just removed was
+ * still in the reconciler's observed set with its row already deleted — which is
+ * precisely the shape of an orphan. Every successful reap raised a spurious
+ * orphan finding, and a notification with it.
  */
-export async function sweepExpiredGenerations(): Promise<number> {
+export async function sweepExpiredGenerations(): Promise<{
+  reaped: number;
+  removedContainerIds: string[];
+}> {
   const draining = await db
     .select({ container: containers, app: applications, worker: workers })
     .from(containers)
@@ -536,7 +608,7 @@ export async function sweepExpiredGenerations(): Promise<number> {
     .all();
 
   const now = new Date();
-  let reaped = 0;
+  const removedContainerIds: string[] = [];
   const byWorker = new Map<string, { worker: typeof workers.$inferSelect; rows: Array<typeof containers.$inferSelect> }>();
 
   for (const row of draining) {
@@ -550,16 +622,16 @@ export async function sweepExpiredGenerations(): Promise<number> {
     let client: PodmanRestClient | null = null;
     try {
       client = getRestPodmanClient(worker);
-      // Count what was actually removed, not what was attempted: a container
+      // Collect what was actually removed, not what was attempted: a container
       // whose removal failed keeps its row and will be retried next sweep.
-      reaped += await reapContainers(client, rows);
+      removedContainerIds.push(...(await reapContainers(client, rows)));
     } catch (e: any) {
       console.warn(`[deploy] Sweep failed for worker ${worker.name}:`, e.message);
     } finally {
       client?.destroy();
     }
   }
-  return reaped;
+  return { reaped: removedContainerIds.length, removedContainerIds };
 }
 
 /** Parse CPU string like "0.5", "2" -> cpuQuota (period=100000) */
@@ -1183,7 +1255,13 @@ async function deployApplication(
                 await podmanClient.stopContainer(old.containerId);
                 await db
                   .update(containers)
-                  .set({ status: 'stopped', updatedAt: new Date() })
+                  // Podman's word for this, not ours. Writing `stopped` here put
+                  // the row permanently at odds with what the fleet sweep reads
+                  // back from `/containers/json`, so the very next cycle
+                  // "corrected" the status and stamped `updatedAt` — which is the
+                  // retention clock, so every retained generation silently got an
+                  // extra interval of life.
+                  .set({ status: 'exited', updatedAt: new Date() })
                   .where(eq(containers.id, old.id));
               } catch (e: any) {
                 console.warn(`[deploy] Could not stop retained container ${old.name}:`, e.message);
@@ -1263,11 +1341,41 @@ async function deployApplication(
  */
 export async function fastRollbackTargets(applicationId: string): Promise<string[]> {
   const rows = await db
-    .select({ deploymentId: containers.deploymentId })
+    .select({ deploymentId: containers.deploymentId, status: containers.status })
     .from(containers)
     .where(and(eq(containers.applicationId, applicationId), eq(containers.state, 'draining')))
     .all();
-  return [...new Set(rows.map((r) => r.deploymentId).filter((d): d is string => !!d))];
+
+  // A row is not a container. The fleet sweep writes `missing` when Podman has
+  // no container with that id, and a row in that state used to be offered here
+  // regardless — so the history showed "rolls back in seconds" for a generation
+  // that would 404 on the first `startContainer`. A false promise is worst at
+  // exactly the moment it gets called in.
+  //
+  // Rejected per deployment rather than per row: a generation is only rollable
+  // if *all* of its containers are still there. Half a generation restarting is
+  // not a rollback.
+  const absent = new Set(
+    rows.filter((r) => isAbsent(r.status)).map((r) => r.deploymentId),
+  );
+  return [
+    ...new Set(
+      rows
+        .map((r) => r.deploymentId)
+        .filter((d): d is string => !!d && !absent.has(d)),
+    ),
+  ];
+}
+
+/**
+ * Whether a row's recorded status says its container is not on the worker.
+ *
+ * The string is written by the fleet sweep in `metrics.ts`, which uses this word
+ * for "Podman reported nothing with this id". One cycle stale at worst, which is
+ * the same freshness everything else on the application page is read at.
+ */
+export function isAbsent(status: string | null | undefined): boolean {
+  return status === 'missing';
 }
 
 /**
@@ -1335,6 +1443,22 @@ async function rollbackWithinLock(
     return { success: false, message: 'That version is no longer on the worker', statusCode: 409 };
   }
 
+  // The rows exist; the containers may not. Checked before anything is started
+  // so a partial rollback is not attempted — restarting three containers of a
+  // four-container generation leaves the application in a state neither version
+  // describes, and the failure path below would then have to unpick it.
+  const absent = retained.filter((r) => isAbsent(r.status));
+  if (absent.length > 0) {
+    return {
+      success: false,
+      message:
+        `That version cannot be restarted: ${absent.length} of its ${retained.length} container(s) ` +
+        `are no longer on the worker (${absent.map((r) => r.name).join(', ')}). ` +
+        `Deploy that configuration again instead.`,
+      statusCode: 409,
+    };
+  }
+
   const current = await db
     .select()
     .from(containers)
@@ -1382,7 +1506,8 @@ async function rollbackWithClient(
         await podmanClient.stopContainer(row.containerId);
         await db
           .update(containers)
-          .set({ status: 'stopped', updatedAt: new Date() })
+          // Podman's vocabulary — see the retention path in the deploy above.
+          .set({ status: 'exited', updatedAt: new Date() })
           .where(eq(containers.id, row.rowId));
       } catch { /* best-effort */ }
     }
@@ -1428,7 +1553,8 @@ async function rollbackWithClient(
             await podmanClient.stopContainer(row.containerId);
             await db
               .update(containers)
-              .set({ status: 'stopped', updatedAt: new Date() })
+              // Podman's vocabulary — see the retention path in the deploy above.
+              .set({ status: 'exited', updatedAt: new Date() })
               .where(eq(containers.id, row.id));
           } catch (e: any) {
             console.warn(`[rollback] Could not stop ${row.name}:`, e.message);

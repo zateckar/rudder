@@ -134,6 +134,8 @@ sqlite.run(`
     state TEXT NOT NULL DEFAULT 'active',
     deployment_id TEXT,
     spec_hash TEXT,
+    reap_attempts INTEGER NOT NULL DEFAULT 0,
+    reap_error TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   );
@@ -528,6 +530,8 @@ for (const col of [
   `ALTER TABLE containers ADD COLUMN state TEXT NOT NULL DEFAULT 'active';`,
   `ALTER TABLE containers ADD COLUMN deployment_id TEXT;`,
   `ALTER TABLE containers ADD COLUMN spec_hash TEXT;`,
+  `ALTER TABLE containers ADD COLUMN reap_attempts INTEGER NOT NULL DEFAULT 0;`,
+  `ALTER TABLE containers ADD COLUMN reap_error TEXT;`,
   `ALTER TABLE applications ADD COLUMN health_timeout_seconds INTEGER;`,
   `ALTER TABLE applications ADD COLUMN retain_previous_minutes INTEGER NOT NULL DEFAULT 0;`,
   `ALTER TABLE workers ADD COLUMN config_fetch_status INTEGER;`,

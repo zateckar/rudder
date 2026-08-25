@@ -559,8 +559,22 @@ async function collectAll(): Promise<void> {
   // sweep lives rather than in a scheduler of its own.
   try {
     const { sweepExpiredGenerations } = await import('./deploy');
-    const reaped = await sweepExpiredGenerations();
-    if (reaped > 0) console.log(`[metrics] Reaped ${reaped} retained container(s)`);
+    const { reaped, removedContainerIds } = await sweepExpiredGenerations();
+    if (reaped > 0) {
+      console.log(`[metrics] Reaped ${reaped} retained container(s)`);
+      // `observedByWorker` was listed before the sweep ran, so it still contains
+      // the containers the sweep has just removed — whose rows are now gone.
+      // Handing that to the reconciler reported each one as an orphan: managed
+      // by Rudder, no row, therefore unaccounted for. Dropping them keeps the
+      // snapshot consistent with the database it is about to be compared to.
+      const removed = new Set(removedContainerIds);
+      observedByWorker = new Map(
+        [...observedByWorker].map(([workerId, list]) => [
+          workerId,
+          list.filter((c) => !removed.has(c.id)),
+        ]),
+      );
+    }
   } catch (e) {
     console.error('[metrics] Generation sweep failed:', (e as any).message || e);
   }

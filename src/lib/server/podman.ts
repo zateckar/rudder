@@ -77,6 +77,34 @@ export class PodmanApiError extends Error {
     return error instanceof PodmanApiError && error.status === status;
   }
 
+  /**
+   * Whether this error says *the container does not exist*, as opposed to
+   * anything else that produces a 404.
+   *
+   * The distinction is the whole point, and `removeVolume` is the cautionary
+   * tale: it read a bare 404 as "already gone", which is right for a volume that
+   * is not there and catastrophically wrong for a *route* that is not there —
+   * Podman serves its libpod volume API only under a version prefix, so every
+   * delete returned success and deleted nothing. See `podman-volumes.test.ts`.
+   *
+   * `removeContainer` is far less exposed to that — the compat container routes
+   * are the same family every other call in the system uses, so a missing route
+   * would break creating and starting containers too, loudly — but the cost of
+   * being wrong here is a row deleted while its container is still running and
+   * still holding the host port the row was reserving. So the status is not
+   * enough on its own: Podman names the container in the body when the container
+   * is what is missing, and answers an unknown route with a bare "page not
+   * found" that mentions no container at all.
+   *
+   * Anything that does not clearly say the container is gone is treated as a
+   * real failure — which is the direction that merely retries and now reports,
+   * rather than the one that loses track of a running container.
+   */
+  isMissingContainer(): boolean {
+    if (this.status !== 404) return false;
+    return /no such container/i.test(this.detail);
+  }
+
   /** Build one from a raw response body, digging out the human-readable part. */
   static fromResponse(status: number, body: string): PodmanApiError {
     let detail = body.trim();
@@ -909,6 +937,31 @@ export class PodmanClient {
 
   async removeContainer(id: string, force: boolean = false): Promise<void> {
     await this.request(`/containers/${id}?force=${force}`, { method: 'DELETE' });
+  }
+
+  /**
+   * Remove a container, treating one that is already gone as success.
+   *
+   * A caller that wants "make sure this is not there" should not have to
+   * reimplement the 404 reasoning. Two of them did not, and both wedged
+   * permanently on a row whose container had vanished: every sweep asked Podman
+   * to remove a container that was not there, took the 404 as a failure, kept the
+   * row, and tried again on the next cycle forever. The row held its host port
+   * out of the allocator, was offered as a fast rollback that could not work, and
+   * could not be cleared from any interface. `removeNetwork` below has always
+   * taken this view of its own 404.
+   *
+   * Returns whether anything was actually removed, so a caller can distinguish
+   * "I removed it" from "it was already gone" where that matters.
+   */
+  async ensureContainerRemoved(id: string, force: boolean = false): Promise<boolean> {
+    try {
+      await this.removeContainer(id, force);
+      return true;
+    } catch (e: unknown) {
+      if (e instanceof PodmanApiError && e.isMissingContainer()) return false;
+      throw e;
+    }
   }
 
   async listNetworks(): Promise<any[]> {

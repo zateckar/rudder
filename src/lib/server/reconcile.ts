@@ -57,7 +57,11 @@ import { getRestPodmanClient } from './podman-client';
 import { sendNotification } from './notifications';
 import { buildDeploymentPlan } from './deploy/build';
 import { ManifestError, type PlanContext, type PlannedContainer } from './deploy/plan';
-import { parseGenerationalName } from './generations';
+import {
+  REAP_ATTEMPTS_BEFORE_REPORTING,
+  parseGenerationalName,
+  retentionExpired,
+} from './generations';
 import type { PortAllocator } from './ports';
 import { singleMountIntents } from './volumes';
 
@@ -397,7 +401,14 @@ export async function observedState(client: PodmanClient): Promise<ObservedConta
 
 // ── Diff ─────────────────────────────────────────────────────────────────────
 
-export type DriftKind = 'missing' | 'stale' | 'unhealthy' | 'orphan' | 'foreign';
+export type DriftKind =
+  | 'missing'
+  | 'stale'
+  | 'unhealthy'
+  | 'orphan'
+  | 'foreign'
+  | 'retained'
+  | 'unreaped';
 
 export interface DriftEntry {
   kind: DriftKind;
@@ -436,11 +447,27 @@ export interface DiffInput {
    * become a reason to destroy something.
    */
   knownAppIds: ReadonlySet<string>;
+  /**
+   * Retention settings for the applications on this worker, keyed by id.
+   *
+   * Only needed to judge a `draining` row: whether a superseded generation is
+   * still inside the window it was deliberately kept for, or has overstayed it.
+   * Optional so the pure tests that do not care about retention can leave it
+   * out; a row whose application is missing from the map is never called
+   * `unreaped` on age alone, which fails in the same under-claiming direction
+   * the ownership rule does.
+   */
+  apps?: ReadonlyMap<
+    string,
+    Pick<typeof applications.$inferSelect, 'name' | 'retainPreviousMinutes'>
+  >;
+  /** Injected so the retention arithmetic is testable. Defaults to now. */
+  now?: Date;
 }
 
 export interface DiffResult {
   drift: DriftEntry[];
-  /** True when nothing anywhere disagrees. */
+  /** True when nothing actionable disagrees. */
   clean: boolean;
 }
 
@@ -462,9 +489,18 @@ export interface DiffResult {
  *                 candidate, never removed without a human saying so.
  * - `foreign`   — not Rudder's. Reported so the operator can see it, and
  *                 otherwise left alone forever.
+ * - `retained`  — a superseded generation inside the fast-rollback window it was
+ *                 deliberately kept for. Informational: correct, and worth
+ *                 saying out loud because it looks identical in the container
+ *                 list to one that was left behind.
+ * - `unreaped`  — a superseded generation that should be gone and is not. Either
+ *                 it has outlived its window, or its removal keeps failing, or
+ *                 its row points at a container Podman does not have.
  */
 export function diff(input: DiffInput): DiffResult {
   const { desired, rows, observed, knownAppIds } = input;
+  const apps = input.apps ?? new Map();
+  const now = input.now ?? new Date();
   const drift: DriftEntry[] = [];
 
   const observedById = new Map(observed.map((c) => [c.id, c]));
@@ -544,6 +580,81 @@ export function diff(input: DiffInput): DiffResult {
     }
   }
 
+  // ── Retained generations ────────────────────────────────────────────────────
+  //
+  // A `draining` row used to be invisible here, and invisible in a way no single
+  // reading of the code revealed: excluded from the loop above, which only
+  // matches `active` and `pending` rows against intent, *and* excluded from the
+  // loop below, which skips anything that has a row at all. So the one state
+  // whose whole purpose is to be temporary was the one state nothing could ever
+  // report as having outstayed its welcome. A generation left behind by a failed
+  // reap sat there holding a host port, offered as a fast rollback that could
+  // not work, for as long as the control plane stayed up.
+  //
+  // Being deliberate and being stuck look the same in the container list. The
+  // difference is entirely in how long it has been, which is what this asks.
+  for (const row of rows) {
+    if (row.state !== 'draining') continue;
+
+    const app = row.applicationId ? apps.get(row.applicationId) : undefined;
+    const base = {
+      appId: row.applicationId ?? null,
+      appName: app?.name ?? null,
+      name: row.name,
+      containerId: row.containerId,
+    };
+
+    // The row outlived its container. Unambiguous regardless of any retention
+    // window: there is nothing left to roll back to, the row is still holding
+    // its host port out of the allocator, and until removal became idempotent
+    // every sweep asked Podman to delete a container that was not there and
+    // treated the 404 as a reason to try again next cycle.
+    if (!observedById.has(row.containerId)) {
+      drift.push({
+        ...base,
+        kind: 'unreaped',
+        detail:
+          `Container '${row.name}' is recorded as a retained previous version, but no such ` +
+          `container exists on the worker. Its record is holding a host port and cannot be ` +
+          `rolled back to; remove it.`,
+      });
+      continue;
+    }
+
+    const attempts = row.reapAttempts ?? 0;
+    if (attempts >= REAP_ATTEMPTS_BEFORE_REPORTING) {
+      drift.push({
+        ...base,
+        kind: 'unreaped',
+        detail:
+          `Container '${row.name}' is a superseded version Rudder has failed to remove ` +
+          `${attempts} times${row.reapError ? `: ${row.reapError}` : '.'}`,
+      });
+      continue;
+    }
+
+    // No entry in `apps` means nothing is known about the window, so age is not
+    // grounds for a finding. Reported as retained instead: visible, not alarming.
+    if (app && retentionExpired(app, row.updatedAt, now)) {
+      drift.push({
+        ...base,
+        kind: 'unreaped',
+        detail:
+          `Container '${row.name}' is a superseded version whose retention window has passed. ` +
+          `It should have been removed and has not been.`,
+      });
+      continue;
+    }
+
+    drift.push({
+      ...base,
+      kind: 'retained',
+      detail:
+        `Container '${row.name}' is the previous version, kept stopped so a rollback can ` +
+        `restart it. It will be removed automatically.`,
+    });
+  }
+
   for (const container of observed) {
     // Anything Rudder has a row for is accounted for, whether or not it carries
     // the label. Adopted containers are the case that matters: Rudder tracks
@@ -584,7 +695,7 @@ export function diff(input: DiffInput): DiffResult {
     });
   }
 
-  return { drift, clean: drift.every((d) => d.kind === 'foreign') };
+  return { drift, clean: actionable(drift).length === 0 };
 }
 
 /**
@@ -628,9 +739,20 @@ function matchRow(
   );
 }
 
-/** Drift that is worth an operator's attention. Foreign containers are not. */
+/**
+ * Drift that is worth an operator's attention.
+ *
+ * Two kinds are not. A `foreign` container is a co-tenant's and will never be
+ * touched. A `retained` generation is doing exactly what it was asked to do, and
+ * counting it here would mean every application with a fast-rollback window
+ * spent that window reporting itself as drifted — and a warning that fires
+ * during normal operation is a warning people learn to close.
+ *
+ * Both are still carried in the report, because "why is there a second container"
+ * is a question the operator asks at exactly the moment nothing is wrong.
+ */
 export function actionable(drift: readonly DriftEntry[]): DriftEntry[] {
-  return drift.filter((d) => d.kind !== 'foreign');
+  return drift.filter((d) => d.kind !== 'foreign' && d.kind !== 'retained');
 }
 
 /**
@@ -653,8 +775,9 @@ export function driftFingerprint(drift: readonly DriftEntry[]): string {
  *
  * `missing` and `unhealthy` only — the additive corrections, where the worst case
  * of being wrong is a container that did not need starting. `stale` is excluded
- * because replacing a running container is not additive; `orphan` because
- * deletion is not; `foreign` because it is not Rudder's.
+ * because replacing a running container is not additive; `orphan` and `unreaped`
+ * because deletion is not; `foreign` because it is not Rudder's; `retained`
+ * because there is nothing wrong with it.
  */
 export function autoCorrectable(drift: readonly DriftEntry[]): DriftEntry[] {
   return drift.filter((d) => d.kind === 'missing' || d.kind === 'unhealthy');
@@ -735,6 +858,15 @@ export async function reconcileWorker(
   // parsing cannot turn its own healthy containers into deletion candidates.
   const knownAppIds = new Set(workerApps.map((a) => a.id));
 
+  // Retention settings, for judging how long a superseded generation has been
+  // hanging around. Built from the same rows rather than queried again.
+  const appsById = new Map(
+    workerApps.map((a) => [
+      a.id,
+      { name: a.name, retainPreviousMinutes: a.retainPreviousMinutes },
+    ]),
+  );
+
   const teamRows = await db.select().from(teams).all();
   const teamById = new Map(teamRows.map((t) => [t.id, t]));
   const volumeRows = await db.select().from(volumes).all();
@@ -775,7 +907,14 @@ export async function reconcileWorker(
     }
   }
 
-  const { drift, clean } = diff({ desired, rows, observed, knownAppIds });
+  const { drift, clean } = diff({
+    desired,
+    rows,
+    observed,
+    knownAppIds,
+    apps: appsById,
+    now: ranAt,
+  });
 
   const report: ReconcileReport = {
     workerId: worker.id,
@@ -889,7 +1028,15 @@ async function persistReport(report: ReconcileReport): Promise<void> {
 
 /** `2 missing, 1 unhealthy` — counts by kind, in a fixed order. */
 export function summarize(findings: readonly DriftEntry[]): string {
-  const order: DriftKind[] = ['missing', 'stale', 'unhealthy', 'orphan', 'foreign'];
+  const order: DriftKind[] = [
+    'missing',
+    'stale',
+    'unhealthy',
+    'unreaped',
+    'orphan',
+    'retained',
+    'foreign',
+  ];
   const counts = new Map<DriftKind, number>();
   for (const f of findings) counts.set(f.kind, (counts.get(f.kind) ?? 0) + 1);
   return (

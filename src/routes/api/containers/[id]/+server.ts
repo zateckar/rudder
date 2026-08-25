@@ -4,6 +4,7 @@ import { db } from '$lib/db';
 import { containers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { withPodman } from '$lib/server/podman-client';
+import { isAbsent } from '$lib/server/deploy';
 import { requireContainer, route } from '$lib/server/auth';
 import { parseJsonBody, schemas } from '$lib/server/validation';
 
@@ -38,7 +39,13 @@ const ACTIONS = {
     record: (rowId: string) => setStatus(rowId, 'running'),
   },
   remove: {
-    run: (c: PodmanClient, id: string) => c.removeContainer(id, true),
+    // A container that is already gone is the outcome this asks for, so the row
+    // is still deleted. Without this an operator could not clear a row whose
+    // container had vanished by any route at all: the generation sweep failed on
+    // it every cycle and kept it, and this endpoint — the only other way to
+    // remove a record — failed too and left it. The row went on reserving its
+    // host port and could not be got rid of short of editing the database.
+    run: (c: PodmanClient, id: string) => c.ensureContainerRemoved(id, true).then(() => undefined),
     record: (rowId: string) => db.delete(containers).where(eq(containers.id, rowId)),
   },
 } satisfies Record<string, { run: (c: PodmanClient, id: string) => Promise<void>; record: (rowId: string) => unknown }>;
@@ -61,7 +68,22 @@ export const PATCH: RequestHandler = route(async (event) => {
   const { action } = await parseJsonBody(event.request, schemas.containerAction);
   const operation = ACTIONS[action];
 
-  await withPodman(worker, (client) => operation.run(client, container.containerId));
+  try {
+    await withPodman(worker, (client) => operation.run(client, container.containerId));
+  } catch (e: unknown) {
+    // Removing the record of a container the worker does not have is allowed to
+    // succeed even if the Podman call fails. `missing` is written only after a
+    // container listing that succeeded and did not include this id, so it is
+    // better evidence than this one delete's error — and without the exception
+    // an operator has no way at all to clear such a row, since the automatic
+    // sweep is failing on it for the same reason.
+    if (action !== 'remove' || !isAbsent(container.status)) throw e;
+    console.warn(
+      `[containers] Clearing the record for ${container.name}, which the last container ` +
+        `listing did not contain, despite the delete failing:`,
+      (e as any)?.message ?? e,
+    );
+  }
   await operation.record(container.id);
 
   return json({ success: true, action });

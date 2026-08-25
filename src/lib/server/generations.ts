@@ -163,6 +163,24 @@ export function healthTimeoutMs(app: { healthTimeoutSeconds?: number | null }): 
   return DEFAULT_HEALTH_TIMEOUT_S * 1000;
 }
 
+/**
+ * How many consecutive failed reap attempts before a retained generation stops
+ * being retried in silence and starts being reported as drift.
+ *
+ * The sweep runs on the metrics interval, so a genuinely transient failure — a
+ * worker that was briefly unreachable, a volume held open by a helper — clears
+ * well inside this. What it is here to catch is the failure that never clears:
+ * before this, `reapContainers` logged a warning and tried again on the next
+ * cycle, forever, and the only trace was a line on the control plane's stdout.
+ * A retry loop that can neither succeed nor complain is indistinguishable from
+ * one that is working.
+ *
+ * Lives here rather than in `deploy.ts` because the reconciler reads it too, and
+ * `deploy.ts` already imports from this module — the other direction would be a
+ * cycle.
+ */
+export const REAP_ATTEMPTS_BEFORE_REPORTING = 3;
+
 /** Fast-rollback retention window for an application, in milliseconds. */
 export function retentionMs(app: { retainPreviousMinutes?: number | null }): number {
   const minutes = app.retainPreviousMinutes;

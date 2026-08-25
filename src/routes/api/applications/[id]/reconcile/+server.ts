@@ -11,8 +11,16 @@
  * mechanism to patch containers into shape would be a second thing to keep
  * correct, and the less-tested of the two.
  *
+ * Worth being blunt about, because the UI used to call this button "Reconcile
+ * now" and it caused a real support question: **this is a deploy.** On a
+ * control-plane-routed worker a deploy is blue/green, so it creates a new
+ * generation alongside the old one and may keep the old one for a rollback
+ * window — which looks exactly like the reconciler having spawned a duplicate
+ * container. The button now says "Deploy current configuration".
+ *
  * Neither verb can remove anything. Orphan removal is human-gated and lives
- * elsewhere by design.
+ * elsewhere by design; a retained generation is removed by the generation sweep,
+ * or by the operator from the container's own card.
  */
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
@@ -37,13 +45,17 @@ export async function GET({ params, cookies }: { params: { id: string }; cookies
   try {
     const report = await reconcileWorker(worker, { apply: false });
     // Foreign containers are the worker's business, not this application's, and
-    // it can do nothing about them.
-    const drift = actionable(report.drift).filter((d) => d.appId === params.id);
+    // it can do nothing about them. Everything else this application owns is
+    // returned — including a `retained` previous version, which is not a problem
+    // but is the answer to "why are there two containers", and which the page
+    // load already shows. Filtering to `actionable` here instead would have made
+    // a re-check silently erase a notice the page had just rendered.
+    const drift = report.drift.filter((d) => d.appId === params.id && d.kind !== 'foreign');
     const error = report.errors.find((e) => e.appId === params.id);
     return json({
       ranAt: report.ranAt,
       drift,
-      clean: drift.length === 0 && !error,
+      clean: actionable(drift).length === 0 && !error,
       unreconcilable: error?.message ?? null,
     });
   } catch (e: any) {

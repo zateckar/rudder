@@ -4,6 +4,7 @@ import {
   HELPER_ROLE,
   MANAGED_LABEL,
   ROLE_LABEL,
+  actionable,
   autoCorrectable,
   desiredState,
   diff,
@@ -76,6 +77,8 @@ function containerRow(
     deploymentId: 'dep-1',
     state: 'active',
     specHash: null,
+    reapAttempts: 0,
+    reapError: null,
     createdAt: new Date(0),
     updatedAt: new Date(0),
     ...over,
@@ -685,9 +688,15 @@ describe('diff', () => {
     expect(result.drift).toEqual([]);
   });
 
-  test('a retained previous generation is not drift', () => {
-    // Blue/green keeps the superseded generation stopped-but-present for a fast
-    // rollback. It is on the worker by design and absent from intent by design.
+  // ── Retained generations ───────────────────────────────────────────────────
+  //
+  // A `draining` row is matched by neither of the two loops that used to make up
+  // the diff: the intent loop only looks at `active` and `pending`, and the
+  // unaccounted-for loop skips anything with a row. So the one state whose entire
+  // purpose is to be temporary was the one state nothing could report as stuck.
+
+  /** A superseded generation, its row and its container, `agedMs` past cutover. */
+  function withRetained(over: Partial<typeof containers.$inferSelect> = {}, present = true) {
     const base = healthy();
     const rows = [
       ...base.rows,
@@ -696,23 +705,115 @@ describe('diff', () => {
         containerId: 'old123',
         name: `${base.want.name}-g1`,
         state: 'draining',
-        status: 'stopped',
+        // Podman's word. The deploy used to write `stopped`, which the fleet
+        // sweep then "corrected" — stamping `updatedAt`, which is the retention
+        // clock, and buying every retained generation an extra interval.
+        status: 'exited',
         specHash: 'an-older-hash',
+        updatedAt: new Date(0),
+        ...over,
       }),
     ];
-    const observed = [
-      ...base.observed,
-      toObserved(
-        raw({
-          Id: 'old123',
-          Names: [`/${base.want.name}-g1`],
-          State: 'exited',
-          Status: 'Exited (0) 1 minute ago',
-        }),
+    const observed = present
+      ? [
+          ...base.observed,
+          toObserved(
+            raw({
+              Id: 'old123',
+              Names: [`/${base.want.name}-g1`],
+              State: 'exited',
+              Status: 'Exited (0) 1 minute ago',
+            }),
+          ),
+        ]
+      : base.observed;
+    return { ...base, rows, observed };
+  }
+
+  /** Retention long enough that nothing in these tests expires by accident. */
+  const generousRetention = new Map([
+    ['app-1', { name: 'shop', retainPreviousMinutes: 60 }],
+  ]);
+
+  test('a retained previous generation is reported, but not as a problem', () => {
+    // Present by design and absent from intent by design — so not actionable.
+    // Reported all the same: it is the answer to "why are there two containers",
+    // and staying silent is what made a stuck generation indistinguishable from
+    // a deliberate one.
+    const base = withRetained();
+    const result = diff({ ...base, apps: generousRetention, now: new Date(1000) });
+    expect(result.drift.map((d) => d.kind)).toEqual(['retained']);
+    expect(result.clean).toBe(true);
+    expect(actionable(result.drift)).toEqual([]);
+  });
+
+  test('a retained generation past its window is unreaped', () => {
+    const base = withRetained();
+    // One hour of retention, two hours later.
+    const result = diff({ ...base, apps: generousRetention, now: new Date(7_200_000) });
+    expect(result.drift.map((d) => d.kind)).toEqual(['unreaped']);
+    expect(result.drift[0].detail).toContain('retention window has passed');
+    expect(result.clean).toBe(false);
+  });
+
+  test('a draining row whose container no longer exists is unreaped', () => {
+    // The bug this whole classification exists for. `removeContainer` used to
+    // treat Podman's 404 as a failure, so the sweep asked for a container that
+    // was not there, kept the row, and tried again every cycle forever. The row
+    // held a host port out of the allocator and nothing could report it.
+    const base = withRetained({}, false);
+    const result = diff({ ...base, apps: generousRetention, now: new Date(1000) });
+    expect(result.drift.map((d) => d.kind)).toEqual(['unreaped']);
+    expect(result.drift[0].detail).toContain('no such container exists');
+    expect(result.clean).toBe(false);
+  });
+
+  test('repeated reap failures are reported even inside the retention window', () => {
+    // Still young, still present — but the removal keeps being refused, and a
+    // retry loop nobody can see is a retry loop that runs forever.
+    const base = withRetained({ reapAttempts: 3, reapError: 'volume is in use' });
+    const result = diff({ ...base, apps: generousRetention, now: new Date(1000) });
+    expect(result.drift.map((d) => d.kind)).toEqual(['unreaped']);
+    expect(result.drift[0].detail).toContain('volume is in use');
+  });
+
+  test('a couple of reap failures are not yet worth reporting', () => {
+    // A briefly unreachable worker must not raise an alert on the first miss.
+    const base = withRetained({ reapAttempts: 1, reapError: 'connection refused' });
+    const result = diff({ ...base, apps: generousRetention, now: new Date(1000) });
+    expect(result.drift.map((d) => d.kind)).toEqual(['retained']);
+  });
+
+  test('age alone is never a finding when retention is unknown', () => {
+    // No `apps` entry means nothing is known about the window. Under-claiming is
+    // the same direction the ownership rule fails in.
+    const base = withRetained();
+    const result = diff({ ...base, now: new Date(7_200_000) });
+    expect(result.drift.map((d) => d.kind)).toEqual(['retained']);
+  });
+
+  test('a retained generation does not notify, an unreaped one does', () => {
+    // The fingerprint is built from actionable findings, so a normal retention
+    // window must not produce one — otherwise every deploy pages whoever is on
+    // call, twice: once for the window opening and once for it closing.
+    const inWindow = withRetained();
+    const expired = withRetained();
+    expect(
+      driftFingerprint(diff({ ...inWindow, apps: generousRetention, now: new Date(1000) }).drift),
+    ).toBe(driftFingerprint([]));
+    expect(
+      driftFingerprint(
+        diff({ ...expired, apps: generousRetention, now: new Date(7_200_000) }).drift,
       ),
-    ];
-    const result = diff({ ...base, rows, observed });
-    expect(result.drift).toEqual([]);
+    ).not.toBe(driftFingerprint([]));
+  });
+
+  test('an unreaped generation is never auto-corrected', () => {
+    // Deletion is not additive. Whatever `apply` eventually does, it must not
+    // reach this.
+    const base = withRetained({}, false);
+    const result = diff({ ...base, apps: generousRetention, now: new Date(1000) });
+    expect(autoCorrectable(result.drift)).toEqual([]);
   });
 
   test('a running adopted container is not reported as missing', () => {

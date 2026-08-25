@@ -280,6 +280,24 @@ export const containers = sqliteTable('containers', {
    * hash never reads as stale.
    */
   specHash: text('spec_hash'),
+  /**
+   * Consecutive failed attempts to reap this container, and why the last one
+   * failed.
+   *
+   * A retained generation is removed by `sweepExpiredGenerations`, which runs on
+   * the metrics interval and keeps the row when Podman refuses so the host port
+   * stays reserved. That retry used to be unbounded and silent: a row whose
+   * removal could never succeed was tried every cycle forever, and said so only
+   * on the control plane's stdout. These two columns are what let the reconciler
+   * report it instead — see `REAP_ATTEMPTS_BEFORE_REPORTING`.
+   *
+   * Never reset, because there is nothing to reset to: a reap that succeeds
+   * deletes the row. The count therefore only ever describes a row that is still
+   * here against Rudder's wishes, and the `unreaped` finding it produces clears
+   * by the row finally going away.
+   */
+  reapAttempts: integer('reap_attempts').notNull().default(0),
+  reapError: text('reap_error'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });

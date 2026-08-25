@@ -32,7 +32,7 @@
   // corrected on its own: the pass is read-only, so anything shown here is
   // waiting on a person.
   interface Drift {
-    kind: 'missing' | 'stale' | 'unhealthy' | 'orphan' | 'foreign';
+    kind: 'missing' | 'stale' | 'unhealthy' | 'orphan' | 'foreign' | 'retained' | 'unreaped';
     name: string;
     detail: string;
   }
@@ -44,12 +44,21 @@
   let reconciling = $state(false);
   let rechecking = $state(false);
 
+  // A retained previous version is not a problem, and the panel below is styled
+  // to look like one. Split so the warning stays a warning: an application with
+  // a fast-rollback window would otherwise spend every window announcing that it
+  // had drifted, which is how a panel gets ignored.
+  const problems = $derived(drift.filter((d) => d.kind !== 'retained'));
+  const notices = $derived(drift.filter((d) => d.kind === 'retained'));
+
   const DRIFT_LABEL: Record<Drift['kind'], string> = {
     missing: 'Not running',
     stale: 'Out of date',
     unhealthy: 'Failing health check',
     orphan: 'Untracked',
     foreign: 'Not managed by Rudder',
+    retained: 'Previous version',
+    unreaped: 'Should have been removed',
   };
 
   /** Why the last check could not run, if it could not. */
@@ -88,7 +97,11 @@
       if (found === null) {
         showToast('error', driftError || 'Could not check for drift');
       } else {
-        showToast('success', found.length === 0 ? 'No drift — this application matches its configuration' : `${found.length} difference${found.length === 1 ? '' : 's'} found`);
+        // Counted without the retained previous version. It is reported, but it
+        // is not a difference from the configuration — calling it one told
+        // someone with a healthy application that it had drifted.
+        const count = found.filter((d) => d.kind !== 'retained').length;
+        showToast('success', count === 0 ? 'No drift — this application matches its configuration' : `${count} difference${count === 1 ? '' : 's'} found`);
       }
     } finally {
       rechecking = false;
@@ -1176,26 +1189,30 @@
      one collection cycle old, so the moment you most want to re-run the
      comparison is exactly when the panel has nothing in it yet. Hiding the
      control until drift appeared put it out of reach at that moment. -->
-{#if drift.length > 0}
+{#if problems.length > 0}
   <div class="drift-panel">
     <div class="drift-head">
       <span class="drift-title">
         This application has drifted from its configuration
-        <span class="drift-count">{drift.length}</span>
+        <span class="drift-count">{problems.length}</span>
       </span>
       <div class="drift-actions">
         <button class="btn-act" onclick={recheckDrift} disabled={rechecking} title="Re-run the comparison now instead of waiting for the next collection cycle">
           {rechecking ? 'Checking…' : 'Re-check'}
         </button>
-        {#if drift.some((d) => d.kind === 'missing' || d.kind === 'stale')}
-          <button class="btn-act btn-start" onclick={reconcileNow} disabled={reconciling} title="Deploy the current configuration, which creates what is missing and replaces what is out of date">
-            {reconciling ? 'Reconciling…' : 'Reconcile now'}
+        {#if problems.some((d) => d.kind === 'missing' || d.kind === 'stale')}
+          <!-- Named for what it does. It is not the reconciler — that one only
+               ever reads — it is a full deploy, which on a control-plane-routed
+               worker means a new generation alongside the old one. Calling it
+               "Reconcile now" made the new container look like a malfunction. -->
+          <button class="btn-act btn-start" onclick={reconcileNow} disabled={reconciling} title="Deploy the current configuration: creates what is missing, replaces what is out of date. On this worker that means starting a new version alongside the current one and switching traffic over once it is healthy.">
+            {reconciling ? 'Deploying…' : 'Deploy current configuration'}
           </button>
         {/if}
       </div>
     </div>
     <ul class="drift-list">
-      {#each drift as d}
+      {#each problems as d}
         <li>
           <span class="drift-kind drift-{d.kind}">{DRIFT_LABEL[d.kind] ?? d.kind}</span>
           <code class="drift-name">{d.name}</code>
@@ -1222,6 +1239,21 @@
   </div>
 {/if}
 
+<!-- Retained previous versions. Deliberately outside the panel above and styled
+     down: this is the answer to "why are there two containers", which is a
+     question asked most often when nothing is wrong. -->
+{#if notices.length > 0}
+  <ul class="drift-notice">
+    {#each notices as d}
+      <li>
+        <span class="drift-kind drift-retained">{DRIFT_LABEL[d.kind]}</span>
+        <code class="drift-name">{d.name}</code>
+        <span class="drift-detail">{d.detail}</span>
+      </li>
+    {/each}
+  </ul>
+{/if}
+
 <!-- ── Tabs ────────────────────────────────────────────────────────────── -->
 <div class="tabs">
   {#each [['containers','Containers'],['metrics','Metrics'],['storage','Storage'],['config','Configuration'],['deployments','Deployments']] as [id, label]}
@@ -1244,6 +1276,14 @@
         {#each data.containers as container}
           {@const busy = containerBusy[container.id] ?? false}
           {@const isRunning = container.status === 'running'}
+          <!-- A superseded generation. Traefik is not routing to it, so starting
+               it produces a second running copy serving nothing, and updating it
+               pulls an image for a version that is on its way out. Neither is
+               ever what someone wants; both were one click away. -->
+          {@const isSuperseded = container.state === 'draining'}
+          <!-- The fleet sweep writes this when Podman has no container with the
+               row's id. There is nothing to act on but the record itself. -->
+          {@const isGhost = container.status === 'missing'}
           <div class="container-card">
             <div class="container-header">
               <div class="container-title">
@@ -1278,44 +1318,75 @@
                 {/if}
               </div>
               <div class="container-actions">
-                {#if isRunning}
+                {#if isGhost}
+                  <!-- The container is gone; only the record is left. Removing it
+                       is the whole of what can be done, and it is what releases
+                       the host port the record is still reserving. -->
                   <button
                     class="btn-act btn-stop"
-                    onclick={() => containerAction(container.id, 'stop', {
-                      title: 'Stop this container?',
-                      body: `"${container.name}" stops serving traffic until it is started again.`,
-                      confirmLabel: 'Stop',
+                    onclick={() => containerAction(container.id, 'remove', {
+                      title: 'Clear this record?',
+                      body: `No container with this id exists on the worker any more, so there is nothing to stop or start. Removing the record releases the host port it is still reserving.`,
+                      confirmLabel: 'Clear record',
                       danger: true,
                     })}
                     disabled={busy}
-                    title="Stop this container"
-                  >Stop</button>
+                    title="Remove the database record for a container that no longer exists"
+                  >Clear record</button>
+                {:else if isSuperseded}
+                  <!-- Reap, and nothing else. Start would run a version nothing
+                       routes to; Update would pull for a version being retired. -->
+                  <button
+                    class="btn-act btn-stop"
+                    onclick={() => containerAction(container.id, 'remove', {
+                      title: 'Remove this previous version?',
+                      body: `"${container.name}" is the superseded version, kept so a rollback could restart it. Removing it now frees its host port and gives up the fast rollback to this version — a rollback would have to redeploy instead.`,
+                      confirmLabel: 'Remove',
+                      danger: true,
+                    })}
+                    disabled={busy}
+                    title="Remove this superseded version now instead of waiting for its retention window to pass"
+                  >Reap</button>
+                {:else}
+                  {#if isRunning}
+                    <button
+                      class="btn-act btn-stop"
+                      onclick={() => containerAction(container.id, 'stop', {
+                        title: 'Stop this container?',
+                        body: `"${container.name}" stops serving traffic until it is started again.`,
+                        confirmLabel: 'Stop',
+                        danger: true,
+                      })}
+                      disabled={busy}
+                      title="Stop this container"
+                    >Stop</button>
+                    <button
+                      class="btn-act"
+                      onclick={() => containerAction(container.id, 'restart')}
+                      disabled={busy}
+                      title="Restart this container without pulling"
+                    >Restart</button>
+                  {:else}
+                    <button
+                      class="btn-act btn-start"
+                      onclick={() => containerAction(container.id, 'start')}
+                      disabled={busy}
+                      title="Start this container"
+                    >Start</button>
+                  {/if}
                   <button
                     class="btn-act"
-                    onclick={() => containerAction(container.id, 'restart')}
+                    onclick={() => updateContainer(container.id)}
                     disabled={busy}
-                    title="Restart this container without pulling"
-                  >Restart</button>
-                {:else}
+                    title="Pull latest image and recreate this container"
+                  >Update</button>
                   <button
-                    class="btn-act btn-start"
-                    onclick={() => containerAction(container.id, 'start')}
+                    class="btn-act"
+                    onclick={() => openLimitsModal(container.id)}
                     disabled={busy}
-                    title="Start this container"
-                  >Start</button>
+                    title="Set memory and CPU limits for this container"
+                  >Limits</button>
                 {/if}
-                <button
-                  class="btn-act"
-                  onclick={() => updateContainer(container.id)}
-                  disabled={busy}
-                  title="Pull latest image and recreate this container"
-                >Update</button>
-                <button
-                  class="btn-act"
-                  onclick={() => openLimitsModal(container.id)}
-                  disabled={busy}
-                  title="Set memory and CPU limits for this container"
-                >Limits</button>
               </div>
             </div>
 
@@ -2278,7 +2349,17 @@
   .status-badge.exited, .status-badge.stopped { background: var(--red-subtle); color: var(--red-text); }
   .status-badge.created { background: var(--yellow-subtle); color: var(--yellow-text); }
   .status-badge.paused { background: var(--purple-subtle); color: var(--purple); }
+  /* Written by the fleet sweep when Podman has no container with this row's id:
+  a record without a container. Outlined rather than filled, because it is not
+  describing the state of a container — there isn't one. */
+  .status-badge.missing {
+    background: transparent; color: var(--red-text);
+    border: 1px dashed color-mix(in srgb, var(--red) 45%, transparent);
+  }
 
+  /* The muted base is what `draining` gets, and there is deliberately no
+  override for it: that generation is not serving, and it should read as
+  background rather than as a second live version of the application. */
   .generation-badge {
     padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600;
     letter-spacing: 0.04em; background: var(--bg-raised); color: var(--text-muted);
@@ -2735,9 +2816,23 @@
     background: color-mix(in srgb, var(--red) 18%, transparent);
     color: var(--red);
   }
+  /* A retained version is correct, so it is grey wherever it appears — including
+  inside the amber panel, where it can turn up after a re-check. */
+  .drift-retained {
+    background: var(--bg-subtle, color-mix(in srgb, var(--text-muted) 12%, transparent));
+    color: var(--text-muted);
+  }
   .drift-name { font-family: var(--font-mono, monospace); font-size: 0.78rem; }
   .drift-detail { color: var(--text-muted); flex: 1 1 220px; }
   .drift-foot { margin: 10px 0 0; font-size: 0.76rem; color: var(--text-muted); }
+
+  /* Retained versions: a plain muted list, no banner. Says what the second
+  container is without implying something needs doing about it. */
+  .drift-notice { list-style: none; margin: -8px 0 16px; padding: 0; }
+  .drift-notice li {
+    display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+    padding: 4px 0; font-size: 0.78rem; color: var(--text-muted);
+  }
 
   /* ── Webhook ──────────────────────────────────────────────────────── */
   .webhook-section {
