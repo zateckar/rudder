@@ -315,24 +315,6 @@
             </select>
           </div>
           <div class="form-group">
-            <label for="exposedPorts">Public Ports</label>
-            <input
-              type="text"
-              id="exposedPorts"
-              name="exposedPorts"
-              placeholder="7070, 8080"
-              value={exposedPortsValue}
-            />
-            <p class="help-text">
-              Container ports to publish, in order. The first gets <code>:443</code>, the rest get
-              <code>:1443</code> upward on the same hostname and certificate. Leave blank to publish
-              the first port only. Ports left out stay reachable from the worker and from sibling
-              containers, but not from outside. HTTP services only — every entryPoint terminates TLS
-              and speaks HTTP. A <code>kubectl apply</code> carrying
-              <code>rudder.dev/expose-ports</code> overwrites what is set here.
-            </p>
-          </div>
-          <div class="form-group">
             <label for="workingDir">Working Directory</label>
             <input type="text" id="workingDir" placeholder="/app" bind:value={workingDir} />
           </div>
@@ -422,6 +404,69 @@
         </div>
       </div>
     {/if}
+
+    <!-- ── Public ports (all app types) ───────────────────────── -->
+    <div class="form-section">
+      <h2>Public Ports</h2>
+      <p class="help-text">
+        Which container ports are reachable from outside. Leave blank and the first published port
+        is served on <code>:443</code> — which is what almost every application wants. Name several
+        and each takes the next port, on the same hostname and the same certificate.
+      </p>
+
+      <div class="form-group">
+        <label for="exposedPorts">Ports, in order</label>
+        <input
+          type="text"
+          id="exposedPorts"
+          name="exposedPorts"
+          placeholder="7070, 8080"
+          value={exposedPortsValue}
+        />
+        <p class="help-text">
+          {#if app.type === 'single'}
+            Container ports from the <strong>Ports</strong> section above — the left-hand number, not
+            the host port.
+          {:else if app.type === 'compose'}
+            Applies to every service. A service that needs a different answer sets a
+            <code>rudder.expose: "8080"</code> label of its own, which is the usual case when one
+            file defines both a gateway and a UI.
+          {:else}
+            Applies to every container in the manifest. A <code>kubectl apply</code> carrying
+            <code>rudder.dev/expose-ports</code> overwrites whatever is set here.
+          {/if}
+        </p>
+      </div>
+
+      <table class="port-map">
+        <thead>
+          <tr><th>Position</th><th>Reached at</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>first</td><td><code>https://{app.domain ?? 'app.example.com'}</code></td></tr>
+          <tr><td>second</td><td><code>https://{app.domain ?? 'app.example.com'}:1443</code></td></tr>
+          <tr><td>third</td><td><code>https://{app.domain ?? 'app.example.com'}:2443</code></td></tr>
+          <tr><td>fourth, fifth</td><td><code>:3443</code>, <code>:4443</code></td></tr>
+        </tbody>
+      </table>
+
+      <p class="help-text">
+        The order you write is the mapping, so adding a port later cannot silently move an existing
+        one — five ports maximum, because a worker has five HTTPS entryPoints. Ports you leave out
+        stay reachable from the worker and from sibling containers, but not from outside.
+      </p>
+      <p class="help-text">
+        <strong>HTTP services only.</strong> Every port terminates TLS and speaks HTTP, so a
+        database or a game server published here gets a route that cannot work.
+      </p>
+      <p class="help-text">
+        <strong>Only <code>:443</code> is behind OIDC.</strong> The login flow is an interactive
+        browser redirect and the other ports carry machine traffic — an S3 endpoint or an admin API
+        cannot follow one. An extra port that needs protecting must do it itself: an API key,
+        signature authentication, mTLS. CrowdSec, the security headers and the rate limit apply to
+        every port.
+      </p>
+    </div>
 
     <!-- ── Deploy behaviour (all app types) ───────────────────── -->
     <div class="form-section">
@@ -609,6 +654,24 @@
   .help-text {
     margin-bottom: 8px;
   }
+
+  /* Compact enough to read as part of the help text rather than as data. */
+  .port-map {
+    border-collapse: collapse;
+    margin: 4px 0 10px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .port-map th {
+    text-align: left;
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 2px 16px 4px 0;
+  }
+  .port-map td { padding: 2px 16px 2px 0; }
+  .port-map code { font-family: var(--font-mono); font-size: 11px; }
 
   .error-text {
     color: var(--text-secondary);

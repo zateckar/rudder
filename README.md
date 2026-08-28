@@ -744,8 +744,9 @@ kind: Deployment
 metadata:
   name: my-app
   annotations:
-    rudder.dev/worker: "worker-name"      # optional: target worker
-    rudder.dev/domain: "app.example.com"   # optional: custom domain
+    rudder.dev/worker: "worker-name"        # optional: target worker
+    rudder.dev/domain: "app.example.com"    # optional: custom domain
+    rudder.dev/expose-ports: "8080,9090"    # optional: 8080 on :443, 9090 on :1443
 spec:
   replicas: 2
   selector:
@@ -762,9 +763,16 @@ spec:
         env:
         - name: NODE_ENV
           value: production
+        # Host ports are allocated by Rudder; these are the ports inside the
+        # container, and the ones expose-ports names.
         ports:
-        - containerPort: 80
+        - containerPort: 8080
+        - containerPort: 9090
 ```
+
+`rudder.dev/expose-ports` is emitted by `kubectl get -o yaml` as well as read, so
+piping that output back into `kubectl apply` keeps the declaration rather than
+silently dropping the extra ports.
 
 ---
 

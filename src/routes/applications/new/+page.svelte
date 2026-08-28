@@ -84,11 +84,20 @@
       : null
   );
 
-  const composeExample = `services:
+  const composeExample = `# Host ports are allocated by Rudder — the left-hand number in "80:8080" is
+# ignored, so two applications can both want 8080. Traefik does the routing.
+services:
   web:
     image: nginx:latest
     ports:
-      - "80:8080"
+      - "8080"
+      - "9090"
+    # Which of this service's ports are public, in order: 8080 on :443, 9090 on
+    # :1443, same hostname and certificate. Omit the label and only the first
+    # published port is served. Ports left out stay reachable from sibling
+    # services by name (http://web:9090) but not from outside.
+    labels:
+      rudder.expose: "8080,9090"
     restart: always
     environment:
       APP_ENV: production
@@ -109,6 +118,17 @@
           cpus: "1.0"
           memory: 512M
 
+  # A second service gets its own hostname — web-api.<base> — so it does not
+  # need an extra port at all. Reach for rudder.expose when one container
+  # serves several things and they have to share a hostname.
+  api:
+    image: nginx:latest
+    ports:
+      - "3000"
+    restart: always
+    networks:
+      - frontend
+
 volumes:
   app-data:
     driver: local
@@ -124,6 +144,14 @@ metadata:
   name: my-app
   labels:
     app: my-app
+  annotations:
+    # Which container ports are public, in order: 8080 on :443, 9090 on :1443,
+    # same hostname and certificate. Omit it and only the first published port
+    # is served; the rest stay reachable inside the application's own network.
+    # A kubectl apply carrying this annotation overwrites the UI field.
+    rudder.dev/expose-ports: "8080,9090"
+    # Optional: rudder.dev/worker pins the target worker, rudder.dev/domain
+    # sets an explicit hostname instead of <app>.<base>.
 spec:
   replicas: 2
   selector:
@@ -137,8 +165,11 @@ spec:
       containers:
         - name: my-app
           image: nginx:latest
+          # Host ports are allocated by Rudder; these are the ports inside the
+          # container, and the ones the annotation above names.
           ports:
-            - containerPort: 80
+            - containerPort: 8080
+            - containerPort: 9090
           env:
             - name: APP_ENV
               value: production
@@ -155,28 +186,34 @@ spec:
               cpu: "1"
               memory: 512Mi
           volumeMounts:
-            - name: app-data
-              mountPath: /var/www/html
+            - name: cache
+              mountPath: /var/cache/nginx
+            # A whole volume, not a subPath — Rudder mounts volumes, not single
+            # files out of them, so each ConfigMap key lands as a file here.
             - name: config
-              mountPath: /etc/nginx/nginx.conf
-              subPath: nginx.conf
+              mountPath: /etc/nginx/conf.d
               readOnly: true
           livenessProbe:
             httpGet:
               path: /health
-              port: 80
+              port: 8080
             initialDelaySeconds: 10
             periodSeconds: 30
           readinessProbe:
             httpGet:
               path: /health
-              port: 80
+              port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
       volumes:
-        - name: app-data
-          persistentVolumeClaim:
-            claimName: my-app-data
+        # emptyDir, configMap and secret work as written. A hostPath works too,
+        # but only under a prefix an operator has allow-listed on the worker.
+        # There is no persistentVolumeClaim: Rudder has no storage layer behind
+        # one, and a manifest using it is refused at deploy time rather than
+        # deployed with the mount quietly missing.
+        - name: cache
+          emptyDir:
+            sizeLimit: 64Mi
         - name: config
           configMap:
             name: my-app-config
@@ -190,8 +227,8 @@ spec:
   selector:
     app: my-app
   ports:
-    - port: 80
-      targetPort: 80
+    - port: 8080
+      targetPort: 8080
       protocol: TCP
 ---
 apiVersion: v1
@@ -199,13 +236,14 @@ kind: ConfigMap
 metadata:
   name: my-app-config
 data:
-  nginx.conf: |
-    events { worker_connections 1024; }
-    http {
-      server {
-        listen 80;
-        location /health { return 200 "ok"; }
-      }
+  default.conf: |
+    server {
+      listen 8080;
+      location /health { return 200 "ok"; }
+    }
+    server {
+      listen 9090;
+      location / { return 200 "admin"; }
     }
 ---
 apiVersion: v1
@@ -215,17 +253,6 @@ metadata:
 type: Opaque
 stringData:
   database-url: postgres://user:pass@db:5432/myapp
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: my-app-data
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
 `;
 
   let lastLoadedType = $state('');
@@ -422,17 +449,6 @@ spec:
             </select>
           </div>
           <div class="form-group">
-            <label for="exposedPorts">Public Ports</label>
-            <input type="text" id="exposedPorts" name="exposedPorts" placeholder="7070, 8080" />
-            <p class="help-text">
-              Container ports to publish, in order. The first gets <code>:443</code>, the rest get
-              <code>:1443</code> upward on the same hostname and certificate. Leave blank to publish
-              the first port only. Ports left out stay reachable from the worker and from sibling
-              containers, but not from outside. HTTP services only — every entryPoint terminates TLS
-              and speaks HTTP.
-            </p>
-          </div>
-          <div class="form-group">
             <label for="workingDir">Working Directory</label>
             <input
               type="text"
@@ -540,6 +556,63 @@ spec:
         {/if}
       </div>
     {/if}
+
+    <!-- ── Public ports (all app types) ───────────────────────── -->
+    <div class="form-section">
+      <h2>Public Ports</h2>
+      <p class="help-text">
+        Which container ports are reachable from outside. Leave blank and the first published port
+        is served on <code>:443</code> — which is what almost every application wants. Name several
+        and each takes the next port, on the same hostname and the same certificate.
+      </p>
+
+      <div class="form-group">
+        <label for="exposedPorts">Ports, in order</label>
+        <input type="text" id="exposedPorts" name="exposedPorts" placeholder="7070, 8080" />
+        <p class="help-text">
+          {#if appType === 'single'}
+            Container ports from the <strong>Ports</strong> section above — the left-hand number, not
+            the host port.
+          {:else if appType === 'compose'}
+            Applies to every service. A service that needs a different answer sets a
+            <code>rudder.expose: "8080"</code> label of its own, which is the usual case when one
+            file defines both a gateway and a UI.
+          {:else}
+            Applies to every container in the manifest. A <code>kubectl apply</code> carrying
+            <code>rudder.dev/expose-ports</code> overwrites whatever is set here.
+          {/if}
+        </p>
+      </div>
+
+      <table class="port-map">
+        <thead>
+          <tr><th>Position</th><th>Reached at</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>first</td><td><code>https://{previewDomain ?? 'app.example.com'}</code></td></tr>
+          <tr><td>second</td><td><code>https://{previewDomain ?? 'app.example.com'}:1443</code></td></tr>
+          <tr><td>third</td><td><code>https://{previewDomain ?? 'app.example.com'}:2443</code></td></tr>
+          <tr><td>fourth, fifth</td><td><code>:3443</code>, <code>:4443</code></td></tr>
+        </tbody>
+      </table>
+
+      <p class="help-text">
+        The order you write is the mapping, so adding a port later cannot silently move an existing
+        one — five ports maximum, because a worker has five HTTPS entryPoints. Ports you leave out
+        stay reachable from the worker and from sibling containers, but not from outside.
+      </p>
+      <p class="help-text">
+        <strong>HTTP services only.</strong> Every port terminates TLS and speaks HTTP, so a
+        database or a game server published here gets a route that cannot work.
+      </p>
+      <p class="help-text">
+        <strong>Only <code>:443</code> is behind OIDC.</strong> The login flow is an interactive
+        browser redirect and the other ports carry machine traffic — an S3 endpoint or an admin API
+        cannot follow one. An extra port that needs protecting must do it itself: an API key,
+        signature authentication, mTLS. CrowdSec, the security headers and the rate limit below
+        apply to every port.
+      </p>
+    </div>
 
     <!-- ── Security & Access Control (all app types) ──────────── -->
     <div class="form-section">
@@ -673,6 +746,24 @@ spec:
   .help-text {
     margin-bottom: 8px;
   }
+
+  /* Compact enough to read as part of the help text rather than as data. */
+  .port-map {
+    border-collapse: collapse;
+    margin: 4px 0 10px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .port-map th {
+    text-align: left;
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 2px 16px 4px 0;
+  }
+  .port-map td { padding: 2px 16px 2px 0; }
+  .port-map code { font-family: var(--font-mono); font-size: 11px; }
 
   .error-text {
     color: var(--text-secondary);
