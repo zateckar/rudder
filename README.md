@@ -409,6 +409,35 @@ Two limits are worth knowing before you rely on it:
 The image, environment, mounts, restart policy, and the hostname the container's
 own Traefik router serves are all read off the container and carried over.
 
+### Surviving a worker reboot
+
+Podman has no daemon. A restart policy is enforced by the container's own conmon
+process for as long as the host is up, and by nothing at all across a reboot — so
+a worker that restarted came back with Traefik and CrowdSec running, because they
+have systemd units, and every application stopped. Nothing reported it: the
+containers still existed, so reconciliation saw them as *Not running* and waited
+for someone to notice.
+
+`rudder-container-boot.service`, installed by provisioning, is what replays the
+policies. At boot it starts every container whose restart policy is `always` or
+`unless-stopped`; on shutdown it gives the same containers a 30-second `podman
+stop` so a database is not killed mid-write. Podman ships `podman-restart.service`
+for this, but it covers `always` alone, so provisioning disables it rather than
+letting two units start the same containers.
+
+Two consequences worth knowing:
+
+- **`unless-stopped` behaves as `always` here.** Podman documents the two as
+  identical and, being daemonless, has no daemon-restart event to tell them
+  apart. A container you stopped by hand comes back when the worker reboots.
+- **`on-failure` containers stay down.** Neither Podman's own unit nor Docker
+  starts those at boot, and a container that exits non-zero every time it starts
+  would otherwise spin from the moment the worker powers on.
+
+A compose service with no `restart:` key takes the application's **Restart
+Policy** (default `always`) rather than Compose's own default of `no`. An
+explicit `restart:` still wins, including an explicit `no`.
+
 ---
 
 ## Storage

@@ -75,6 +75,50 @@ export interface ComposeConfig {
   volumes?: Record<string, { driver?: string; external?: boolean }>;
 }
 
+/**
+ * A compose service's `restart:` in Podman's spelling.
+ *
+ * The fallback is the application's own restart policy, which is what the other
+ * two manifest formats already do. Compose used to default a service with no
+ * `restart:` key to `no` — the Docker Compose default, and defensible in
+ * isolation, except that Rudder's applications carry a **Restart Policy** field
+ * that defaults to `always` and every compose deployment silently ignored it.
+ * The containers then survived neither a crash nor a worker reboot, while the
+ * application page showed the policy the user had chosen.
+ *
+ * An explicit `restart:` still wins, including an explicit `no` — the point is
+ * to stop guessing `no` for a manifest that never said so.
+ *
+ * `on-failure:5` is compose's spelling for a bounded retry count. Podman takes
+ * the count as a separate field, so the bound is dropped rather than the policy:
+ * unbounded retries are closer to what was asked for than none at all.
+ */
+export function composeRestartPolicy(
+  declared: string | undefined,
+  fallback: string | null | undefined,
+): string {
+  const value = String(declared ?? '').trim().toLowerCase();
+  if (!value) return fallback || 'always';
+  if (value.startsWith('on-failure')) return 'on-failure';
+  switch (value) {
+    case 'always':
+    case 'unless-stopped':
+      return value;
+    case 'no':
+    case 'none':
+    case 'never':
+    // A YAML 1.1 parser reads a bare `no` as the boolean. Bun's is 1.2 and
+    // hands back the string, but "the user wrote no" is too easy a thing to
+    // turn into "always" if that ever changes underneath us.
+    case 'false':
+      return 'no';
+    default:
+      // Not a policy Compose defines. Falling through to the application's own
+      // setting beats inventing `no` for a typo.
+      return fallback || 'always';
+  }
+}
+
 export function parseCompose(manifest: string, ctx: PlanContext): DeploymentPlan {
   const { appName, baseDomain, allocatePort } = ctx;
 
@@ -243,18 +287,7 @@ export function parseCompose(manifest: string, ctx: PlanContext): DeploymentPlan
       }
     }
 
-    let restartPolicy = 'no';
-    if (service.restart) {
-      switch (service.restart) {
-        case 'always':
-        case 'on-failure':
-        case 'unless-stopped':
-          restartPolicy = service.restart;
-          break;
-        default:
-          restartPolicy = 'no';
-      }
-    }
+    const restartPolicy = composeRestartPolicy(service.restart, ctx.restartPolicy);
 
     const aliases = networkAliases(appName, serviceName);
 

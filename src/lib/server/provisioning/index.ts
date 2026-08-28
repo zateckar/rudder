@@ -31,6 +31,7 @@ import metricsSh from './shell/scripts/rudder-metrics.sh?raw';
 import metricsHttpSh from './shell/scripts/rudder-metrics-http.sh?raw';
 import traefikConfigSh from './shell/scripts/rudder-traefik-config.sh?raw';
 import updatesSh from './shell/scripts/rudder-updates.sh?raw';
+import containerBootSh from './shell/scripts/rudder-container-boot.sh?raw';
 
 // Systemd units
 import podmanApiSocketUnit from './shell/units/podman-api-socket.service?raw';
@@ -47,6 +48,7 @@ import traefikConfigUnit from './shell/units/rudder-traefik-config.service?raw';
 import traefikConfigTimerUnit from './shell/units/rudder-traefik-config.timer?raw';
 import updatesUnit from './shell/units/rudder-updates.service?raw';
 import updatesTimerUnit from './shell/units/rudder-updates.timer?raw';
+import containerBootUnit from './shell/units/rudder-container-boot.service?raw';
 
 /**
  * Replace {{UPPER_SNAKE_CASE}} placeholders in a template string.
@@ -502,6 +504,7 @@ export function generateProvisioningScript(
     TRAEFIK_CONFIG_TIMER_B64: toBase64(traefikConfigTimerUnit),
     UPDATES_SERVICE_B64: toBase64(updatesUnit),
     UPDATES_TIMER_B64: toBase64(updatesTimerUnit),
+    CONTAINER_BOOT_SERVICE_B64: toBase64(containerBootUnit),
 
     // Helper scripts (base64-encoded)
     CROWDSEC_REGISTER_SCRIPT_B64: toBase64(crowdsecRegister),
@@ -510,6 +513,7 @@ export function generateProvisioningScript(
     METRICS_HTTP_SCRIPT_B64: toBase64(metricsHttpSh),
     TRAEFIK_CONFIG_SCRIPT_B64: toBase64(traefikConfigSh),
     UPDATES_SCRIPT_B64: toBase64(updatesSh),
+    CONTAINER_BOOT_SCRIPT_B64: toBase64(containerBootSh),
   };
 
   return replacePlaceholders(provisionShTemplate, provisionVars);

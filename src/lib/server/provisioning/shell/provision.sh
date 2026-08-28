@@ -639,6 +639,28 @@ done
 echo "Note: Traefik and CrowdSec are pulling images in background via systemd"
 echo "Port 443 will be available once image pulls complete (check with: systemctl status traefik-container)"
 
+# ── Restart-policy replay at boot ──────────────────────────────────────
+#
+# Podman is daemonless, so a container's restart policy dies with the host.
+# Without this unit an application deployed by Rudder never came back from a
+# worker reboot — only Traefik and CrowdSec did, because they have units.
+
+echo "{{CONTAINER_BOOT_SCRIPT_B64}}" | base64 -d > /usr/local/bin/rudder-container-boot.sh
+chmod +x /usr/local/bin/rudder-container-boot.sh
+
+echo "{{CONTAINER_BOOT_SERVICE_B64}}" | base64 -d > /etc/systemd/system/rudder-container-boot.service
+systemctl daemon-reload
+# Podman's own unit covers `always` only and would then race ours for the same
+# containers. Ours supersedes it, so it is turned off rather than left half-doing
+# the job. Absent on some builds, hence the tolerated failure.
+systemctl disable --now podman-restart.service 2>/dev/null || true
+# `--now` so the unit is active on the worker that provisioning just ran on,
+# rather than only after its next boot: `systemctl is-active` is how anyone
+# checks this, and an inactive unit on a healthy worker reads as broken. The
+# ExecStart is a no-op here — everything with a restart policy is already up.
+systemctl enable --now rudder-container-boot.service
+echo "Restart-policy replay installed (containers return after a worker reboot)"
+
 # ── Netavark stale-rule cleanup ────────────────────────────────────────
 
 echo "{{NETAVARK_CLEANUP_SCRIPT_B64}}" | base64 -d > /usr/local/bin/rudder-netavark-cleanup.sh
@@ -802,6 +824,7 @@ systemctl is-active podman-api-tcp.service && echo "Podman API TCP service: ACTI
 systemctl is-active traefik-container.service && echo "Traefik service: ACTIVE" || echo "Traefik service: starting (pulling image)"
 systemctl is-active crowdsec-container.service && echo "CrowdSec service: ACTIVE" || echo "CrowdSec service: starting (pulling image)"
 systemctl is-active rudder-metrics-http.service && echo "Metrics HTTP service: ACTIVE" || echo "Metrics HTTP service: starting"
+systemctl is-enabled rudder-container-boot.service >/dev/null 2>&1 && echo "Restart-policy replay: ENABLED" || echo "Restart-policy replay: NOT ENABLED (containers will not survive a reboot)"
 curl -sf http://127.0.0.1:8080/_ping > /dev/null 2>&1 && echo "Podman API TCP: ONLINE" || echo "Podman API TCP: not ready"
 [ -S /run/podman/podman.sock ] && echo "Podman API Unix socket: EXISTS" || echo "Podman API Unix socket: not ready"
 curl -sf http://127.0.0.1:9100/ | grep -q cpu_percent && echo "Metrics HTTP: ONLINE" || echo "Metrics HTTP: not ready"

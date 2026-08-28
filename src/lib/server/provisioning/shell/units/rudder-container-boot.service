@@ -1,0 +1,19 @@
+[Unit]
+Description=Rudder: start containers with a restart policy after a reboot
+Documentation=man:podman-start(1)
+After=network-online.target podman-api-socket.service
+Wants=network-online.target
+Requires=podman-api-socket.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/rudder-container-boot.sh start
+ExecStop=/usr/local/bin/rudder-container-boot.sh stop
+TimeoutStopSec=120
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rudder-container-boot
+
+[Install]
+WantedBy=multi-user.target

@@ -879,6 +879,39 @@ describe('generateProvisioningScript', () => {
     expect(script).not.toContain('get_latest_github_tag "maxlerebourg/crowdsec-bouncer-traefik-plugin" "v1.6.0"');
   });
 
+  test('containers with a restart policy come back after the worker reboots', () => {
+    // Podman is daemonless: a restart policy is enforced by conmon while the
+    // host is up and by nothing across a reboot. Traefik and CrowdSec returned
+    // because they have units; every application Rudder deployed did not.
+    expect(script).toContain('systemctl enable --now rudder-container-boot.service');
+
+    const unit = blobFor('/etc/systemd/system/rudder-container-boot.service');
+    expect(unit).toContain('WantedBy=multi-user.target');
+    expect(unit).toContain('ExecStart=/usr/local/bin/rudder-container-boot.sh start');
+    // A oneshot without RemainAfterExit reads as inactive the moment it
+    // finishes, and its ExecStop would then never run.
+    expect(unit).toContain('RemainAfterExit=yes');
+    expect(unit).toContain('ExecStop=/usr/local/bin/rudder-container-boot.sh stop');
+  });
+
+  test('the boot script covers unless-stopped, which podman-restart.service does not', () => {
+    const boot = blobFor('/usr/local/bin/rudder-container-boot.sh');
+    expect(boot).toContain('restart-policy=$policy');
+    expect(boot).toContain('POLICIES=(always unless-stopped)');
+    // Neither Docker nor podman-restart.service starts these at boot, and a
+    // container that exits non-zero on every start would spin from power-on.
+    expect(boot).not.toContain('on-failure)');
+  });
+
+  test('does not leave podman-restart.service racing the Rudder unit', () => {
+    // It covers `always` only, so it cannot replace ours — and two things
+    // starting the same containers is how a boot ends in half-started state.
+    const disableAt = script.indexOf('systemctl disable --now podman-restart.service');
+    const enableAt = script.indexOf('systemctl enable --now rudder-container-boot.service');
+    expect(disableAt).toBeGreaterThan(-1);
+    expect(enableAt).toBeGreaterThan(disableAt);
+  });
+
   test('installs the patch-state scan on its own daily timer', () => {
     // apt-get -s upgrade takes seconds and holds the apt lock; it has no
     // business on the 30-second metrics timer.

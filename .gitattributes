@@ -1,0 +1,10 @@
+# Worker assets are inlined verbatim (Vite `?raw`) and executed by bash on the
+# worker. A CRLF checkout on Windows turns every line of provision.sh into a
+# command with a trailing carriage return, and provisioning fails on the first
+# one — so these files are LF regardless of core.autocrlf.
+src/lib/server/provisioning/shell/**/*.sh text eol=lf
+src/lib/server/provisioning/shell/*.sh     text eol=lf
+src/lib/server/provisioning/shell/**/*.service text eol=lf
+src/lib/server/provisioning/shell/**/*.timer   text eol=lf
+src/lib/server/provisioning/shell/**/*.conf    text eol=lf
+src/lib/server/provisioning/shell/**/*.yml     text eol=lf

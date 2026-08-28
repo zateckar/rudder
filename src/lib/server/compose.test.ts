@@ -70,6 +70,68 @@ services:
   });
 });
 
+describe('restart policy', () => {
+  test('a service with no restart: gets the application\'s policy, not `no`', () => {
+    // The compose default of `no` meant the Restart Policy field on the
+    // application page was decoration: the container survived neither a crash
+    // nor a worker reboot, whatever the user had picked.
+    const [c] = parse(
+      `
+services:
+  web:
+    image: nginx
+`,
+      { restartPolicy: 'unless-stopped' },
+    );
+    expect(c.restartPolicy).toBe('unless-stopped');
+  });
+
+  test('falls back to always when the application has no policy either', () => {
+    const [c] = parse(`
+services:
+  web:
+    image: nginx
+`);
+    expect(c.restartPolicy).toBe('always');
+  });
+
+  test('an explicit restart: wins over the application setting, including `no`', () => {
+    const [none] = parse(
+      `
+services:
+  web:
+    image: nginx
+    restart: "no"
+`,
+      { restartPolicy: 'always' },
+    );
+    expect(none.restartPolicy).toBe('no');
+
+    const [onFailure] = parse(
+      `
+services:
+  web:
+    image: nginx
+    restart: on-failure
+`,
+      { restartPolicy: 'always' },
+    );
+    expect(onFailure.restartPolicy).toBe('on-failure');
+  });
+
+  test('keeps the policy from a bounded on-failure:N, dropping only the bound', () => {
+    // Podman takes the retry count as a separate field. This used to fall
+    // through to `no` — the one policy the manifest definitively did not ask for.
+    const [c] = parse(`
+services:
+  web:
+    image: nginx
+    restart: on-failure:5
+`);
+    expect(c.restartPolicy).toBe('on-failure');
+  });
+});
+
 describe('resource limits', () => {
   test('honours the v3 deploy.resources.limits spelling', () => {
     const [c] = parse(`
