@@ -259,6 +259,22 @@ export const containers = sqliteTable('containers', {
    */
   domain: text('domain'),
   routerName: text('router_name'),
+  /**
+   * Every route this container answers on, as a JSON `PlannedRoute[]` in
+   * entryPoint order. Index 0 is the 443 route and duplicates the three columns
+   * above.
+   *
+   * The duplication is deliberate. `exposed_port` is what
+   * `reservedPortsForWorker` counts, `domain` is what the uniqueness index and
+   * `primaryUrl` read, and moving either into this column would put port
+   * allocation and hostname uniqueness into the same change as multi-port
+   * routing. The extra routes are additive; the primary path is untouched.
+   *
+   * Null on every container deployed before this existed, which the routing
+   * generator reads as "the primary columns are the whole story" — the single
+   * route those containers have always had.
+   */
+  routes: text('routes'),
   labels: text('labels'),
   /**
    * Which deploy produced this container. Two generations of one application

@@ -55,6 +55,102 @@ describe('generateTraefikLabelsForApp — routing', () => {
   });
 });
 
+describe('generateTraefikLabelsForApp — several published ports', () => {
+  /** versitygw's shape: a web UI on 443, the S3 API on 1443. */
+  const ROUTES = [
+    { key: '', entryPoint: 'websecure', hostPort: 31000 },
+    { key: 'p1', entryPoint: 'websecure-1', hostPort: 31001 },
+  ];
+
+  test('a bare port is still the 443 route and nothing else', () => {
+    // Every caller used this shape before extra entryPoints existed. A
+    // single-route application's labels have to stay byte-identical or every
+    // deployed application's routing changes underneath it.
+    const bare = generateTraefikLabelsForApp('shop', 'shop.example.com', 31000, true, {
+      rateLimitAvg: 10,
+    });
+    const explicit = generateTraefikLabelsForApp(
+      'shop',
+      'shop.example.com',
+      [{ key: '', entryPoint: 'websecure', hostPort: 31000 }],
+      true,
+      { rateLimitAvg: 10 },
+    );
+    expect(bare).toEqual(explicit);
+  });
+
+  test('emits a router and a service per route, on its own entryPoint', () => {
+    const labels = generateTraefikLabelsForApp('shop', 'shop.example.com', ROUTES);
+
+    expect(labels['traefik.http.routers.shop-secure.entrypoints']).toBe('websecure');
+    expect(labels['traefik.http.routers.shop-p1-secure.entrypoints']).toBe('websecure-1');
+    // Same hostname: one DNS record, one certificate.
+    expect(labels['traefik.http.routers.shop-p1-secure.rule']).toBe('Host(`shop.example.com`)');
+    expect(labels['traefik.http.routers.shop-p1-secure.tls.certresolver']).toBe('letsencrypt');
+    // Each points at its own backend.
+    expect(labels['traefik.http.services.shop.loadbalancer.server.url']).toBe('http://127.0.0.1:31000');
+    expect(labels['traefik.http.services.shop-p1.loadbalancer.server.url']).toBe('http://127.0.0.1:31001');
+    expect(labels['traefik.http.routers.shop-p1-secure.service']).toBe('shop-p1');
+  });
+
+  test('the WAF, the headers and the rate limit are on every route', () => {
+    // The claim that the extra ports are not a way around Traefik. If this
+    // breaks, opening 1443-4443 becomes exactly the hole the firewall exists to
+    // prevent.
+    const labels = generateTraefikLabelsForApp('shop', 'shop.example.com', ROUTES, true, {
+      rateLimitAvg: 10,
+    });
+    for (const router of ['shop-secure', 'shop-p1-secure']) {
+      expect(chain(labels, router)).toContain('crowdsec@file');
+      expect(chain(labels, router)).toContain('security-headers@file');
+      expect(chain(labels, router)).toContain('shop-ratelimit@docker');
+    }
+  });
+
+  test('OIDC is on 443 and on nothing else', () => {
+    // Deliberate, not an omission: OIDC is an interactive browser redirect and
+    // the extra ports carry machine traffic — an S3 client cannot follow one, so
+    // attaching it there would make the port unusable rather than protected.
+    const labels = generateTraefikLabelsForApp(
+      'shop',
+      'shop.example.com',
+      ROUTES,
+      true,
+      undefined,
+      true,
+    );
+    expect(chain(labels, 'shop-secure')).toContain('global-oidc@file');
+    expect(chain(labels, 'shop-p1-secure')).not.toContain('global-oidc@file');
+    // The WebSocket router follows the 443 route, chain included.
+    expect(chain(labels, 'shop-secure-ws')).toEqual(chain(labels, 'shop-secure'));
+  });
+
+  test('per-application OIDC is on 443 only too', () => {
+    const labels = generateTraefikLabelsForApp('shop', 'shop.example.com', ROUTES, true, {
+      authType: 'oidc',
+      authConfig: OIDC_CONFIG,
+    });
+    expect(chain(labels, 'shop-secure')).toContain('shop-oidc@docker');
+    expect(chain(labels, 'shop-p1-secure')).not.toContain('shop-oidc@docker');
+  });
+
+  test('the health check probes the 443 service alone', () => {
+    // One path for the whole application. Probing the web UI's health path
+    // against the S3 API would 404, and Traefik would take that port down for a
+    // reason that has nothing to do with it.
+    const labels = generateTraefikLabelsForApp('shop', 'shop.example.com', ROUTES, true, {
+      healthCheckPath: '/health',
+    });
+    expect(labels['traefik.http.services.shop.loadbalancer.healthcheck.path']).toBe('/health');
+    expect(labels['traefik.http.services.shop-p1.loadbalancer.healthcheck.path']).toBeUndefined();
+  });
+
+  test('no second WebSocket router', () => {
+    const labels = generateTraefikLabelsForApp('shop', 'shop.example.com', ROUTES);
+    expect(labels['traefik.http.routers.shop-p1-secure-ws.rule']).toBeUndefined();
+  });
+});
+
 describe('generateTraefikLabelsForApp — middleware chain', () => {
   test('puts the WAF first, before anything can answer the request', () => {
     const labels = generateTraefikLabelsForApp('shop', 'shop.example.com', 31000);

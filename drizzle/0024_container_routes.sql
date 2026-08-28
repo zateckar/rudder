@@ -1,0 +1,17 @@
+-- Every hostname:port a container answers on.
+--
+-- A JSON `PlannedRoute[]` in entryPoint order. Index 0 is the 443 route and
+-- duplicates `domain`, `router_name` and `exposed_port` on the same row.
+--
+-- The duplication is deliberate. `exposed_port` is what reservedPortsForWorker
+-- counts when it allocates the next host port, `domain` is what the uniqueness
+-- index and the application page read, and moving either into this column would
+-- put port allocation and hostname uniqueness into the same change as multi-port
+-- routing. The extra routes are additive; the primary path is untouched.
+--
+-- NULL on every container deployed before this existed, which the routing
+-- generator reads as "the primary columns are the whole story" — the single
+-- route those containers have always had. Reading NULL as "no routes" would take
+-- every already-deployed application off the air on the next configuration
+-- fetch.
+ALTER TABLE containers ADD COLUMN routes TEXT;

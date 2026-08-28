@@ -1051,11 +1051,34 @@
           </a>
         {/each}
       </div>
+    {:else if data.portUrls.length > 1}
+      <!-- More than one published port. Each is its own line with the container
+           port behind it and whether the login flow covers it, because on this
+           application "the URL" is no longer a single answer. -->
+      <div class="service-urls">
+        {#each data.portUrls as route}
+          <a href={route.url} target="_blank" rel="noopener" class="app-url">
+            🌐 {route.url}
+            {#if route.containerPort}<span class="port-hint">→ {route.containerPort}</span>{/if}
+            <span class="auth-hint" class:protected={route.authenticated}>
+              {route.authenticated ? 'OIDC' : 'no OIDC'}
+            </span>
+            <span class="ext-icon">↗</span>
+          </a>
+        {/each}
+      </div>
     {:else if data.appUrl}
       <a href={data.appUrl} target="_blank" rel="noopener" class="app-url">
         🌐 {data.appUrl}
         <span class="ext-icon">↗</span>
       </a>
+    {/if}
+    {#if data.unroutedPorts.length > 0}
+      <p class="unrouted-ports">
+        Declared public but not routed:
+        {#each data.unroutedPorts as entry, i}{i > 0 ? ', ' : ''}<strong>{entry.port}</strong>
+          ({entry.reason}){/each}
+      </p>
     {/if}
     {#if data.application.description}
       <p class="app-description">{data.application.description}</p>
@@ -2291,6 +2314,17 @@
   .service-urls { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
   .service-urls .app-url { font-size: 12px; }
   .ext-icon { font-size: 11px; opacity: 0.7; }
+  .port-hint { font-size: 11px; opacity: 0.65; }
+  /* Muted by default, tinted when the login flow covers the route: the eye
+     should land on what *is* protected, not read a wall of identical chips. */
+  .auth-hint {
+    font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+    padding: 1px 6px; border-radius: 8px;
+    background: var(--bg-subtle);
+    color: var(--text-muted);
+  }
+  .auth-hint.protected { background: var(--green-subtle); color: var(--green-text); }
+  .unrouted-ports { font-size: 12px; color: var(--text-muted); margin: 6px 0 0; max-width: 640px; }
   .app-description { font-size: 13px; color: var(--text-muted); margin: 4px 0 0; max-width: 500px; }
   .git-info {
     display: flex; align-items: center; gap: 8px; margin-top: 6px;

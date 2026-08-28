@@ -130,6 +130,7 @@ sqlite.run(`
     status TEXT NOT NULL,
     ports TEXT,
     exposed_port INTEGER,
+    routes TEXT,
     labels TEXT,
     generation INTEGER NOT NULL DEFAULT 1,
     state TEXT NOT NULL DEFAULT 'active',
@@ -292,6 +293,10 @@ for (const col of [
   // from it silently drops which of its ports were public — the same round-trip
   // loss the kubectl annotation has to avoid.
   `ALTER TABLE application_templates ADD COLUMN exposed_ports TEXT;`,
+  // Null on every container deployed before this: the routing generator reads
+  // that as "the domain/router_name/exposed_port columns are the whole story",
+  // which is the single route those containers have always had.
+  `ALTER TABLE containers ADD COLUMN routes TEXT;`,
 ]) {
   try { sqlite.run(col); } catch { /* Column already exists */ }
 }

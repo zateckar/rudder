@@ -5,6 +5,7 @@ import {
   buildMiddlewareOpts,
   pruneEmptySections,
   assembleWorkerConfig,
+  containerRoutes,
   tokenForwardingApps,
 } from './traefik-config';
 import { generateTraefikLabelsForApp } from './provisioning';
@@ -203,10 +204,54 @@ describe('equivalence with the label output', () => {
   });
 });
 
+describe('containerRoutes', () => {
+  test('a container with no routes column keeps the single route it has always had', () => {
+    // Every container deployed before this column existed. Reading null as "no
+    // routes" would take every one of them off the air on the next config fetch.
+    expect(containerRoutes({ routes: null, exposedPort: 31000 })).toEqual([
+      { entryPoint: 'websecure', hostPort: 31000 },
+    ]);
+  });
+
+  test('reads the stored routes when the row has them', () => {
+    const routes = JSON.stringify([
+      { entryPoint: 'websecure', hostPort: 31000 },
+      { entryPoint: 'websecure-1', hostPort: 31001 },
+    ]);
+    expect(containerRoutes({ routes, exposedPort: 31000 })).toEqual([
+      { entryPoint: 'websecure', hostPort: 31000 },
+      { entryPoint: 'websecure-1', hostPort: 31001 },
+    ]);
+  });
+
+  test('falls back rather than throwing on a row it cannot read', () => {
+    // This runs on every configuration fetch for every worker. Throwing would
+    // fail `buildWorkerDynamicConfig` and cost every *other* application on the
+    // worker its routing, over one bad row.
+    for (const routes of ['not json', '{}', '[]', '[{"entryPoint":"websecure"}]']) {
+      expect(containerRoutes({ routes, exposedPort: 31000 }), routes).toEqual([
+        { entryPoint: 'websecure', hostPort: 31000 },
+      ]);
+    }
+  });
+
+  test('refuses an entryPoint this worker does not bind', () => {
+    // A router on an unbound entryPoint is one Traefik accepts and never
+    // serves — a request that hangs instead of a URL that is visibly missing.
+    const routes = JSON.stringify([
+      { entryPoint: 'websecure', hostPort: 31000 },
+      { entryPoint: 'websecure-9', hostPort: 31001 },
+    ]);
+    expect(containerRoutes({ routes, exposedPort: 31000 })).toEqual([
+      { entryPoint: 'websecure', hostPort: 31000 },
+    ]);
+  });
+});
+
 describe('configForRouteGroups', () => {
   test('replicas collapse into one service with one server each', () => {
     const doc = configForRouteGroups(
-      [{ routerBase: 'shop', domain: 'shop.example.com', ports: [31000, 31001, 31002] }],
+      [{ routerBase: 'shop', domain: 'shop.example.com', entries: [{ key: '', entryPoint: 'websecure', ports: [31000, 31001, 31002] }] }],
       false,
     );
     expect(doc.http.services.shop.loadBalancer.servers).toEqual([
@@ -217,11 +262,63 @@ describe('configForRouteGroups', () => {
     expect(Object.keys(doc.http.routers)).toEqual(['shop-secure', 'shop-secure-ws']);
   });
 
+  test('replicas and ports are different axes, and stay so', () => {
+    // The mistake this exists to catch: three replicas each publishing two
+    // ports is two routers of three servers, not one router of six. Folding
+    // the port dimension into `ports` would make Traefik load-balance the S3
+    // API against the web UI as though they were copies of one service — half
+    // the requests to each would reach the wrong process.
+    const doc = configForRouteGroups(
+      [
+        {
+          routerBase: 'shop',
+          domain: 'shop.example.com',
+          entries: [
+            { key: '', entryPoint: 'websecure', ports: [31000, 31010, 31020] },
+            { key: 'p1', entryPoint: 'websecure-1', ports: [31001, 31011, 31021] },
+          ],
+        },
+      ],
+      false,
+    );
+
+    expect(doc.http.services.shop.loadBalancer.servers.map((s: any) => s.url)).toEqual([
+      'http://127.0.0.1:31000',
+      'http://127.0.0.1:31010',
+      'http://127.0.0.1:31020',
+    ]);
+    expect(doc.http.services['shop-p1'].loadBalancer.servers.map((s: any) => s.url)).toEqual([
+      'http://127.0.0.1:31001',
+      'http://127.0.0.1:31011',
+      'http://127.0.0.1:31021',
+    ]);
+    expect(doc.http.routers['shop-p1-secure'].entryPoints).toEqual(['websecure-1']);
+  });
+
+  test('the extra route carries the WAF but not the login flow', () => {
+    const doc = configForRouteGroups(
+      [
+        {
+          routerBase: 'shop',
+          domain: 'shop.example.com',
+          entries: [
+            { key: '', entryPoint: 'websecure', ports: [31000] },
+            { key: 'p1', entryPoint: 'websecure-1', ports: [31001] },
+          ],
+        },
+      ],
+      true,
+    );
+    expect(doc.http.routers['shop-secure'].middlewares).toContain('global-oidc@file');
+    expect(doc.http.routers['shop-p1-secure'].middlewares).toContain('crowdsec@file');
+    expect(doc.http.routers['shop-p1-secure'].middlewares).not.toContain('global-oidc@file');
+  });
+
   test('several applications merge without colliding', () => {
     const doc = configForRouteGroups(
       [
-        { routerBase: 'shop', domain: 'shop.example.com', ports: [31000] },
-        { routerBase: 'shop-api', domain: 'shop-api.example.com', ports: [31001] },
+        { routerBase: 'shop', domain: 'shop.example.com', entries: [{ key: '', entryPoint: 'websecure', ports: [31000] }] },
+        { routerBase: 'shop-api', domain: 'shop-api.example.com', entries: [{ key: '', entryPoint: 'websecure', ports: [31001] }] },
       ],
       false,
     );
@@ -237,7 +334,7 @@ describe('configForRouteGroups', () => {
 
   test('a group with no running container is skipped, not emitted empty', () => {
     const doc = configForRouteGroups(
-      [{ routerBase: 'shop', domain: 'shop.example.com', ports: [] }],
+      [{ routerBase: 'shop', domain: 'shop.example.com', entries: [{ key: '', entryPoint: 'websecure', ports: [] }] }],
       false,
     );
     expect(doc.http.routers).toEqual({});
@@ -256,7 +353,7 @@ describe('configForRouteGroups', () => {
         {
           routerBase: 'evil',
           domain: 'evil.example.com`) || Host(`victim.example.com',
-          ports: [31000],
+          entries: [{ key: '', entryPoint: 'websecure', ports: [31000] }],
         },
       ],
       false,
@@ -272,8 +369,8 @@ describe('configForRouteGroups', () => {
     // application offline with it.
     const doc = configForRouteGroups(
       [
-        { routerBase: 'evil', domain: 'a`) || Host(`b', ports: [31000] },
-        { routerBase: 'shop', domain: 'shop.example.com', ports: [31001] },
+        { routerBase: 'evil', domain: 'a`) || Host(`b', entries: [{ key: '', entryPoint: 'websecure', ports: [31000] }] },
+        { routerBase: 'shop', domain: 'shop.example.com', entries: [{ key: '', entryPoint: 'websecure', ports: [31001] }] },
       ],
       false,
     );
@@ -287,7 +384,7 @@ describe('configForRouteGroups', () => {
         {
           routerBase: 'shop',
           domain: 'shop.example.com',
-          ports: [31000],
+          entries: [{ key: '', entryPoint: 'websecure', ports: [31000] }],
           middlewareOpts: { authType: 'none' },
         },
       ],
@@ -305,7 +402,7 @@ describe('pruneEmptySections', () => {
   // Confirmed on a live worker: identical document minus the empty key loads.
   test('drops a section with nothing in it', () => {
     const served = pruneEmptySections(
-      configForRouteGroups([{ routerBase: 'shop', domain: 'shop.example.com', ports: [31000] }], false),
+      configForRouteGroups([{ routerBase: 'shop', domain: 'shop.example.com', entries: [{ key: '', entryPoint: 'websecure', ports: [31000] }] }], false),
     );
     expect(served.http.routers).toBeDefined();
     expect(served.http.services).toBeDefined();
@@ -319,7 +416,7 @@ describe('pruneEmptySections', () => {
           {
             routerBase: 'shop',
             domain: 'shop.example.com',
-            ports: [31000],
+            entries: [{ key: '', entryPoint: 'websecure', ports: [31000] }],
             middlewareOpts: { rateLimitAvg: 10 },
           },
         ],
@@ -336,7 +433,7 @@ describe('pruneEmptySections', () => {
 });
 
 describe('assembleWorkerConfig', () => {
-  const GROUPS = [{ routerBase: 'shop', domain: 'shop.example.com', ports: [31000] }];
+  const GROUPS = [{ routerBase: 'shop', domain: 'shop.example.com', entries: [{ key: '', entryPoint: 'websecure', ports: [31000] }] }];
 
   test('never serves an empty section', () => {
     // The pruning has to happen on the path that actually reaches the worker,
@@ -454,7 +551,7 @@ describe('tokenForwardingApps', () => {
   const group = (routerBase: string, middlewareOpts: any) => ({
     routerBase,
     domain: `${routerBase}.example.com`,
-    ports: [3000],
+    entries: [{ key: '', entryPoint: 'websecure', ports: [3000] }],
     middlewareOpts,
   });
 

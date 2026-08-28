@@ -307,7 +307,7 @@ export interface DesiredApp {
   notes: string[];
   /**
    * True when no allocator was supplied, so every host port in `planned.ports`
-   * and `planned.route` is a placeholder. Reconciliation does not compare ports —
+   * and `planned.routes` is a placeholder. Reconciliation does not compare ports —
    * they are drawn from an allocator and so differ on every recomputation — but
    * nothing downstream should mistake these for numbers a container will bind.
    */

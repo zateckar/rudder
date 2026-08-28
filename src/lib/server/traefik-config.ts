@@ -25,6 +25,7 @@ import {
 import { normalizeOidcSecret } from './oidc';
 import { domainFormatError } from './domains';
 import { decryptField } from './encryption';
+import { MAX_ROUTES_PER_CONTAINER, ROUTE_ENTRYPOINTS, routeKey } from './deploy/plan';
 
 export interface DynamicConfig {
   http: {
@@ -252,11 +253,28 @@ export function buildMiddlewareOpts(app: any): AppMiddlewareOptions | undefined 
   return hasOpts ? opts : undefined;
 }
 
+/**
+ * One entryPoint of a routed group: the router, and every replica behind it.
+ *
+ * `ports` is the *replica* dimension — one server per container — and must not
+ * be confused with the route dimension. Folding a second published port into
+ * this array would make Traefik load-balance the S3 API against the web UI as
+ * though they were two copies of one service.
+ */
+export interface RouteEntry {
+  /** `routeKey(index)` — empty for the 443 route. */
+  key: string;
+  entryPoint: string;
+  /** Host ports of the containers behind this router, one per replica. */
+  ports: number[];
+}
+
 /** One routed group: an application's containers sharing a hostname. */
 export interface RouteGroup {
   routerBase: string;
   domain: string;
-  ports: number[];
+  /** One per entryPoint, in entryPoint order. Index 0 is the 443 route. */
+  entries: RouteEntry[];
   /** Compose services carry no per-app middleware, matching the deploy path. */
   middlewareOpts?: AppMiddlewareOptions;
 }
@@ -296,7 +314,7 @@ export function configForRouteGroups(groups: RouteGroup[], globalOidcEnabled: bo
   const config: DynamicConfig = { http: { routers: {}, services: {}, middlewares: {} } };
 
   for (const group of groups) {
-    if (!group.ports.length || !group.domain) continue;
+    if (!group.entries.length || !group.entries[0].ports.length || !group.domain) continue;
 
     // Skipped, not serialised. This path reads `applications.domain` straight
     // out of the database, so it reaches rows written before the domain was
@@ -316,19 +334,28 @@ export function configForRouteGroups(groups: RouteGroup[], globalOidcEnabled: bo
     const labels = generateTraefikLabelsForApp(
       group.routerBase,
       group.domain,
-      group.ports[0],
+      group.entries.map((entry) => ({
+        key: entry.key,
+        entryPoint: entry.entryPoint,
+        hostPort: entry.ports[0],
+      })),
       true,
       group.middlewareOpts,
       globalOidcEnabled,
     );
     const generated = labelsToDynamicConfig(labels);
 
-    // Replicas: one service, one server per container. The labels only ever
-    // describe a single backend; this is the part that makes blue/green a
-    // change to this function rather than a container recreate.
-    const service = generated.http.services[group.routerBase];
-    if (service?.loadBalancer) {
-      service.loadBalancer.servers = group.ports.map((port) => ({ url: `http://127.0.0.1:${port}` }));
+    // Replicas: one service per entryPoint, one server per container. The labels
+    // only ever describe a single backend; this is the part that makes
+    // blue/green a change to this function rather than a container recreate.
+    for (const entry of group.entries) {
+      const serviceName = entry.key ? `${group.routerBase}-${entry.key}` : group.routerBase;
+      const service = generated.http.services[serviceName];
+      if (service?.loadBalancer) {
+        service.loadBalancer.servers = entry.ports.map((port) => ({
+          url: `http://127.0.0.1:${port}`,
+        }));
+      }
     }
 
     mergeInto(config, generated);
@@ -362,6 +389,49 @@ export function assembleWorkerConfig(
  * with no routes still has its protective middlewares. Worker OIDC *is*
  * included, so changing it no longer needs a manual push.
  */
+/** A stored route, as the config generator needs it. */
+interface StoredRoute {
+  entryPoint: string;
+  hostPort: number;
+}
+
+/**
+ * A container's routes, from `containers.routes` or from the primary columns.
+ *
+ * Tolerant on purpose. This runs on every configuration fetch for every worker,
+ * and a row holding something unexpected must cost that container its extra
+ * routes, not cost the whole worker its routing — `buildWorkerDynamicConfig`
+ * failing takes every *other* application down with it, which is the same
+ * reasoning `domainFormatError` is skipped rather than thrown on below.
+ */
+export function containerRoutes(container: {
+  routes?: string | null;
+  exposedPort: number | null;
+}): StoredRoute[] {
+  const fallback: StoredRoute[] = container.exposedPort
+    ? [{ entryPoint: ROUTE_ENTRYPOINTS[0], hostPort: container.exposedPort }]
+    : [];
+  if (!container.routes) return fallback;
+  try {
+    const parsed = JSON.parse(container.routes);
+    if (!Array.isArray(parsed) || parsed.length === 0) return fallback;
+    const routes: StoredRoute[] = [];
+    for (const route of parsed.slice(0, MAX_ROUTES_PER_CONTAINER)) {
+      const hostPort = Number(route?.hostPort);
+      const entryPoint = String(route?.entryPoint ?? '');
+      // An entryPoint this worker does not bind would produce a router Traefik
+      // silently never serves. Dropping it is what makes the mismatch visible
+      // as a missing URL rather than as a request that hangs.
+      if (!Number.isInteger(hostPort) || hostPort <= 0) return fallback;
+      if (!(ROUTE_ENTRYPOINTS as readonly string[]).includes(entryPoint)) return fallback;
+      routes.push({ entryPoint, hostPort });
+    }
+    return routes.length > 0 ? routes : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 /**
  * The routed groups on a worker, in a stable order.
  *
@@ -400,15 +470,34 @@ export async function routeGroupsForWorker(workerId: string): Promise<RouteGroup
   const byRouter = new Map<string, RouteGroup>();
   for (const { app, container } of rows) {
     if (!container.routerName || !container.domain || !container.exposedPort) continue;
+
+    // `containers.routes` when the row has it, the primary columns otherwise.
+    // Null is every container deployed before the column existed, and it means
+    // the single 443 route those containers have always had — not "no routes".
+    const routes = containerRoutes(container);
+
+    // Keyed by the *443* router name, which is what `containers.router_name`
+    // holds for every row old and new. Grouping by each route's own name would
+    // put an application's second port in its own group and lose the ordering
+    // the entryPoint assignment depends on.
     const existing = byRouter.get(container.routerName);
     if (existing) {
-      existing.ports.push(container.exposedPort);
+      // A replica. It adds a server to each of the group's routers rather than
+      // a router of its own.
+      routes.forEach((route, index) => {
+        const entry = existing.entries[index];
+        if (entry) entry.ports.push(route.hostPort);
+      });
       continue;
     }
     byRouter.set(container.routerName, {
       routerBase: container.routerName,
       domain: container.domain,
-      ports: [container.exposedPort],
+      entries: routes.map((route, index) => ({
+        key: routeKey(index),
+        entryPoint: route.entryPoint,
+        ports: [route.hostPort],
+      })),
       // Every type, with no exception for compose. The deploy path calls
       // `buildMiddlewareOpts(app)` unconditionally, and the two must agree:
       // excluding compose here published a compose application with per-app

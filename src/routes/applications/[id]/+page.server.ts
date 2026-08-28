@@ -4,7 +4,7 @@ import { applications, workers, containers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { canAccessApplication, requireAuth } from '$lib/server/auth';
 import { driftForApplication } from '$lib/server/reconcile';
-import { primaryUrl, serviceUrls } from '$lib/server/app-urls';
+import { primaryUrl, routeUrls, serviceUrls, unroutedPorts } from '$lib/server/app-urls';
 
 export const load = async ({ params, cookies }: { params: { id: string }; cookies: any }) => {
   const ctx = await requireAuth(cookies);
@@ -29,6 +29,21 @@ export const load = async ({ params, cookies }: { params: { id: string }; cookie
   const appUrl = primaryUrl(application.domain, appContainers);
   const urls = serviceUrls(appContainers);
 
+  // Every port the application answers on, with whether the login flow covers
+  // it. Built from the active containers only: a draining generation still has
+  // rows, and listing its ports would show URLs that stop working without
+  // notice. Deduplicated by URL, since replicas share one.
+  const byUrl = new Map<string, ReturnType<typeof routeUrls>[number]>();
+  const oidcEnabled =
+    application.authType === 'oidc' || (application.authType === 'global' && !!worker?.oidcEnabled);
+  for (const row of appContainers) {
+    if (row.state !== 'active') continue;
+    for (const route of routeUrls(row, oidcEnabled)) {
+      if (!byUrl.has(route.url)) byUrl.set(route.url, route);
+    }
+  }
+  const portUrls = [...byUrl.values()].sort((a, b) => a.publicPort - b.publicPort);
+
   // From the last reconciliation pass, not computed here: the page must not make
   // a Podman call per view, and the timer's answer is at most one cycle old.
   const drift = await driftForApplication(params.id);
@@ -40,6 +55,9 @@ export const load = async ({ params, cookies }: { params: { id: string }; cookie
     containers: appContainers,
     appUrl,
     serviceUrls: urls,
+    portUrls,
+    /** Ports declared public that produced no route, and why. */
+    unroutedPorts: unroutedPorts(application, appContainers),
     drift,
   };
 };

@@ -15,6 +15,12 @@
  * explicit domain.
  */
 import type { containers } from '$lib/db/schema';
+import {
+  ENTRYPOINT_PORTS,
+  MAX_ROUTES_PER_CONTAINER,
+  ROUTE_ENTRYPOINTS,
+  parseExposedPorts,
+} from './deploy/plan';
 import { routerDisplayName } from './domains';
 
 type ContainerRow = typeof containers.$inferSelect;
@@ -71,6 +77,114 @@ export function primaryUrl(
     for (const { host } of routerHosts(row)) return `https://${host}`;
   }
   return null;
+}
+
+/** One port an application answers on, as something to render. */
+export interface RouteUrl {
+  /** Container port behind this URL. */
+  containerPort: number;
+  /** Public port, from the entryPoint. */
+  publicPort: number;
+  url: string;
+  /**
+   * Whether the application's OIDC login covers this route.
+   *
+   * False on every port but 443, always — OIDC is an interactive browser
+   * redirect and the extra entryPoints carry machine traffic that cannot follow
+   * one. Rendered rather than implied, because an operator who switched
+   * authentication on is entitled to see what it reaches without reading the
+   * routing code.
+   */
+  authenticated: boolean;
+}
+
+/**
+ * Every hostname:port one container answers on.
+ *
+ * Reads `containers.routes`, which is null for anything deployed before extra
+ * entryPoints existed — those fall back to the single 443 route the primary
+ * columns describe.
+ */
+export function routeUrls(row: ContainerRow, oidcEnabled: boolean): RouteUrl[] {
+  const domain = row.domain;
+  if (!domain) return [];
+
+  const stored = ((): Array<{ entryPoint?: string; containerPort?: number }> => {
+    if (!row.routes) return [];
+    try {
+      const parsed = JSON.parse(row.routes);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  })();
+
+  if (stored.length === 0) {
+    return [
+      {
+        containerPort: 0,
+        publicPort: ENTRYPOINT_PORTS[ROUTE_ENTRYPOINTS[0]],
+        url: `https://${domain}`,
+        authenticated: oidcEnabled,
+      },
+    ];
+  }
+
+  return stored.flatMap((route, index) => {
+    const publicPort = ENTRYPOINT_PORTS[String(route?.entryPoint ?? '')];
+    if (!publicPort) return [];
+    return [
+      {
+        containerPort: Number(route?.containerPort) || 0,
+        publicPort,
+        // 443 is the default, so naming it would make the common case look
+        // unusual. Everything else has to carry its port to be usable.
+        url: publicPort === 443 ? `https://${domain}` : `https://${domain}:${publicPort}`,
+        authenticated: oidcEnabled && index === 0,
+      },
+    ];
+  });
+}
+
+/**
+ * Ports the application declared public that produced no route, and why.
+ *
+ * A page listing two URLs when the user declared three, without saying what
+ * happened to the third, generates precisely one support question. The deploy
+ * notes already say it once, at deploy time; this is the version still visible
+ * a week later.
+ */
+export function unroutedPorts(
+  app: { exposedPorts: string | null },
+  appContainers: readonly ContainerRow[],
+): Array<{ port: number; reason: string }> {
+  const declared = parseExposedPorts(app.exposedPorts);
+  if (!declared || declared.length === 0) return [];
+
+  const routed = new Set<number>();
+  for (const row of appContainers) {
+    if (row.state !== 'active' || !row.routes) continue;
+    try {
+      for (const route of JSON.parse(row.routes) ?? []) {
+        const port = Number(route?.containerPort);
+        if (Number.isInteger(port)) routed.add(port);
+      }
+    } catch {
+      // A row we cannot read tells us nothing about what is routed. Saying
+      // "not routed" on that basis would be a guess presented as a finding.
+      return [];
+    }
+  }
+
+  return declared
+    .filter((port) => !routed.has(port))
+    .map((port) => ({
+      port,
+      reason:
+        declared.indexOf(port) >= MAX_ROUTES_PER_CONTAINER
+          ? `past the ${MAX_ROUTES_PER_CONTAINER}-port limit — a worker has ${MAX_ROUTES_PER_CONTAINER} HTTPS entryPoints`
+          : 'not published by any container, or published over UDP only',
+    }));
 }
 
 /** One entry per distinct hostname the application serves, for multi-service apps. */

@@ -8,6 +8,7 @@ import { getRestPodmanClient } from '$lib/server/podman-client';
 import type { ContainerInspect } from '$lib/server/podman';
 import {
   ManifestError,
+  routeKey,
   type DeploymentPlan,
   type PlannedFile,
   type PlannedRoute,
@@ -173,23 +174,35 @@ async function deliverFiles(
  * routers with the same `Host()` rule.
  */
 function routingLabels(
-  route: PlannedRoute,
+  routes: readonly PlannedRoute[],
   middlewareOpts: AppMiddlewareOptions | undefined,
   globalOidcEnabled: boolean,
 ): Record<string, string> {
-  if (!route.definesRouter) {
-    // A replica. It advertises its own address under the shared service name so
-    // Traefik load-balances across the set, and defines nothing else.
-    return {
-      'traefik.enable': 'true',
-      [`traefik.http.services.${route.routerName}.loadbalancer.server.url`]:
-        `http://127.0.0.1:${route.hostPort}`,
-    };
+  const primary = routes[0];
+  if (!primary) return {};
+
+  if (!primary.definesRouter) {
+    // A replica. It advertises its own address under each shared service name so
+    // Traefik load-balances across the set, and defines nothing else. One entry
+    // per route: a replica of an application publishing two ports has to join
+    // both services, or the second port load-balances across one container while
+    // the first balances across all of them.
+    const labels: Record<string, string> = { 'traefik.enable': 'true' };
+    for (const route of routes) {
+      labels[`traefik.http.services.${route.routerName}.loadbalancer.server.url`] =
+        `http://127.0.0.1:${route.hostPort}`;
+    }
+    return labels;
   }
+
   return generateTraefikLabelsForApp(
-    route.routerName,
-    route.domain,
-    route.hostPort,
+    primary.routerName,
+    primary.domain,
+    routes.map((route, index) => ({
+      key: routeKey(index),
+      entryPoint: route.entryPoint,
+      hostPort: route.hostPort,
+    })),
     true, // WebSocket, for terminals
     middlewareOpts,
     globalOidcEnabled,
@@ -1071,11 +1084,8 @@ async function deployApplication(
         ];
 
         const labels = { ...planned.labels };
-        // The 443 route only, for now. Emitting a router per route is 3-03's
-        // job; until then a labels-mode worker serves what it always has, and a
-        // declared second port is recorded but not yet reachable there.
-        if (planned.routes[0] && !httpRouting) {
-          Object.assign(labels, routingLabels(planned.routes[0], middlewareOpts, globalOidcEnabled));
+        if (planned.routes.length > 0 && !httpRouting) {
+          Object.assign(labels, routingLabels(planned.routes, middlewareOpts, globalOidcEnabled));
         }
 
         const containerName = nameFor(planned.name);
@@ -1134,6 +1144,11 @@ async function deployApplication(
           exposedPort: planned.routes[0]?.hostPort ?? null,
           domain: planned.routes[0]?.domain ?? null,
           routerName: planned.routes[0]?.routerName ?? null,
+          // The whole ordered set, including the one above. Null rather than
+          // `[]` when there is nothing to route, so a container with no routes
+          // is indistinguishable from one deployed before this column existed —
+          // both mean "read the primary columns".
+          routes: planned.routes.length > 0 ? JSON.stringify(planned.routes) : null,
           labels: JSON.stringify(redactSecretLabels(labels)),
           generation,
           state: initialState,

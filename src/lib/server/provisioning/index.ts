@@ -1,3 +1,4 @@
+import { ROUTE_ENTRYPOINTS } from '../deploy/plan';
 import { routerName } from '../domains';
 import {
   FORWARDED_IDENTITY_HEADERS,
@@ -598,34 +599,71 @@ export function isPlainPathPrefix(path: unknown): path is string {
   );
 }
 
+/** One of an application's routes, as the label generator needs it. */
+export interface TraefikRoutePort {
+  /** `routeKey(index)` — empty for the 443 route, `p1`… for the rest. */
+  key: string;
+  /** Traefik entryPoint name, from `ROUTE_ENTRYPOINTS`. */
+  entryPoint: string;
+  /** Host port this route's service proxies to. */
+  hostPort: number;
+}
+
+/** Router and service identifier for one route of `safeName`. */
+function routeIdentifier(safeName: string, key: string): string {
+  return key ? `${safeName}-${key}` : safeName;
+}
+
 export function generateTraefikLabelsForApp(
   appName: string,
   domain: string,
-  targetPort: number,
+  /**
+   * A bare host port is the 443 route and nothing else — the shape every caller
+   * used before extra entryPoints existed, kept so a single-route application's
+   * labels are byte-identical to what it has been running.
+   */
+  targetPort: number | readonly TraefikRoutePort[],
   enableWebSocket: boolean = true,
   middlewareOpts?: AppMiddlewareOptions,
   globalOidcEnabled: boolean = false
 ): Record<string, string> {
   const safeName = routerName(appName);
+  const routes: readonly TraefikRoutePort[] =
+    typeof targetPort === 'number'
+      ? [{ key: '', entryPoint: ROUTE_ENTRYPOINTS[0], hostPort: targetPort }]
+      : targetPort;
 
-  // Build middleware chain: crowdsec first, then security headers
+  // Every route's chain: the WAF, the security headers, and the rate limit when
+  // one is set. None of these is interactive and none of them breaks a machine
+  // client, which is what makes "the extra ports are not a way around the WAF"
+  // a fact rather than a hope.
   const middlewares: string[] = ['crowdsec@file', 'security-headers@file'];
 
-  const labels: Record<string, string> = {
-    'traefik.enable': 'true',
+  const labels: Record<string, string> = { 'traefik.enable': 'true' };
 
-    // HTTPS router with Let's Encrypt TLS-ALPN-01 (no port 80 needed)
-    [`traefik.http.routers.${safeName}-secure.rule`]: `Host(\`${domain}\`)`,
-    [`traefik.http.routers.${safeName}-secure.entrypoints`]: 'websecure',
-    [`traefik.http.routers.${safeName}-secure.tls`]: 'true',
-    [`traefik.http.routers.${safeName}-secure.tls.certresolver`]: 'letsencrypt',
-    [`traefik.http.routers.${safeName}-secure.service`]: safeName,
+  for (const route of routes) {
+    const id = routeIdentifier(safeName, route.key);
+    // HTTPS router with Let's Encrypt TLS-ALPN-01 (no port 80 needed).
+    // Every route of a container shares the hostname and therefore the
+    // certificate; only the entryPoint and the identifier differ.
+    labels[`traefik.http.routers.${id}-secure.rule`] = `Host(\`${domain}\`)`;
+    labels[`traefik.http.routers.${id}-secure.entrypoints`] = route.entryPoint;
+    labels[`traefik.http.routers.${id}-secure.tls`] = 'true';
+    labels[`traefik.http.routers.${id}-secure.tls.certresolver`] = 'letsencrypt';
+    labels[`traefik.http.routers.${id}-secure.service`] = id;
 
     // Service: Traefik on host network proxies to container's host-mapped port
-    [`traefik.http.services.${safeName}.loadbalancer.server.url`]: `http://127.0.0.1:${targetPort}`,
-  };
+    labels[`traefik.http.services.${id}.loadbalancer.server.url`] =
+      `http://127.0.0.1:${route.hostPort}`;
+  }
 
-  // Health check — Traefik marks backend as down if it fails
+  // Health check — Traefik marks backend as down if it fails.
+  //
+  // The 443 service only. `healthCheckPath` is one path for the whole
+  // application, and an application publishing several ports is publishing
+  // several *services*: probing the web UI's health path against the S3 API
+  // would 404, Traefik would mark that backend down, and the port would go dark
+  // for a reason that has nothing to do with it.
   if (middlewareOpts?.healthCheckPath) {
     labels[`traefik.http.services.${safeName}.loadbalancer.healthcheck.path`] = middlewareOpts.healthCheckPath;
     labels[`traefik.http.services.${safeName}.loadbalancer.healthcheck.interval`] = '10s';
@@ -640,6 +678,22 @@ export function generateTraefikLabelsForApp(
     labels[`traefik.http.middlewares.${rlName}.ratelimit.period`] = '1s';
     middlewares.push(`${rlName}@docker`);
   }
+
+  // Everything above applies to every route. Everything from here — the OIDC
+  // middleware, global or per-application — applies to the 443 route alone.
+  //
+  // Not an oversight, and not a weaker chain for the extra ports. OIDC is an
+  // interactive browser redirect; the extra entryPoints carry machine traffic —
+  // an S3 endpoint, an admin API, a scrape target — and no such client can
+  // follow a redirect to an HTML login. Putting the flow in front of one does
+  // not protect it, it makes it unusable. Where 443 and 1443 serve different
+  // services, an unauthenticated route to the second is not a way around the
+  // first: it is a different endpoint, and protecting it is the application's
+  // job — an API key, signature auth, mTLS.
+  //
+  // The application page states which routes this covers, so an operator who
+  // switched authentication on can see what it reaches.
+  const sharedMiddlewares = [...middlewares];
 
   // Global OIDC auth (if enabled and not overridden by per-app OIDC or explicitly disabled)
   const hasPerAppOidc = middlewareOpts?.authType === 'oidc' && middlewareOpts.authConfig;
@@ -721,10 +775,18 @@ export function generateTraefikLabelsForApp(
     middlewares.push(`${oidcName}@docker`);
   }
 
-  // Set the middleware chain on the router
+  // Set the middleware chain on the routers: the full one on 443, the shared
+  // one — everything except authentication — on the rest.
   const middlewareChain = middlewares.join(',');
-  labels[`traefik.http.routers.${safeName}-secure.middlewares`] = middlewareChain;
+  const sharedChain = sharedMiddlewares.join(',');
+  for (const route of routes) {
+    const id = routeIdentifier(safeName, route.key);
+    labels[`traefik.http.routers.${id}-secure.middlewares`] = route.key ? sharedChain : middlewareChain;
+  }
 
+  // The 443 route only. A WebSocket router per port is speculative until
+  // something asks for one, and each is another place a middleware list can
+  // drift from the primary's — which is exactly what happened to this one.
   if (enableWebSocket) {
     labels[`traefik.http.routers.${safeName}-secure-ws.rule`] =
       `Host(\`${domain}\`) && Header(\`Connection\`, \`Upgrade\`) && Header(\`Upgrade\`, \`websocket\`)`;

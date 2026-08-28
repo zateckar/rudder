@@ -76,6 +76,22 @@ export const ENTRYPOINT_PORTS: Readonly<Record<string, number>> = {
 /** One route per entryPoint, so this is also the ceiling on declared ports. */
 export const MAX_ROUTES_PER_CONTAINER = ROUTE_ENTRYPOINTS.length;
 
+/**
+ * Suffix distinguishing route `index`'s router and service from the 443 one.
+ *
+ * Empty for index 0, deliberately: the 443 router keeps the unsuffixed name it
+ * has always had, so no deployed application sees its router renamed and a
+ * labels-mode worker's configuration stays byte-identical until someone declares
+ * a second port.
+ *
+ * The one definition of the rule. The route assigner names routers with it and
+ * both routing generators re-derive service names from it, so a change here
+ * cannot leave the two disagreeing about what a router is called.
+ */
+export function routeKey(index: number): string {
+  return index === 0 ? '' : `p${index}`;
+}
+
 /** Where a container sits in its application's Traefik route. */
 export interface PlannedRoute {
   /** Hostname traffic arrives on. */
@@ -316,11 +332,7 @@ export function createRouteAssigner(ctx: PlanContext) {
 
     return bindings.slice(0, MAX_ROUTES_PER_CONTAINER).map((binding, index) => ({
       domain,
-      // Index 0 keeps the unsuffixed name it has always had, so no deployed
-      // application sees its router renamed by this feature and a worker's
-      // existing routing configuration is byte-identical until someone declares
-      // a second port.
-      routerName: index === 0 ? base : `${base}-p${index}`,
+      routerName: routeKey(index) ? `${base}-${routeKey(index)}` : base,
       hostPort: binding.hostPort,
       containerPort: binding.containerPort,
       entryPoint: ROUTE_ENTRYPOINTS[index],

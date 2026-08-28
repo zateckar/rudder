@@ -446,6 +446,75 @@ A compose service with no `restart:` key takes the application's **Restart
 Policy** (default `always`) rather than Compose's own default of `no`. An
 explicit `restart:` still wins, including an explicit `no`.
 
+### Publishing more than one port
+
+An application that serves two things — a web UI and an API, say — can publish
+both on the same hostname and the same certificate. Traefik binds five HTTPS
+entryPoints on every worker, and an application's **Public Ports** decide which
+container ports take them, in the order they are written:
+
+| Declaration position | Public port | Reached at |
+| --- | --- | --- |
+| first | 443 | `https://app.example.com` |
+| second | 1443 | `https://app.example.com:1443` |
+| third | 2443 | `https://app.example.com:2443` |
+| fourth | 3443 | `https://app.example.com:3443` |
+| fifth | 4443 | `https://app.example.com:4443` |
+
+**The order you write is the mapping.** It is not derived from the manifest's
+port order or from the port numbers, so adding a port later cannot silently
+re-point a client at a different service — moving one is an edit you make on
+purpose. Declare nothing and the behaviour is what it has always been: the first
+published port is routed and the rest are reachable only from the worker and from
+sibling containers.
+
+Three ways to say it, all landing in the same place:
+
+```yaml
+# compose — per service, for a file that defines several
+services:
+  versity:
+    image: ghcr.io/versity/versitygw:latest
+    ports: ["7070", "7071", "8080"]
+    labels:
+      rudder.expose: "8080,7070"      # web UI on 443, S3 API on 1443
+```
+
+```yaml
+# kubectl
+metadata:
+  annotations:
+    rudder.dev/expose-ports: "8080,7070"
+```
+
+…or the **Public Ports** field on the application form. A `kubectl apply`
+carrying the annotation overwrites what is set there, the same way
+`rudder.dev/domain` already does.
+
+**What guards these ports.** CrowdSec, the security headers and the
+application's rate limit are on every one of them — the extra ports are more
+doors into the same Traefik, not a way around it. **OIDC is on 443 alone.** That
+is deliberate: OIDC is an interactive browser redirect, and the extra ports carry
+machine traffic — an S3 endpoint, an admin API, a scrape target — that cannot
+follow one. Putting the login flow in front of an S3 endpoint does not protect
+it, it makes it unusable. So an application whose second port needs protecting
+must provide it itself: an API key, signature authentication, mTLS. The
+application page marks which of its URLs the login flow covers.
+
+Three limits worth knowing before you rely on it:
+
+- **Five ports per container**, because there are five entryPoints. A sixth is
+  reported as a deploy note and on the application page, not silently dropped.
+- **HTTP services only.** Every entryPoint terminates TLS and speaks HTTP, so a
+  database or a game server published here gets a router that cannot work.
+- **Existing workers need re-provisioning** to bind 1443–4443, and a client
+  network that blocks non-standard HTTPS ports will not reach them.
+
+Where wildcard DNS is available, separate hostnames remain the better answer: a
+multi-service compose file already gets `<app>-<service>.<base>` per service, all
+on 443, with none of the caveats above. Extra ports are for the case where one
+container serves several things and they have to share a hostname.
+
 ---
 
 ## Storage
