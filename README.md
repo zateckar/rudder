@@ -29,7 +29,7 @@ Container orchestration platform built with SvelteKit, Drizzle ORM, and SQLite. 
 
 ### Security
 - **CrowdSec WAF** -- AppSec virtual patching inline, OWASP Core Rule Set out-of-band, plus behavioral IP banning on all workers
-- **No WAF bypass** -- application ports bind to 127.0.0.1 and an nftables ruleset limits inbound traffic to SSH and 443, so requests cannot reach an app without passing Traefik
+- **No WAF bypass** -- application ports bind to 127.0.0.1 and an nftables ruleset limits inbound traffic to SSH and Traefik's HTTPS entryPoints (443, and 1443-4443 for applications publishing more than one port), so requests cannot reach an app without passing Traefik
 - **Per-app rate limiting** -- configurable request rate limits via Traefik middleware
 - **Worker-wide OIDC** -- one identity-provider registration protects every app on a worker, via a shared `auth.<base-domain>/oidc/callback` endpoint (requires a DNS A record for that host)
 - **Per-app OIDC auth** -- protect individual applications with their own OAuth 2.0 / OIDC client (with PKCE)
@@ -259,6 +259,14 @@ SvelteKit Server (Bun runtime with Node adapter)
 - Podman API secured with mutual TLS (client certificate required; connections
   fail closed if credentials are missing)
 - Host bind mounts are denied by default and must be explicitly allow-listed
+- Traefik binds five HTTPS entryPoints — 443, and 1443-4443 for an application
+  that publishes more than one HTTP port on one hostname — and the firewall
+  admits exactly those plus SSH. The extra ports are additional doors into the
+  same Traefik: same TLS termination, same certificate, same CrowdSec and
+  security-header middleware. They are not a second way in, and an application
+  is only reachable on one if it has asked to be. Workers provisioned before
+  this need re-provisioning to bind them, and a client network that blocks
+  non-standard HTTPS ports will not reach them
 - The nftables ruleset filters traffic from the container bridges as well as from
   outside, so a container cannot reach the Podman API, the CrowdSec LAPI or the
   metrics endpoint on the host gateway (nor via `host.containers.internal`). The

@@ -1,6 +1,30 @@
 entryPoints:
+  # Index 0, and the only one that can be anything else. ACME's TLS-ALPN-01
+  # challenge is served on 443 and nowhere else, so every hostname needs a
+  # router here or it never obtains the certificate the other entryPoints would
+  # serve. An application's first published port always lands on this one.
   websecure:
     address: ":443"
+  # Indices 1-4, for an application that publishes more than one HTTP port on
+  # one hostname. Same TLS, same certificate, same middleware chain — the only
+  # difference is which port the client connects to.
+  #
+  # Named for the index rather than the port: a route carries "the second
+  # published port", and a name like `ep1443` would have to be reworked
+  # everywhere if these numbers ever move.
+  #
+  # Bound on every worker whether or not anything routes here. An entryPoint
+  # with no router answers the handshake and returns 404, which is a smaller
+  # thing to explain than a per-worker toggle that has to be kept in step with
+  # the firewall.
+  websecure-1:
+    address: ":1443"
+  websecure-2:
+    address: ":2443"
+  websecure-3:
+    address: ":3443"
+  websecure-4:
+    address: ":4443"
   # Prometheus scrape target. Bound to loopback, not `:8082` — the host
   # firewall would drop external traffic anyway, but an entryPoint that only
   # ever listens on 127.0.0.1 cannot be re-exposed by a firewall mistake.

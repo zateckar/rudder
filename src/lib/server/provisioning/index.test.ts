@@ -941,12 +941,96 @@ describe('generateProvisioningScript', () => {
     const traefikYml = blobFor('/etc/traefik/traefik.yml');
     expect(traefikYml).toContain('address: "127.0.0.1:8082"');
     expect(traefikYml).toContain('addRoutersLabels: true');
-    // No second public entryPoint: 443 stays the only externally bound port.
+    // The metrics entryPoint in particular must never be bound publicly. The
+    // firewall would drop it anyway; an entryPoint that only ever listens on
+    // loopback cannot be re-exposed by a firewall mistake.
     expect(traefikYml).not.toMatch(/address: ":8082"/);
 
     const metricsRouting = blobFor('/etc/traefik/dynamic/metrics.yml');
     expect(metricsRouting).toContain('options: podman-mtls');
     expect(metricsRouting).toContain('/prometheus');
+  });
+
+  /** Public entryPoint ports from the rendered traefik.yml, ascending. */
+  function traefikPublicPorts(source = script): number[] {
+    const parsed = Bun.YAML.parse(blobIn(source, '/etc/traefik/traefik.yml')) as {
+      entryPoints: Record<string, { address: string }>;
+    };
+    return Object.values(parsed.entryPoints)
+      .map((e) => e.address)
+      .filter((a) => !a.startsWith('127.0.0.1'))
+      .map((a) => Number(a.replace(/^:/, '')))
+      .sort((a, b) => a - b);
+  }
+
+  /** Ports the nftables rule accepts, ascending, deduplicated. */
+  function firewallPorts(source = script): number[] {
+    const m = source.match(/for p in ([^;]+); do/);
+    if (!m) throw new Error('firewall port list not found');
+    const ports = m[1]
+      .split(/\s+/)
+      .map((t) => Number(t.replace(/["$A-Z_]/g, '')))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    return [...new Set(ports)].sort((a, b) => a - b);
+  }
+
+  test('binds five public HTTPS entryPoints, 443 first', () => {
+    // 443 is index 0 and cannot be anything else: ACME's TLS-ALPN-01 challenge
+    // is served there and nowhere else, so a hostname with no router on 443
+    // never obtains the certificate the other entryPoints would serve.
+    const traefikYml = blobFor('/etc/traefik/traefik.yml');
+    const parsed = Bun.YAML.parse(traefikYml) as {
+      entryPoints: Record<string, { address: string }>;
+    };
+    expect(parsed.entryPoints.websecure.address).toBe(':443');
+    for (const i of [1, 2, 3, 4]) {
+      expect(parsed.entryPoints[`websecure-${i}`].address).toBe(`:${i}443`);
+    }
+    expect(traefikPublicPorts()).toEqual([443, 1443, 2443, 3443, 4443]);
+  });
+
+  test('the firewall admits exactly the ports Traefik binds, plus SSH', () => {
+    // The check that matters is the agreement, not either list on its own. A
+    // port Traefik binds but nftables drops presents as an application that
+    // does not answer, which is indistinguishable from an application bug and
+    // is not one; a port the firewall opens with nothing behind it is exposure
+    // bought for nothing.
+    //
+    // 22 is the difference between the two sets, and the only one allowed.
+    const traefik = traefikPublicPorts();
+    const firewall = firewallPorts();
+    expect(firewall).toEqual([22, ...traefik].sort((a, b) => a - b));
+
+    // The rule is fed by that list and not by a second hand-written one.
+    expect(script).toContain('tcp dport { ${ACCEPT_PORTS} } accept');
+
+    // The loopback-only entryPoint is in neither set.
+    expect(firewall).not.toContain(8082);
+  });
+
+  test('cannot emit a duplicate element when SSH runs on an HTTPS port', () => {
+    // nftables rejects a repeated element in an anonymous set and refuses the
+    // whole ruleset — and the failure path then deletes the table, so a
+    // duplicate does not misconfigure the firewall, it removes it. The SSH port
+    // is operator input and is the only value that can collide.
+    // The deduplication itself runs in bash on the worker, so what is assertable
+    // here is that the SSH port goes through it rather than being concatenated
+    // into the set: the old code special-cased 22 and 443 by hand, which is
+    // exactly the shape that missed 1443-4443 when they were added.
+    for (const sshPort of [22, 443, 2443, 2222]) {
+      const rendered = generateProvisioningScript('worker-1', {
+        bouncerKey: 'k',
+        baseDomain: 'example.com',
+        sshPort,
+      });
+      expect(rendered).toContain(`local SSH_PORT="${sshPort}"`);
+      expect(rendered.match(/for p in ([^;]+); do/)![1]).toContain('"$SSH_PORT"');
+      expect(rendered).toContain('*",${p},"*) continue ;;');
+      // No hand-built set survives anywhere.
+      expect(rendered).not.toContain('SSH_PORTS');
+      // The literal ports Traefik binds are unaffected by the SSH port.
+      expect(firewallPorts(rendered)).toEqual([22, 443, 1443, 2443, 3443, 4443]);
+    }
   });
 
   test('omits it when the worker has no base domain to build a callback host from', () => {

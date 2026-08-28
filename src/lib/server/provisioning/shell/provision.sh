@@ -210,9 +210,9 @@ step_cleanup_old() {
 step_firewall() {
   echo "--- 5b. Restricting inbound traffic to SSH and HTTPS ---"
   # Applications publish their ports on 127.0.0.1 only, but a host firewall is
-  # what actually makes the documented "only 22 and 443 are exposed" true —
-  # without it a single mis-set bind address re-exposes every app straight to
-  # the internet, bypassing Traefik, CrowdSec and OIDC.
+  # what actually makes the documented "only SSH and Traefik's entryPoints are
+  # exposed" true — without it a single mis-set bind address re-exposes every
+  # app straight to the internet, bypassing Traefik, CrowdSec and OIDC.
   #
   # Deliberately conservative: established traffic, loopback and ICMP are
   # accepted before the policy flips to drop, and both port 22 and the port
@@ -246,12 +246,25 @@ step_firewall() {
     return 1
   fi
 
-  # nftables rejects duplicate elements in an anonymous set, so only add the
-  # configured port when it is not already 443 or the default 22.
-  local SSH_PORTS="22, 443"
-  if [ "$SSH_PORT" != "22" ] && [ "$SSH_PORT" != "443" ]; then
-    SSH_PORTS="22, ${SSH_PORT}, 443"
-  fi
+  # The ports Traefik binds, plus SSH. 1443-4443 are the extra HTTPS
+  # entryPoints in traefik.yml: an application that publishes more than one HTTP
+  # port on one hostname reaches them there. They terminate the same TLS and
+  # carry the same CrowdSec and security-header middleware as 443 — they are
+  # more doors into the same hallway, not a way around it.
+  #
+  # Built by deduplicating rather than by hand. nftables rejects a repeated
+  # element in an anonymous set and refuses the *whole* ruleset, and the failure
+  # path below then removes what did load — so a duplicate here does not
+  # misconfigure the firewall, it removes it. The configured SSH port is
+  # operator input and is the one value that can collide with any of the six.
+  local ACCEPT_PORTS=""
+  local p
+  for p in 22 "$SSH_PORT" 443 1443 2443 3443 4443; do
+    case ",${ACCEPT_PORTS}," in
+      *",${p},"*) continue ;;
+    esac
+    ACCEPT_PORTS="${ACCEPT_PORTS:+${ACCEPT_PORTS},}${p}"
+  done
 
   # Our own table, so podman/netavark's rules are never touched. The
   # create-then-delete prelude makes re-applying idempotent: without it a second
@@ -274,7 +287,7 @@ table inet rudder {
     meta l4proto { icmp, ipv6-icmp } accept
     iifname "podman*" meta l4proto { tcp, udp } th dport 53 accept
     iifname "cni-podman*" meta l4proto { tcp, udp } th dport 53 accept
-    tcp dport { ${SSH_PORTS} } accept
+    tcp dport { ${ACCEPT_PORTS} } accept
     counter drop
   }
 }
@@ -310,7 +323,7 @@ FWEOF
   # a worker whose firewall is up, which is exactly backwards for anyone
   # checking. Re-running ExecStart is harmless — rudder.nft is idempotent.
   systemctl enable --now rudder-firewall.service 2>/dev/null || true
-  echo "Host firewall active: inbound limited to ${SSH_PORTS} (SSH/HTTPS)"
+  echo "Host firewall active: inbound limited to ${ACCEPT_PORTS} (SSH + Traefik HTTPS entryPoints)"
 }
 
 step_mtls_certs() {
@@ -797,9 +810,9 @@ WORKER_IP=$(hostname -I | awk '{print $1}')
 echo "=== Provisioning complete for {{WORKER_NAME}} ==="
 echo "Worker IP: ${WORKER_IP}"
 if nft list table inet rudder &>/dev/null; then
-  echo "Exposed: 22 (SSH), 443 (Traefik HTTPS) — enforced by nftables"
+  echo "Exposed: 22 (SSH), 443 + 1443-4443 (Traefik HTTPS entryPoints) — enforced by nftables"
 else
-  echo "Exposed: 22 (SSH), 443 (Traefik HTTPS) — NOT enforced, no host firewall"
+  echo "Exposed: 22 (SSH), 443 + 1443-4443 (Traefik HTTPS entryPoints) — NOT enforced, no host firewall"
 fi
 echo "Internal: 8080 (Podman API), 8081/7422 (CrowdSec), 9100 (metrics), 8082 (Traefik Prometheus) — 127.0.0.1 only"
 echo "WAF: CrowdSec AppSec enabled on all applications via Traefik plugin"
