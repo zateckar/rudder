@@ -5,6 +5,11 @@
  *   Application → Deployment
  *   Container   → Pod
  */
+import {
+  MAX_ROUTES_PER_CONTAINER,
+  parseExposedPorts,
+  parsePortList,
+} from '../deploy/plan';
 import { k8sPodTemplate } from '../kubernetes';
 
 // ── Path matching utility ──────────────────────────────────────
@@ -116,6 +121,7 @@ export function applicationToDeployment(
     workerId: string | null;
     domain: string | null;
     description: string | null;
+    exposedPorts: string | null;
     createdAt: Date;
     updatedAt: Date;
   },
@@ -190,6 +196,8 @@ export function applicationToDeployment(
     }
   }
 
+  const declaredPorts = parseExposedPorts(app.exposedPorts);
+
   const running = appContainers.filter((c) => c.status === 'running').length;
 
   return {
@@ -208,6 +216,11 @@ export function applicationToDeployment(
         ...(app.workerId ? { 'rudder.dev/worker-id': app.workerId } : {}),
         ...(app.domain ? { 'rudder.dev/domain': app.domain } : {}),
         ...(app.description ? { 'rudder.dev/description': app.description } : {}),
+        // Emitted, not only read. Without this,
+        // `kubectl get deploy x -o yaml | kubectl apply -f -` drops the
+        // declaration and the extra ports go dark on the next apply, with
+        // nothing in the output to explain why.
+        ...(declaredPorts ? { 'rudder.dev/expose-ports': declaredPorts.join(',') } : {}),
         // Names only. Says which variables exist without showing their values,
         // so a withheld secret does not look like a missing one.
         ...(withheldEnv.length > 0
@@ -486,6 +499,7 @@ export function parseDeploymentBody(body: any): {
   workerAnnotation?: string;
   domain?: string;
   description?: string;
+  exposedPorts?: number[] | null;
 } {
   const name = body.metadata?.name;
   if (!name) throw new Error('metadata.name is required');
@@ -505,6 +519,28 @@ export function parseDeploymentBody(body: any): {
   // Store the full Deployment/Pod body as JSON so parseK8sManifest
   // can process multi-container setups, volumes, env vars, etc.
   const manifest = JSON.stringify(body);
+
+  // Refused rather than ignored. kubectl has no other feedback channel: a
+  // silently dropped annotation leaves the user with an application that is
+  // unreachable on a port they believe they configured, and an `apply` that
+  // reported success.
+  const exposeAnnotation = body.metadata?.annotations?.['rudder.dev/expose-ports'];
+  let exposedPorts: number[] | null = null;
+  if (exposeAnnotation !== undefined) {
+    exposedPorts = parsePortList(String(exposeAnnotation));
+    if (exposedPorts === null) {
+      throw new Error(
+        `rudder.dev/expose-ports must be a comma-separated list of container ports, ` +
+          `for example "7070,8080" — got "${exposeAnnotation}"`,
+      );
+    }
+    if (exposedPorts.length > MAX_ROUTES_PER_CONTAINER) {
+      throw new Error(
+        `rudder.dev/expose-ports names ${exposedPorts.length} ports; a worker has ` +
+          `${MAX_ROUTES_PER_CONTAINER} HTTPS entryPoints`,
+      );
+    }
+  }
 
   const restartPolicy =
     template?.restartPolicy === 'Never'
@@ -526,6 +562,7 @@ export function parseDeploymentBody(body: any): {
     description:
       body.metadata?.annotations?.['rudder.dev/description'] ||
       body.metadata?.annotations?.['description'],
+    exposedPorts,
   };
 }
 

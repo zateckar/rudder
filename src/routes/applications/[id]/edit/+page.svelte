@@ -13,6 +13,18 @@
   const app = $derived(data.application);
   const pm = $derived(data.parsedManifest);
 
+  /**
+   * `applications.exposedPorts` as the comma-separated form the field takes.
+   *
+   * Null — undeclared — has to render as an empty box, and the action reads an
+   * empty box back as null, so the round-trip through the form leaves an
+   * application that never declared anything exactly as it was.
+   */
+  const exposedPortsValue = $derived.by(() => {
+    const ports = data.exposedPorts;
+    return Array.isArray(ports) ? ports.join(', ') : '';
+  });
+
   // Source toggle: 'image' or 'git'
   let sourceType = $state<'image' | 'git'>('image');
   let gitRepo = $state('');
@@ -301,6 +313,24 @@
                 <option value={val} selected={val === app.restartPolicy}>{label}</option>
               {/each}
             </select>
+          </div>
+          <div class="form-group">
+            <label for="exposedPorts">Public Ports</label>
+            <input
+              type="text"
+              id="exposedPorts"
+              name="exposedPorts"
+              placeholder="7070, 8080"
+              value={exposedPortsValue}
+            />
+            <p class="help-text">
+              Container ports to publish, in order. The first gets <code>:443</code>, the rest get
+              <code>:1443</code> upward on the same hostname and certificate. Leave blank to publish
+              the first port only. Ports left out stay reachable from the worker and from sibling
+              containers, but not from outside. HTTP services only — every entryPoint terminates TLS
+              and speaks HTTP. A <code>kubectl apply</code> carrying
+              <code>rudder.dev/expose-ports</code> overwrites what is set here.
+            </p>
           </div>
           <div class="form-group">
             <label for="workingDir">Working Directory</label>

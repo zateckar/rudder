@@ -63,7 +63,7 @@ describe('parseSingle', () => {
   test('assumes a web application on 80 when no port is declared', () => {
     const [c] = parse('nginx', { baseDomain: 'apps.example.com' });
     expect(c.ports).toEqual({ '80/tcp': [{ hostPort: '31000' }] });
-    expect(c.route).toMatchObject({ domain: 'shop.apps.example.com', hostPort: 31000 });
+    expect(c.routes[0]).toMatchObject({ domain: 'shop.apps.example.com', hostPort: 31000 });
   });
 
   test('honours an explicit host port for a single replica', () => {
@@ -104,10 +104,57 @@ describe('parseSingle', () => {
     // Assigning a route per replica would disambiguate them as separate
     // hostnames, which is the opposite of load balancing.
     const containers = parse('nginx', { replicas: 3, baseDomain: 'apps.example.com' });
-    expect(new Set(containers.map((c) => c.route!.domain)).size).toBe(1);
-    expect(containers.map((c) => c.route!.definesRouter)).toEqual([true, false, false]);
+    expect(new Set(containers.map((c) => c.routes[0]!.domain)).size).toBe(1);
+    expect(containers.map((c) => c.routes[0]!.definesRouter)).toEqual([true, false, false]);
     // Each still advertises its own address.
-    expect(containers.map((c) => c.route!.hostPort)).toEqual([31000, 31001, 31002]);
+    expect(containers.map((c) => c.routes[0]!.hostPort)).toEqual([31000, 31001, 31002]);
+  });
+
+  test('routes every declared port, and replicas follow all of them', () => {
+    // The replica case is the one that can go wrong quietly: each replica has
+    // its own host ports, so a route matched to the wrong one points at a
+    // different service inside the same container.
+    const manifest = JSON.stringify({
+      image: 'versitygw',
+      ports: [
+        { containerPort: '7070', protocol: 'tcp' },
+        { containerPort: '8080', protocol: 'tcp' },
+      ],
+    });
+    const containers = parse(manifest, {
+      replicas: 2,
+      baseDomain: 'apps.example.com',
+      exposedPorts: [7070, 8080],
+    });
+
+    expect(containers[0].routes.map((r) => [r.containerPort, r.entryPoint])).toEqual([
+      [7070, 'websecure'],
+      [8080, 'websecure-1'],
+    ]);
+    // The second replica joins both routers rather than defining new ones...
+    expect(containers[1].routes.map((r) => r.definesRouter)).toEqual([false, false]);
+    expect(containers[1].routes.map((r) => r.routerName)).toEqual(
+      containers[0].routes.map((r) => r.routerName),
+    );
+    // ...and each route points at that replica's own binding for its port.
+    for (const c of containers) {
+      for (const route of c.routes) {
+        expect(c.ports[`${route.containerPort}/tcp`][0].hostPort).toBe(String(route.hostPort));
+      }
+    }
+  });
+
+  test('an undeclared application is routed exactly as before', () => {
+    const manifest = JSON.stringify({
+      image: 'versitygw',
+      ports: [
+        { containerPort: '7070', protocol: 'tcp' },
+        { containerPort: '8080', protocol: 'tcp' },
+      ],
+    });
+    const [c] = parse(manifest, { baseDomain: 'apps.example.com' });
+    expect(c.routes).toHaveLength(1);
+    expect(c.routes[0].containerPort).toBe(7070);
   });
 
   test('caps replicas at ten', () => {

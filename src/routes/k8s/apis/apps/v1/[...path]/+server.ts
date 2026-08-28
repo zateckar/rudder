@@ -40,6 +40,7 @@ import { executeApplicationDeploy } from '$lib/server/deploy';
 import { getRestPodmanClient } from '$lib/server/podman-client';
 import { checkApplicationQuota } from '$lib/server/quota';
 import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
+import { serializeExposedPorts } from '$lib/server/deploy/plan';
 
 // ── GET ────────────────────────────────────────────────────────
 
@@ -228,6 +229,7 @@ export async function POST({
       environment: parsed.environment,
       volumes: null,
       restartPolicy: parsed.restartPolicy as 'always' | 'no' | 'on-failure' | 'unless-stopped' | undefined,
+      exposedPorts: serializeExposedPorts(parsed.exposedPorts),
       replicas: parsed.replicas,
       createdBy: null,
       createdAt: new Date(),
@@ -467,6 +469,12 @@ async function handleUpdateDeployment(
     updatedAt: new Date(),
   };
   if (parsed.environment !== undefined) updates.environment = parsed.environment;
+  // Only when the annotation was present. An apply of a manifest that never
+  // mentioned it must not clear a declaration set from the UI — that is the same
+  // rule `description` and `domain` already follow here.
+  if (parsed.exposedPorts !== null && parsed.exposedPorts !== undefined) {
+    updates.exposedPorts = serializeExposedPorts(parsed.exposedPorts);
+  }
   if (parsed.domain) {
     const domainConflict = await assertDomainAvailable(parsed.domain, app.id);
     if (domainConflict) return k8sError(409, domainConflict, 'AlreadyExists');

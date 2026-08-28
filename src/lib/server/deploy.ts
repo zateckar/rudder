@@ -1071,8 +1071,11 @@ async function deployApplication(
         ];
 
         const labels = { ...planned.labels };
-        if (planned.route && !httpRouting) {
-          Object.assign(labels, routingLabels(planned.route, middlewareOpts, globalOidcEnabled));
+        // The 443 route only, for now. Emitting a router per route is 3-03's
+        // job; until then a labels-mode worker serves what it always has, and a
+        // declared second port is recorded but not yet reachable there.
+        if (planned.routes[0] && !httpRouting) {
+          Object.assign(labels, routingLabels(planned.routes[0], middlewareOpts, globalOidcEnabled));
         }
 
         const containerName = nameFor(planned.name);
@@ -1128,9 +1131,9 @@ async function deployApplication(
           // reads this column, and a container's second published port has to
           // stay reserved too or a later deploy will be handed it.
           ports: Object.keys(planned.ports).length > 0 ? JSON.stringify(planned.ports) : null,
-          exposedPort: planned.route?.hostPort ?? null,
-          domain: planned.route?.domain ?? null,
-          routerName: planned.route?.routerName ?? null,
+          exposedPort: planned.routes[0]?.hostPort ?? null,
+          domain: planned.routes[0]?.domain ?? null,
+          routerName: planned.routes[0]?.routerName ?? null,
           labels: JSON.stringify(redactSecretLabels(labels)),
           generation,
           state: initialState,

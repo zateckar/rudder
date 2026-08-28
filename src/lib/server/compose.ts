@@ -2,7 +2,10 @@ import {
   ManifestError,
   createRouteAssigner,
   identityLabels,
+  parsePortList,
   plannedContainerName,
+  routeSelectionNotes,
+  selectRouteBindings,
   type DeploymentPlan,
   type PlanContext,
   type PlannedContainer,
@@ -74,6 +77,14 @@ export interface ComposeConfig {
   networks?: Record<string, { driver?: string; external?: boolean }>;
   volumes?: Record<string, { driver?: string; external?: boolean }>;
 }
+
+/**
+ * Service label naming the container ports that should be public.
+ *
+ * Lower-case because compose label keys are compared case-insensitively here,
+ * the same way the `traefik.` prefix is.
+ */
+export const EXPOSE_LABEL = 'rudder.expose';
 
 /**
  * A compose service's `restart:` in Podman's spelling.
@@ -299,13 +310,44 @@ export function parseCompose(manifest: string, ctx: PlanContext): DeploymentPlan
       [ALIAS_LABEL]: aliases[0],
     };
 
+    /**
+     * Per-service public ports, overriding the application's own list.
+     *
+     * A compose file is the one format that can define several containers, so
+     * it is the one place the application-level declaration is too coarse:
+     * `gateway` and `webui` publish different ports and each needs its own
+     * answer. Absent, the application's list applies to every service.
+     */
+    let declaredPorts = ctx.exposedPorts;
+
     if (service.labels) {
       // Strip any traefik.* labels from user-provided compose to prevent route hijacking
       // (our auto-generated Traefik labels are applied below and should not be overridden)
       const entries = Object.entries(service.labels as Record<string, string>);
       const dropped = entries.filter(([k]) => k.toLowerCase().startsWith('traefik.'));
-      const sanitized = Object.fromEntries(entries.filter(([k]) => !k.toLowerCase().startsWith('traefik.')));
+      const sanitized = Object.fromEntries(
+        entries.filter(
+          ([k]) => !k.toLowerCase().startsWith('traefik.') && k.toLowerCase() !== EXPOSE_LABEL,
+        ),
+      );
       Object.assign(labels, sanitized);
+
+      // Read, then dropped rather than passed through. It is an instruction to
+      // Rudder, not a label the container should carry — leaving it on would put
+      // it in the application's label list in the UI as though the user had set
+      // it for their own purposes.
+      const expose = entries.find(([k]) => k.toLowerCase() === EXPOSE_LABEL);
+      if (expose) {
+        const parsed = parsePortList(String(expose[1] ?? ''));
+        if (parsed) {
+          declaredPorts = parsed;
+        } else {
+          notes.push(
+            `Service "${serviceName}" sets ${EXPOSE_LABEL} to "${expose[1]}", which is not a list ` +
+              `of port numbers. It was ignored; the application's own public ports apply instead.`,
+          );
+        }
+      }
 
       // Silently dropping routing labels is how someone spends an afternoon
       // wondering why their middleware never runs.
@@ -322,11 +364,9 @@ export function parseCompose(manifest: string, ctx: PlanContext): DeploymentPlan
     
     // A service that publishes nothing has no route: it is reachable by its
     // siblings over the bridge, and by nobody else.
-    const firstPortKey = Object.keys(ports)[0];
-    const firstHostPort = firstPortKey ? ports[firstPortKey]?.[0]?.hostPort : undefined;
-    const route = firstHostPort && baseDomain
-      ? assignRoute(serviceName, parseInt(firstHostPort))
-      : undefined;
+    const selection = selectRouteBindings(declaredPorts, ports);
+    const routes = baseDomain ? assignRoute(serviceName, selection.bindings) : [];
+    if (baseDomain) notes.push(...routeSelectionNotes(serviceName, selection));
 
     const limits = service.deploy?.resources?.limits;
 
@@ -407,7 +447,7 @@ export function parseCompose(manifest: string, ctx: PlanContext): DeploymentPlan
       cpuQuota: cpu?.cpuQuota,
       cpuPeriod: cpu?.cpuPeriod,
       healthcheck,
-      route,
+      routes,
     });
   }
 

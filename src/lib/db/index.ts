@@ -101,6 +101,7 @@ sqlite.run(`
     environment TEXT,
     volumes TEXT,
     restart_policy TEXT NOT NULL DEFAULT 'always',
+    exposed_ports TEXT,
     rate_limit_avg INTEGER,
     rate_limit_burst INTEGER,
     auth_type TEXT NOT NULL DEFAULT 'global',
@@ -283,6 +284,14 @@ for (const col of [
   `ALTER TABLE workers ADD COLUMN config_fetched_at INTEGER;`,
   `ALTER TABLE containers ADD COLUMN domain TEXT;`,
   `ALTER TABLE containers ADD COLUMN router_name TEXT;`,
+  // Nullable with no default on purpose: NULL is "undeclared", which is what
+  // every existing application is, and it must stay distinguishable from an
+  // explicit empty list. See applications.exposedPorts in the schema.
+  `ALTER TABLE applications ADD COLUMN exposed_ports TEXT;`,
+  // Templates carry it too, or saving an application as a template and creating
+  // from it silently drops which of its ports were public — the same round-trip
+  // loss the kubectl annotation has to avoid.
+  `ALTER TABLE application_templates ADD COLUMN exposed_ports TEXT;`,
 ]) {
   try { sqlite.run(col); } catch { /* Column already exists */ }
 }
@@ -450,6 +459,7 @@ sqlite.run(`
     environment TEXT,
     volumes TEXT,
     restart_policy TEXT NOT NULL DEFAULT 'always',
+    exposed_ports TEXT,
     created_by TEXT REFERENCES users(id),
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL

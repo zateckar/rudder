@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { MAX_ROUTES_PER_CONTAINER } from './deploy/plan';
 import { domainFormatError } from './domains';
 import { hostnameFormatError, sshUserFormatError } from './ssh-target';
 
@@ -103,6 +104,20 @@ export const schemas = {
     .min(1, 'Image is required')
     .max(500, 'Image name too long')
     .regex(/^[a-zA-Z0-9._/-]+(:[a-zA-Z0-9._-]+)?$/, 'Invalid image format'),
+
+  /**
+   * Container ports to publish, in the order they take Traefik entryPoints.
+   *
+   * Capped at the number of entryPoints a worker has, so an over-long list is
+   * refused where the person can fix it rather than accepted and truncated at
+   * deploy time. Duplicates are refused for the same reason: `[80, 80]` has no
+   * sensible reading, and picking one silently is how a route ends up somewhere
+   * its author did not put it.
+   */
+  exposedPorts: z
+    .array(z.number().int().min(1).max(65535))
+    .max(MAX_ROUTES_PER_CONTAINER, `At most ${MAX_ROUTES_PER_CONTAINER} ports can be published`)
+    .refine((ports) => new Set(ports).size === ports.length, 'Ports must be distinct'),
 
   createWorker: z.object({
     name: z.string().min(1).max(100).regex(/^[a-zA-Z0-9_-]+$/, 'Name can only contain letters, numbers, underscores, and hyphens'),

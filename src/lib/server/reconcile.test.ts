@@ -247,6 +247,7 @@ function planned(over: Partial<PlannedContainer> = {}): PlannedContainer {
     aliases: ['web', 'shop-web'],
     labels: { app: 'shop', [MANAGED_LABEL]: 'true' },
     restartPolicy: 'always',
+    routes: [],
     ...over,
   };
 }
@@ -267,7 +268,18 @@ describe('specHash', () => {
     // rate limit cannot reach this hash even by accident.
     const before = specHash(planned());
     const after = specHash(
-      planned({ route: { domain: 'shop.example.com', routerName: 'shop', hostPort: 31204, definesRouter: true } }),
+      planned({
+        routes: [
+          {
+            domain: 'shop.example.com',
+            routerName: 'shop',
+            hostPort: 31204,
+            containerPort: 80,
+            entryPoint: 'websecure',
+            definesRouter: true,
+          },
+        ],
+      }),
     );
     expect(after).toBe(before);
   });
@@ -405,7 +417,7 @@ describe('desiredState', () => {
     const before = desiredState({ app: appRow(), worker: workerRow() });
     const after = desiredState({ app: appRow({ domain: 'shop.example.com' }), worker: workerRow() });
     expect(after.containers[0].specHash).toBe(before.containers[0].specHash);
-    expect(after.containers[0].planned.route?.domain).toBe('shop.example.com');
+    expect(after.containers[0].planned.routes[0]?.domain).toBe('shop.example.com');
   });
 
   test('allocates nothing when no allocator is supplied', () => {
@@ -430,7 +442,7 @@ describe('desiredState', () => {
       allocatePort: () => 31234,
     });
     expect(real.portsArePlaceholders).toBe(false);
-    expect(real.containers[0].planned.route?.hostPort).toBe(31234);
+    expect(real.containers[0].planned.routes[0]?.hostPort).toBe(31234);
   });
 
   test('placeholder ports do not disturb the hash', () => {

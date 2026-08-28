@@ -12,6 +12,13 @@ import { ALLOWED_DOMAINS_UNSUPPORTED, normalizeTokenHeader, tokenHeadersError } 
 import { DEFAULT_HEALTH_TIMEOUT_S } from '$lib/server/generations';
 import { imageReferenceError } from '$lib/server/image-reference';
 import { decryptField, encryptField } from '$lib/server/encryption';
+import {
+  EXPOSED_PORTS_ERROR,
+  MAX_ROUTES_PER_CONTAINER,
+  parseExposedPorts,
+  parsePortList,
+  serializeExposedPorts,
+} from '$lib/server/deploy/plan';
 
 /**
  * Volume-registry ids this application's `volumes` column already names.
@@ -103,6 +110,10 @@ export const load = async (event: { params: { id: string }; locals: App.Locals; 
     // use `safeApplicationColumns`, which drops the column entirely.
     application: { ...app, authConfig: decryptField(app.authConfig) },
     parsedManifest,
+    // Decoded here rather than in the component: the column is JSON text and
+    // null means undeclared, which the form has to render as an empty box and
+    // read back as null.
+    exposedPorts: parseExposedPorts(app.exposedPorts),
     workers: allWorkers,
     teams: userTeams,
     volumes: availableVolumes,
@@ -142,6 +153,21 @@ export const actions = {
 
     if (!name || !workerId || !teamId) {
       return fail(400, { error: 'Missing required fields' });
+    }
+
+    // An empty field is undeclared, not "publish nothing": clearing the box has
+    // to restore the single-route default rather than take the application off
+    // the air. Declaring nothing at all is what the field being blank means to
+    // everyone who has never set it.
+    const exposedPortsRaw = formData.get('exposedPorts')?.toString().trim() ?? '';
+    const exposedPorts = exposedPortsRaw === '' ? null : parsePortList(exposedPortsRaw);
+    if (exposedPortsRaw !== '' && exposedPorts === null) {
+      return fail(400, { error: EXPOSED_PORTS_ERROR });
+    }
+    if (exposedPorts && exposedPorts.length > MAX_ROUTES_PER_CONTAINER) {
+      return fail(400, {
+        error: `Public ports: at most ${MAX_ROUTES_PER_CONTAINER} can be published — a worker has ${MAX_ROUTES_PER_CONTAINER} HTTPS entryPoints.`,
+      });
     }
 
     // Hostnames are global — two applications sharing one would produce two
@@ -329,6 +355,7 @@ export const actions = {
         environment,
         volumes,
         restartPolicy,
+        exposedPorts: serializeExposedPorts(exposedPorts),
         rateLimitAvg,
         rateLimitBurst,
         authType,

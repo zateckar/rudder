@@ -508,12 +508,12 @@ services:
     // The router name carries the application id and the hostname does not:
     // hostnames are already globally unique, router names are global on a
     // worker and application names are not. See `traefikRouterName`.
-    expect(containers[0].route).toMatchObject({
+    expect(containers[0].routes[0]).toMatchObject({
       domain: 'shop.apps.example.com',
       routerName: 'shop-abcdef12',
       definesRouter: true,
     });
-    expect(containers[1].route).toMatchObject({
+    expect(containers[1].routes[0]).toMatchObject({
       domain: 'shop-api.apps.example.com',
       routerName: 'shop-api-abcdef12',
     });
@@ -528,7 +528,7 @@ services:
   c: { image: nginx, ports: ["80"] }
 `, { baseDomain: 'apps.example.com' });
 
-    const domains = containers.map((c) => c.route!.domain);
+    const domains = containers.map((c) => c.routes[0]!.domain);
     expect(new Set(domains).size).toBe(domains.length);
   });
 
@@ -539,8 +539,8 @@ services:
   api: { image: nginx, ports: ["80"] }
 `, { baseDomain: 'apps.example.com', appDomain: 'custom.example.com' });
 
-    expect(containers[0].route?.domain).toBe('custom.example.com');
-    expect(containers[1].route?.domain).toBe('shop-api.apps.example.com');
+    expect(containers[0].routes[0]?.domain).toBe('custom.example.com');
+    expect(containers[1].routes[0]?.domain).toBe('shop-api.apps.example.com');
   });
 
   test('the route names the allocated host port, not the declared one', () => {
@@ -548,7 +548,7 @@ services:
 services:
   web: { image: nginx, ports: ["8080:80"] }
 `, { baseDomain: 'apps.example.com' });
-    expect(c.route?.hostPort).toBe(31000);
+    expect(c.routes[0]?.hostPort).toBe(31000);
   });
 
   test('services without ports get no route', () => {
@@ -556,7 +556,7 @@ services:
 services:
   worker: { image: nginx }
 `, { baseDomain: 'apps.example.com' });
-    expect(c.route).toBeUndefined();
+    expect(c.routes[0]).toBeUndefined();
   });
 
   test('nothing is routed without a base domain', () => {
@@ -564,7 +564,111 @@ services:
 services:
   web: { image: nginx, ports: ["80"] }
 `);
-    expect(c.route).toBeUndefined();
+    expect(c.routes[0]).toBeUndefined();
+  });
+});
+
+describe('public ports', () => {
+  const VERSITY = `
+services:
+  versity:
+    image: versitygw
+    ports: ["7070:7070", "7071:7071", "8080:8080"]
+`;
+
+  test('undeclared routes the first published port, as it always has', () => {
+    const [c] = parse(VERSITY, { baseDomain: 'apps.example.com' });
+    expect(c.routes).toHaveLength(1);
+    expect(c.routes[0].containerPort).toBe(7070);
+    expect(c.routes[0].entryPoint).toBe('websecure');
+  });
+
+  test('the application declaration puts the second port on 1443', () => {
+    const [c] = parse(VERSITY, {
+      baseDomain: 'apps.example.com',
+      exposedPorts: [7070, 8080],
+    });
+    expect(c.routes.map((r) => [r.containerPort, r.entryPoint])).toEqual([
+      [7070, 'websecure'],
+      [8080, 'websecure-1'],
+    ]);
+    // Same hostname, so no new DNS record and no new certificate.
+    expect(new Set(c.routes.map((r) => r.domain)).size).toBe(1);
+  });
+
+  test('a service label overrides the application, per service', () => {
+    // The one case the application-level list cannot express: two services of
+    // one file wanting different ports public.
+    const containers = parse(
+      `
+services:
+  gateway:
+    image: versitygw
+    ports: ["7070:7070", "8080:8080"]
+    labels:
+      rudder.expose: "7070"
+  webui:
+    image: versitygw
+    ports: ["7070:7070", "8080:8080"]
+    labels:
+      rudder.expose: "8080"
+`,
+      { baseDomain: 'apps.example.com', exposedPorts: [7070, 8080] },
+    );
+    expect(containers[0].routes.map((r) => r.containerPort)).toEqual([7070]);
+    expect(containers[1].routes.map((r) => r.containerPort)).toEqual([8080]);
+  });
+
+  test('the label is consumed, not passed to Podman as a user label', () => {
+    const [c] = parse(
+      `
+services:
+  web:
+    image: nginx
+    ports: ["80"]
+    labels:
+      rudder.expose: "80"
+      owner: platform
+`,
+      { baseDomain: 'apps.example.com' },
+    );
+    expect(c.labels['rudder.expose']).toBeUndefined();
+    expect(c.labels.owner).toBe('platform');
+  });
+
+  test('an unusable label falls back to the application rather than to nothing', () => {
+    const notes = notesOf(
+      `
+services:
+  web:
+    image: nginx
+    ports: ["80:80", "443:443"]
+    labels:
+      rudder.expose: "eighty"
+`,
+      { baseDomain: 'apps.example.com', exposedPorts: [443] },
+    );
+    expect(notes).toContain('rudder.expose');
+    const [c] = parse(
+      `
+services:
+  web:
+    image: nginx
+    ports: ["80:80", "443:443"]
+    labels:
+      rudder.expose: "eighty"
+`,
+      { baseDomain: 'apps.example.com', exposedPorts: [443] },
+    );
+    expect(c.routes.map((r) => r.containerPort)).toEqual([443]);
+  });
+
+  test('a declared port the service does not publish is reported', () => {
+    const notes = notesOf(VERSITY, {
+      baseDomain: 'apps.example.com',
+      exposedPorts: [7070, 9999],
+    });
+    expect(notes).toContain('9999');
   });
 });
 
@@ -663,7 +767,7 @@ services:
 
     expect(containers.map((c) => c.key)).toEqual(['db', 'web']);
 
-    const hostOf = (key: string) => containers.find((c) => c.key === key)!.route!.domain;
+    const hostOf = (key: string) => containers.find((c) => c.key === key)!.routes[0]!.domain;
     expect(hostOf('web')).toBe('shop.example.com');
     expect(hostOf('db')).toBe('shop-db.example.com');
   });

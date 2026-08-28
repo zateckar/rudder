@@ -11,10 +11,13 @@ import {
   createRouteAssigner,
   identityLabels,
   plannedContainerName,
+  routeSelectionNotes,
+  selectRouteBindings,
   type DeploymentPlan,
   type PlanContext,
   type PlannedContainer,
   type PlannedHealthcheck,
+  type PlannedRoute,
 } from './deploy/plan';
 import { SINGLE_IMAGE_KEY } from './image-digests';
 import type { MountIntent } from './mounts';
@@ -110,12 +113,12 @@ export function parseSingle(
 
   const assignRoute = createRouteAssigner(ctx);
   const containers: PlannedContainer[] = [];
-  /** Set by the first replica; the rest join the router it defined. */
-  let sharedRoute: PlannedContainer['route'];
+  const notes: string[] = [];
+  /** Set by the first replica; the rest join the routers it defined. */
+  let sharedRoutes: PlannedRoute[] | null = null;
 
   for (let replica = 1; replica <= replicaCount; replica++) {
     const ports: Record<string, Array<{ hostPort: string }>> = {};
-    let firstHostPort: number | null = null;
 
     if (cfg.ports && cfg.ports.length > 0) {
       for (const p of cfg.ports) {
@@ -127,28 +130,34 @@ export function parseSingle(
           ? String(ctx.allocatePort())
           : p.hostPort.trim();
         ports[`${p.containerPort}/${p.protocol || 'tcp'}`] = [{ hostPort }];
-        if (firstHostPort === null) firstHostPort = parseInt(hostPort);
       }
     } else {
       // No ports declared: assume a web application on 80, which is what the
       // form has always assumed, so it still gets a route.
-      const hostPort = ctx.allocatePort();
-      ports['80/tcp'] = [{ hostPort: String(hostPort) }];
-      firstHostPort = hostPort;
+      ports['80/tcp'] = [{ hostPort: String(ctx.allocatePort()) }];
     }
 
-    // Every replica is a server behind one router, so the router is assigned
-    // once and the rest inherit it with their own host port. Assigning per
+    const selection = selectRouteBindings(ctx.exposedPorts, ports);
+    // Reported once, not once per replica: every replica publishes the same
+    // container ports, so the same note repeated N times says nothing new.
+    if (replica === 1) notes.push(...routeSelectionNotes(ctx.appName, selection));
+
+    // Every replica is a server behind one router, so the routers are assigned
+    // once and the rest inherit them with their own host ports. Assigning per
     // replica would disambiguate them as separate hostnames, which is the
     // opposite of load balancing.
-    let route: PlannedContainer['route'];
-    if (firstHostPort !== null) {
-      if (!sharedRoute) {
-        sharedRoute = assignRoute(ctx.appName, firstHostPort);
-        route = sharedRoute;
-      } else {
-        route = { ...sharedRoute, hostPort: firstHostPort, definesRouter: false };
-      }
+    let routes: PlannedRoute[];
+    if (!sharedRoutes) {
+      sharedRoutes = assignRoute(ctx.appName, selection.bindings);
+      routes = sharedRoutes;
+    } else {
+      // Matched by container port rather than by index: a replica's bindings are
+      // built in the same order, but pairing them positionally would silently
+      // point a route at the wrong port the first time that stops being true.
+      const hostPortFor = new Map(selection.bindings.map((b) => [b.containerPort, b.hostPort]));
+      routes = sharedRoutes
+        .filter((r) => hostPortFor.has(r.containerPort))
+        .map((r) => ({ ...r, hostPort: hostPortFor.get(r.containerPort)!, definesRouter: false }));
     }
 
     containers.push({
@@ -171,11 +180,11 @@ export function parseSingle(
       cpuQuota: cpu?.cpuQuota,
       cpuPeriod: cpu?.cpuPeriod,
       healthcheck,
-      route,
+      routes,
     });
   }
 
-  return { containers, notes: [] };
+  return { containers, notes };
 }
 
 /** `applications.environment` is `[{ key, value }]`; Podman wants `KEY=value`. */

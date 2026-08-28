@@ -53,6 +53,7 @@ export const POST = async ({ request, cookies }: { request: Request; cookies: an
       environment: app.environment,
       volumes: app.volumes,
       restartPolicy: app.restartPolicy,
+      exposedPorts: app.exposedPorts,
       createdBy: userId,
       createdAt: new Date(),
       updatedAt: new Date(),

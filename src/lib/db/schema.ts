@@ -157,6 +157,27 @@ export const applications = sqliteTable('applications', {
   environment: text('environment'),
   volumes: text('volumes'),
   restartPolicy: text('restart_policy', { enum: ['no', 'on-failure', 'always', 'unless-stopped'] }).notNull().default('always'),
+  /**
+   * Container ports that should be public, as a JSON array, in the order they
+   * take Traefik entryPoints: the first gets 443, the rest get 1443 upward.
+   *
+   * The declaration *is* the mapping. Deriving it from the manifest's port order
+   * or from the port numbers would silently re-point every client the day
+   * someone adds a port, and routing is deliberately outside `specHash`, so
+   * reconciliation would not report the drift either.
+   *
+   * Null means undeclared and keeps the behaviour every application had before
+   * this column existed — first published port routed, rest loopback-only. An
+   * empty array is the different statement "declared, route nothing"; the two
+   * must not be collapsed, which is why there is no default.
+   *
+   * Application-scoped rather than per-container because each container routes
+   * only the ports it actually publishes, so one list serves a whole compose
+   * file. The case it cannot express is two services publishing the same
+   * container port where only one should be routed — for that, a service sets
+   * the `rudder.expose` label and overrides this.
+   */
+  exposedPorts: text('exposed_ports'),
   rateLimitAvg: integer('rate_limit_avg'),
   rateLimitBurst: integer('rate_limit_burst'),
   authType: text('auth_type', { enum: ['none', 'oidc', 'global'] }).notNull().default('global'),
@@ -208,6 +229,8 @@ export const applicationTemplates = sqliteTable('application_templates', {
   environment: text('environment'),
   volumes: text('volumes'),
   restartPolicy: text('restart_policy', { enum: ['no', 'on-failure', 'always', 'unless-stopped'] }).notNull().default('always'),
+  /** @see applications.exposedPorts — same encoding, same null semantics. */
+  exposedPorts: text('exposed_ports'),
   createdBy: text('created_by').references(() => users.id),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),

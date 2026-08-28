@@ -14,6 +14,12 @@ import {
   userTeams as allUserTeams,
 } from '$lib/server/auth';
 import { encryptField } from '$lib/server/encryption';
+import {
+  EXPOSED_PORTS_ERROR,
+  MAX_ROUTES_PER_CONTAINER,
+  parsePortList,
+  serializeExposedPorts,
+} from '$lib/server/deploy/plan';
 
 export const load = async (event: { locals: App.Locals }) => {
   const currentUser = requirePageUser(event).user;
@@ -73,6 +79,19 @@ export const actions = {
 
     if (!name || !teamId) {
       return fail(400, { error: 'Missing required fields (name, team)' });
+    }
+
+    // Blank means undeclared — the single-route default every application has
+    // had — not "publish nothing". See the same field in the edit action.
+    const exposedPortsRaw = formData.get('exposedPorts')?.toString().trim() ?? '';
+    const exposedPorts = exposedPortsRaw === '' ? null : parsePortList(exposedPortsRaw);
+    if (exposedPortsRaw !== '' && exposedPorts === null) {
+      return fail(400, { error: EXPOSED_PORTS_ERROR });
+    }
+    if (exposedPorts && exposedPorts.length > MAX_ROUTES_PER_CONTAINER) {
+      return fail(400, {
+        error: `Public ports: at most ${MAX_ROUTES_PER_CONTAINER} can be published — a worker has ${MAX_ROUTES_PER_CONTAINER} HTTPS entryPoints.`,
+      });
     }
 
     // The team is submitted, not derived, and the loader above only scopes the
@@ -287,6 +306,7 @@ export const actions = {
       environment,
       volumes,
       restartPolicy,
+      exposedPorts: serializeExposedPorts(exposedPorts),
       rateLimitAvg,
       rateLimitBurst,
       authType,

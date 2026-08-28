@@ -1,0 +1,23 @@
+-- Which of an application's container ports are public.
+--
+-- Traefik binds five HTTPS entryPoints on a worker — 443, then 1443 through
+-- 4443 — and this column says which container ports take them, in order. The
+-- declaration *is* the mapping: `[7070, 8080]` puts 7070 on 443 and 8080 on
+-- 1443, on the same hostname and the same certificate. Deriving the order from
+-- the manifest or from the port numbers would silently re-point every client the
+-- day someone adds a port, and routing is deliberately outside the container
+-- spec hash, so reconciliation would not report the drift either.
+--
+-- Nullable with no default, which is the whole design of the column. NULL means
+-- undeclared and keeps the behaviour every application had before this existed:
+-- the first published port is routed and the rest stay reachable only from the
+-- worker and from sibling containers. '[]' is the different statement
+-- "declared, route nothing". Collapsing the two would either take the extra
+-- ports off applications that never asked for them, or take every application
+-- off the air.
+--
+-- Templates carry it for the same reason the kubectl annotation is emitted as
+-- well as read: saving an application as a template and creating from it must
+-- not silently drop which of its ports were public.
+ALTER TABLE applications ADD COLUMN exposed_ports TEXT;
+ALTER TABLE application_templates ADD COLUMN exposed_ports TEXT;

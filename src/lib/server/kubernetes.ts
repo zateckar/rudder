@@ -3,6 +3,8 @@ import {
   createRouteAssigner,
   identityLabels,
   plannedContainerName,
+  routeSelectionNotes,
+  selectRouteBindings,
   type DeploymentPlan,
   type PlanContext,
   type PlannedContainer,
@@ -367,11 +369,13 @@ export function parseK8sManifest(manifest: string, ctx: PlanContext): Deployment
   if (baseDomain || ctx.appDomain) {
     const assignRoute = createRouteAssigner(ctx);
     for (const container of containers) {
-      const firstPortKey = Object.keys(container.ports)[0];
-      if (!firstPortKey) continue;
-      // The binding's value, not its key: the key is the port inside the
-      // container and the value is the host port Traefik has to reach.
-      container.route = assignRoute(container.key, parseInt(container.ports[firstPortKey][0].hostPort));
+      const selection = selectRouteBindings(ctx.exposedPorts, container.ports);
+      if (selection.bindings.length === 0) {
+        notes.push(...routeSelectionNotes(container.key, selection));
+        continue;
+      }
+      container.routes = assignRoute(container.key, selection.bindings);
+      notes.push(...routeSelectionNotes(container.key, selection));
     }
   }
 
@@ -624,6 +628,9 @@ function parseK8sContainer(
     name: plannedContainerName(ctx, container.name),
     image: container.image || `${container.name}:latest`,
     env: Object.entries(env).map(([k, v]) => `${k}=${v}`),
+    // Filled in by `parseK8sManifest` once the whole manifest is read, because
+    // which container owns the application hostname depends on the others.
+    routes: [],
     ports,
     mounts,
     files: files.length > 0 ? files : undefined,

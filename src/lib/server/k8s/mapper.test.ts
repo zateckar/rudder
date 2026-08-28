@@ -6,9 +6,11 @@ import {
   containerPortOf,
   containerToPod,
   imageReferenceOrBlank,
+  parseDeploymentBody,
   parseTailLines,
   podNameOf,
 } from './mapper';
+import { serializeExposedPorts } from '../deploy/plan';
 
 describe('parseTailLines', () => {
   test('clamps a count that would otherwise be buffered whole', () => {
@@ -35,26 +37,32 @@ describe('parseTailLines', () => {
   });
 });
 
+function deploymentFor(over: Record<string, any> = {}) {
+  return applicationToDeployment(
+    {
+      id: 'app-1',
+      name: 'shop',
+      type: 'single',
+      manifest: JSON.stringify({ image: 'nginx' }),
+      environment: null,
+      replicas: 1,
+      restartPolicy: 'always',
+      workerId: 'worker-1',
+      domain: 'shop.example.com',
+      description: null,
+      exposedPorts: null,
+      createdAt: new Date(0),
+      updatedAt: new Date(0),
+      ...over,
+    },
+    'platform',
+    [],
+  );
+}
+
 describe('applicationToDeployment — environment', () => {
   function deploymentWith(environment: string | null) {
-    return applicationToDeployment(
-      {
-        id: 'app-1',
-        name: 'shop',
-        type: 'single',
-        manifest: JSON.stringify({ image: 'nginx' }),
-        environment,
-        replicas: 1,
-        restartPolicy: 'always',
-        workerId: 'worker-1',
-        domain: 'shop.example.com',
-        description: null,
-        createdAt: new Date(0),
-        updatedAt: new Date(0),
-      },
-      'platform',
-      [],
-    );
+    return deploymentFor({ environment });
   }
 
   const withSecret = JSON.stringify([
@@ -109,6 +117,54 @@ describe('applicationToDeployment — environment', () => {
       const deployment = deploymentWith(environment);
       expect(deployment.spec.template.spec.containers[0].env).toBeUndefined();
     }
+  });
+});
+
+describe('rudder.dev/expose-ports', () => {
+  function bodyWith(annotations: Record<string, string>) {
+    return {
+      apiVersion: 'apps/v1',
+      kind: 'Deployment',
+      metadata: { name: 'shop', annotations },
+      spec: { replicas: 1, template: { spec: { containers: [{ image: 'nginx' }] }, metadata: {} } },
+    };
+  }
+
+  test('is read into the application', () => {
+    expect(parseDeploymentBody(bodyWith({ 'rudder.dev/expose-ports': '7070, 8080' })).exposedPorts)
+      .toEqual([7070, 8080]);
+  });
+
+  test('order is preserved, because order is the entryPoint mapping', () => {
+    expect(parseDeploymentBody(bodyWith({ 'rudder.dev/expose-ports': '8080,7070' })).exposedPorts)
+      .toEqual([8080, 7070]);
+  });
+
+  test('absent means undeclared, not empty', () => {
+    expect(parseDeploymentBody(bodyWith({})).exposedPorts).toBeNull();
+  });
+
+  test('a malformed value is refused — kubectl has no other feedback channel', () => {
+    // Ignoring it leaves the user with an application unreachable on a port they
+    // believe they configured, and an `apply` that reported success.
+    expect(() => parseDeploymentBody(bodyWith({ 'rudder.dev/expose-ports': '80;81' }))).toThrow(
+      /expose-ports/,
+    );
+    expect(() =>
+      parseDeploymentBody(bodyWith({ 'rudder.dev/expose-ports': '1,2,3,4,5,6' })),
+    ).toThrow(/entryPoints/);
+  });
+
+  test('is emitted again, so a get/apply round-trip does not drop it', () => {
+    // Without this, `kubectl get deploy -o yaml | kubectl apply -f -` silently
+    // takes the extra ports off the air on the next apply.
+    const deployment = deploymentFor({ exposedPorts: serializeExposedPorts([7070, 8080]) });
+    expect(deployment.metadata.annotations['rudder.dev/expose-ports']).toBe('7070,8080');
+    expect(parseDeploymentBody(deployment).exposedPorts).toEqual([7070, 8080]);
+  });
+
+  test('an undeclared application emits no annotation to read back', () => {
+    expect(deploymentFor().metadata.annotations['rudder.dev/expose-ports']).toBeUndefined();
   });
 });
 

@@ -422,6 +422,17 @@ spec:
             </select>
           </div>
           <div class="form-group">
+            <label for="exposedPorts">Public Ports</label>
+            <input type="text" id="exposedPorts" name="exposedPorts" placeholder="7070, 8080" />
+            <p class="help-text">
+              Container ports to publish, in order. The first gets <code>:443</code>, the rest get
+              <code>:1443</code> upward on the same hostname and certificate. Leave blank to publish
+              the first port only. Ports left out stay reachable from the worker and from sibling
+              containers, but not from outside. HTTP services only — every entryPoint terminates TLS
+              and speaks HTTP.
+            </p>
+          </div>
+          <div class="form-group">
             <label for="workingDir">Working Directory</label>
             <input
               type="text"

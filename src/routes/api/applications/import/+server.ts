@@ -6,6 +6,7 @@ import type { RequestHandler } from './$types';
 import { requireTeam, route } from '$lib/server/auth';
 import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
 import { normalizeTokenHeader, tokenHeaderNameError } from '$lib/server/oidc';
+import { parseExposedPorts, serializeExposedPorts } from '$lib/server/deploy/plan';
 
 /** A token header name from an imported file, or null if it is unusable. */
 function importedTokenHeader(raw: unknown): string | null {
@@ -90,6 +91,11 @@ export const POST: RequestHandler = route(async (event) => {
     environment: config.environment || null,
     volumes: config.volumes || null,
     restartPolicy: config.restartPolicy || 'always',
+    // Re-parsed rather than trusted: an exported file is user-editable by the
+    // time it comes back, and this value ends up deciding what is public.
+    // Anything unreadable degrades to undeclared, which is the safe direction —
+    // one route rather than several.
+    exposedPorts: serializeExposedPorts(parseExposedPorts(config.exposedPorts)),
     rateLimitAvg: config.rateLimitAvg || null,
     rateLimitBurst: config.rateLimitBurst || null,
     // Default to the worker's global auth rather than 'none': an imported

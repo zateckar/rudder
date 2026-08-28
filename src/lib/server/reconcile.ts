@@ -56,7 +56,12 @@ import type { Container, PodmanClient } from './podman';
 import { getRestPodmanClient } from './podman-client';
 import { sendNotification } from './notifications';
 import { buildDeploymentPlan } from './deploy/build';
-import { ManifestError, type PlanContext, type PlannedContainer } from './deploy/plan';
+import {
+  ManifestError,
+  parseExposedPorts,
+  type PlanContext,
+  type PlannedContainer,
+} from './deploy/plan';
 import {
   REAP_ATTEMPTS_BEFORE_REPORTING,
   parseGenerationalName,
@@ -349,6 +354,7 @@ export function desiredState(input: DesiredStateInput): DesiredApp {
     team: team ? { id: team.id, name: team.name } : undefined,
     replicas: app.replicas,
     restartPolicy: app.restartPolicy,
+    exposedPorts: parseExposedPorts(app.exposedPorts),
     environment: app.environment,
     healthcheck: app.healthcheck,
     gitRepo: app.gitRepo,

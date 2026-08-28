@@ -156,6 +156,53 @@ spec:
   });
 });
 
+describe('parseK8sManifest — public ports', () => {
+  const MULTI = `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: versity
+spec:
+  template:
+    spec:
+      containers:
+        - name: gw
+          image: versitygw
+          ports:
+            - containerPort: 7070
+            - containerPort: 7071
+            - containerPort: 8080
+`;
+
+  test('undeclared routes the first published port, as it always has', () => {
+    const [c] = parseK8sManifest(MULTI, 'versity', { baseDomain: 'apps.example.com' });
+    expect(c.routes).toHaveLength(1);
+    expect(c.routes[0].containerPort).toBe(7070);
+  });
+
+  test('the declaration assigns entryPoints in its own order', () => {
+    const [c] = parseK8sManifest(MULTI, 'versity', {
+      baseDomain: 'apps.example.com',
+      exposedPorts: [8080, 7070],
+    });
+    expect(c.routes.map((r) => [r.containerPort, r.entryPoint])).toEqual([
+      [8080, 'websecure'],
+      [7070, 'websecure-1'],
+    ]);
+  });
+
+  test('a declared port the pod does not publish is reported', () => {
+    const plan = parseManifest(MULTI, {
+      appId: APP_ID,
+      appName: 'versity',
+      baseDomain: 'apps.example.com',
+      allocatePort: sequentialAllocator(),
+      exposedPorts: [7070, 9999],
+    });
+    expect(plan.notes.join('\n')).toContain('9999');
+  });
+});
+
 describe('parseK8sManifest — network aliases', () => {
   const PAIR = `
 apiVersion: v1
