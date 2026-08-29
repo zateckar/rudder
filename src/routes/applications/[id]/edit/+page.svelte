@@ -511,6 +511,13 @@
         CRS initialisation rule, and disabling it does nothing.
       </p>
       <p class="help-text">
+        <strong>Not <code>949110</code>.</strong> It is not a signature — it is the anomaly-score
+        threshold, and the only CRS rule that enforces anything; the rest just add to the score.
+        Excluding it does not narrow the ruleset for this application, it switches CRS off for it.
+        It is also the id CrowdSec reports as having fired, so it is the tempting one. List the
+        signatures that pushed the score over instead.
+      </p>
+      <p class="help-text">
         Applying a change restarts CrowdSec on the worker, which takes a few seconds and is picked
         up within a minute. Disable only rules you have confirmed are firing on traffic you
         recognise: every one you list stops protecting this application against everyone.

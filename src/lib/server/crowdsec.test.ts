@@ -242,6 +242,44 @@ const APPSEC_ALERT = {
   ],
 };
 
+/**
+ * The *other* shape, and the more common one — copied from a live alert on
+ * alpha. One event per rule, `target_fqdn` instead of `target_host`, a human
+ * `message`, and **no `datasource_type` at all**, which is what the first
+ * version of the parser filtered on. Gamma held 5 alerts of the shape above
+ * and 350+ of this one, so that filter hid almost everything.
+ */
+const SCORED_ALERT = {
+  scenario: 'anomaly score out-of-band: sql_injection: 10, lfi: 70, rce: 30, anomaly: 110, ',
+  source: { scope: 'Ip', value: '20.166.29.62', cn: 'IE' },
+  events: [
+    {
+      meta: [
+        { key: 'rule_name', value: 'native_rule:901340' },
+        { key: 'message', value: 'Enabling body inspection' },
+        { key: 'uri', value: '/?id=1%27+OR+%271%27%3D%271&f=../../../etc/passwd' },
+        { key: 'target_fqdn', value: 'routecheck.alpha.apps.skoda-api.com' },
+      ],
+    },
+    {
+      meta: [
+        { key: 'rule_name', value: 'native_rule:930100' },
+        { key: 'message', value: 'Path Traversal Attack (/../) or (/.../)' },
+        { key: 'uri', value: '/?id=1%27+OR+%271%27%3D%271&f=../../../etc/passwd' },
+        { key: 'target_fqdn', value: 'routecheck.alpha.apps.skoda-api.com' },
+      ],
+    },
+    {
+      meta: [
+        { key: 'rule_name', value: 'native_rule:949110' },
+        { key: 'message', value: 'Inbound Anomaly Score Exceeded' },
+        { key: 'uri', value: '/?id=1%27+OR+%271%27%3D%271&f=../../../etc/passwd' },
+        { key: 'target_fqdn', value: 'routecheck.alpha.apps.skoda-api.com' },
+      ],
+    },
+  ],
+};
+
 describe('parseAppsecAlerts', () => {
   test('surfaces every rule that scored, not just the one CrowdSec names', () => {
     const [a] = parseAppsecAlerts(JSON.stringify([APPSEC_ALERT]), 0)!;
@@ -295,5 +333,52 @@ describe('parseAppsecAlerts', () => {
     expect(parseAppsecAlerts('', 1)).toBeNull();
     expect(parseAppsecAlerts('not json', 0)).toBeNull();
     expect(parseAppsecAlerts('null', 0)).toEqual([]);
+  });
+
+  describe('the one-event-per-rule shape', () => {
+    test('is recognised at all, despite carrying no datasource_type', () => {
+      // The regression. Filtering on `datasource_type === "appsec"` dropped
+      // every alert of this shape, which on a live worker was 350 of 355.
+      expect(parseAppsecAlerts(JSON.stringify([SCORED_ALERT]), 0)).toHaveLength(1);
+    });
+
+    test('folds nine events for one request into one row', () => {
+      const [a] = parseAppsecAlerts(JSON.stringify([SCORED_ALERT]), 0)!;
+      expect(a.host).toBe('routecheck.alpha.apps.skoda-api.com');
+      expect(a.ruleIds).toEqual([901340, 930100, 949110]);
+    });
+
+    test('keeps what each rule is for, which is the whole point of showing it', () => {
+      // "930100" is a number to look up. "Path Traversal Attack" is a decision
+      // someone can actually make about their own application.
+      const [a] = parseAppsecAlerts(JSON.stringify([SCORED_ALERT]), 0)!;
+      expect(a.ruleMessages['930100']).toBe('Path Traversal Attack (/../) or (/.../)');
+      expect(a.ruleMessages['949110']).toBe('Inbound Anomaly Score Exceeded');
+    });
+
+    test('falls back to the alert source for the address', () => {
+      const [a] = parseAppsecAlerts(JSON.stringify([SCORED_ALERT]), 0)!;
+      expect(a.sourceIp).toBe('20.166.29.62');
+    });
+
+    test('separates two hosts inside one alert', () => {
+      const mixed = {
+        ...SCORED_ALERT,
+        events: [
+          SCORED_ALERT.events[1],
+          {
+            meta: [
+              { key: 'rule_name', value: 'native_rule:942100' },
+              { key: 'target_fqdn', value: 'other.example.com' },
+            ],
+          },
+        ],
+      };
+      const rows = parseAppsecAlerts(JSON.stringify([mixed]), 0)!;
+      expect(rows.map((r) => [r.host, r.ruleIds])).toEqual([
+        ['routecheck.alpha.apps.skoda-api.com', [930100]],
+        ['other.example.com', [942100]],
+      ]);
+    });
   });
 });

@@ -204,30 +204,53 @@ export interface CrowdsecAppsecAlert {
   host: string;
   uri: string;
   sourceIp: string;
-  /** Every CRS rule that scored on this request, in the order CrowdSec listed. */
+  /** Every CRS rule that scored on this request, ascending. */
   ruleIds: number[];
-  /** What CrowdSec called it — kept because named vpatch rules use this form. */
+  /**
+   * What each rule is for, keyed by rule id — "Path Traversal Attack (/../)".
+   *
+   * The difference between a number somebody disables blind and a decision they
+   * can actually make. Only one of the two alert shapes carries it.
+   */
+  ruleMessages: Record<string, string>;
+  /** A non-numeric rule name, for vpatch matches that have no CRS id. */
   ruleName: string;
 }
 
-/** `[901340 911100 949110]` as numbers. CrowdSec formats it as a bare string. */
+/** Every number in `[901340 911100 949110]`. CrowdSec formats it as a string. */
 function parseRuleIds(raw: unknown): number[] {
   if (typeof raw !== 'string') return [];
-  const ids: number[] = [];
-  for (const part of raw.replace(/[[\]]/g, ' ').split(/[\s,]+/)) {
-    if (!/^\d+$/.test(part)) continue;
-    const id = Number(part);
-    if (!ids.includes(id)) ids.push(id);
-  }
-  return ids;
+  return [...raw.matchAll(/\d+/g)].map((m) => Number(m[0]));
+}
+
+/** `native_rule:930100` → 930100, for anything else null. */
+function nativeRuleId(name: string): number | null {
+  const m = /^native_rule:(\d+)$/.exec(name);
+  return m ? Number(m[1]) : null;
 }
 
 /**
  * AppSec alerts from `cscli alerts list -a -o json`, or null for no answer.
  *
- * Only AppSec alerts: everything else — log-derived scenarios like http-probing
- * — has no rule to disable and no Host to attribute, so listing it here would
- * offer an action that cannot be taken.
+ * **CrowdSec emits two different shapes for these and both are common.** The
+ * first version of this handled only one, and dropped the other silently:
+ *
+ *   `crowdsecurity/crowdsec-appsec-outofband` — one event carrying
+ *   `datasource_type: appsec`, `target_host`, `target_uri` and the whole chain
+ *   in a single `rule_ids` string.
+ *
+ *   `anomaly score out-of-band: lfi: 70, …` — one event *per rule*, with
+ *   `target_fqdn`, `uri`, a `rule_name` of `native_rule:<id>`, a human `message`
+ *   — and no `datasource_type` at all.
+ *
+ * Verified on two live workers: gamma had 5 of the first and 350+ of the
+ * second, so filtering on `datasource_type` alone hid almost everything.
+ *
+ * Events are folded per alert and host, because the second shape means nine
+ * events for one request and nine rows would be nine copies of one problem.
+ * Log-derived scenarios like http-probing are excluded throughout: they have no
+ * rule to disable and no Host to attribute it to, so offering the action would
+ * be offering something that cannot work.
  */
 export function parseAppsecAlerts(stdout: string, exitCode: number): CrowdsecAppsecAlert[] | null {
   if (exitCode !== 0) return null;
@@ -242,33 +265,65 @@ export function parseAppsecAlerts(stdout: string, exitCode: number): CrowdsecApp
     const seen = new Set<string>();
 
     for (const alert of parsed) {
+      /** host → the one row that host contributes to this alert. */
+      const byHost = new Map<string, CrowdsecAppsecAlert>();
+
       for (const event of Array.isArray(alert?.events) ? alert.events : []) {
         const meta: Record<string, string> = {};
         for (const m of Array.isArray(event?.meta) ? event.meta : []) {
           if (m?.key !== undefined) meta[String(m.key)] = String(m.value ?? '');
         }
-        if (meta.datasource_type !== 'appsec' && meta.service !== 'appsec') continue;
 
-        const host = meta.target_host ?? '';
-        const uri = meta.target_uri ?? '';
-        const ruleIds = parseRuleIds(meta.rule_ids);
+        const host = meta.target_host || meta.target_fqdn || '';
         const ruleName = meta.rule_name ?? '';
-        if (!host && !ruleIds.length && !ruleName) continue;
+        // Recognised by shape rather than by one field, since the field that
+        // says "this is AppSec" is absent from the more common of the two.
+        const isAppsec =
+          meta.datasource_type === 'appsec' ||
+          meta.service === 'appsec' ||
+          meta.target_fqdn !== undefined ||
+          nativeRuleId(ruleName) !== null;
+        if (!isAppsec || !host) continue;
 
-        // One row per host+rule set. The same false positive fires on every
-        // request of the same shape, and forty identical rows would bury the
-        // one other thing that is happening.
-        const key = `${host}|${ruleName}|${ruleIds.join(',')}`;
+        const row: CrowdsecAppsecAlert = byHost.get(host) ?? {
+          host,
+          uri: '',
+          sourceIp: meta.source_ip || alert?.source?.value || '',
+          ruleIds: [],
+          ruleMessages: {},
+          ruleName: '',
+        };
+
+        // The longest URI wins: the per-rule shape repeats it on every event,
+        // and a rule matching on a decoded fragment can report a shorter one.
+        const uri = meta.target_uri || meta.uri || '';
+        if (uri.length > row.uri.length) row.uri = uri;
+
+        const ids = parseRuleIds(meta.rule_ids);
+        const named = nativeRuleId(ruleName);
+        if (named !== null) ids.push(named);
+        for (const id of ids) {
+          if (!row.ruleIds.includes(id)) row.ruleIds.push(id);
+        }
+
+        // `message` belongs to the rule this event is about, which is only
+        // unambiguous in the one-event-per-rule shape.
+        if (named !== null && meta.message) row.ruleMessages[String(named)] = meta.message;
+        if (!row.ruleName && ruleName && named === null) row.ruleName = ruleName;
+
+        byHost.set(host, row);
+      }
+
+      for (const row of byHost.values()) {
+        if (!row.ruleIds.length && !row.ruleName) continue;
+        row.ruleIds.sort((a, b) => a - b);
+
+        // The same false positive fires on every request of the same shape.
+        // Forty identical rows would bury the one other thing happening.
+        const key = `${row.host}|${row.ruleName}|${row.ruleIds.join(',')}`;
         if (seen.has(key)) continue;
         seen.add(key);
-
-        rows.push({
-          host,
-          uri,
-          sourceIp: meta.source_ip ?? (alert?.source?.value ?? ''),
-          ruleIds,
-          ruleName,
-        });
+        rows.push(row);
       }
     }
     return rows;

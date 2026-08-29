@@ -6,6 +6,7 @@
   import PageHeader from '$lib/components/PageHeader.svelte';
   import { showToast } from '$lib/client/toast.svelte';
   import { confirmAction } from '$lib/client/dialog.svelte';
+  import { isAnomalyGate, metaRuleNote } from '$lib/appsec-rules';
 
   let { data } = $props();
 
@@ -424,7 +425,27 @@
    */
   async function excludeRule(host: string, rule: string) {
     if (!host) return;
-    if (!confirm(
+
+    // 949110 is not a signature. Every other CRS rule adds to an anomaly score;
+    // this one fires when the total crosses the threshold, and it is the only
+    // rule that enforces anything. Excluding it does not narrow the ruleset for
+    // this host — it turns CRS off for it. Confirmed on alpha: excluding one
+    // signature removed exactly that rule from the match, excluding 949110
+    // produced no alert at all.
+    //
+    // It is also the id an operator is most likely to click, because it is the
+    // one CrowdSec reports as having fired. So the warning has to be here, not
+    // only in the help text.
+    if (isAnomalyGate(rule)) {
+      if (!confirm(
+        `Rule ${rule} is not a signature — it is the anomaly-score threshold, and the only ` +
+        `CRS rule that enforces anything.\n\n` +
+        `Excluding it disables the OWASP ruleset entirely for ${host}, on every port it ` +
+        `serves. The rules you actually want are the signatures that pushed the score over ` +
+        `the line — the other ids on this row.\n\n` +
+        `Disable CRS for ${host} anyway?`,
+      )) return;
+    } else if (!confirm(
       `Stop rule ${rule} firing for ${host}?\n\n` +
       `It stops protecting that application against everyone, on every port it serves. ` +
       `CrowdSec restarts on this worker within a minute.`,
@@ -2083,6 +2104,13 @@
             usually a CRS initialisation rule that does nothing when switched off.
           </p>
           <p class="help-text">
+            Most CRS rules only add to an anomaly score; <strong><code>949110</code> is the one
+            that fires when the total crosses the threshold</strong>, and the only one that
+            enforces anything. Excluding it does not narrow the ruleset for an application — it
+            turns CRS off for it. Exclude the signatures that pushed the score over instead. Rules
+            shown in amber are this kind of machinery rather than a signature.
+          </p>
+          <p class="help-text">
             Excluding a rule applies to that application on every port it serves, takes effect
             within a minute, and restarts CrowdSec on this worker. Only exclude rules firing on
             traffic you recognise: an attack looks much like a false positive from here, and the
@@ -2101,10 +2129,15 @@
                       {#each a.ruleIds as id}
                         <button
                           class="rule-chip"
+                          class:rule-chip--meta={metaRuleNote(id)}
                           disabled={!a.host || excludingRule === `${a.host}|${id}`}
                           onclick={() => excludeRule(a.host, String(id))}
-                          title={`Stop rule ${id} firing for ${a.host}`}
-                        >{id}</button>
+                          title={metaRuleNote(id) ??
+                            (a.ruleMessages?.[String(id)]
+                              ? `${a.ruleMessages[String(id)]} — click to stop it firing for ${a.host}`
+                              : `Stop rule ${id} firing for ${a.host}`)}
+                        >{id}{#if a.ruleMessages?.[String(id)]}<span class="rule-why"
+                          >{a.ruleMessages[String(id)]}</span>{/if}</button>
                       {/each}
                     {:else if a.ruleName}
                       <button
@@ -2840,6 +2873,20 @@
     color: var(--text-primary); border-color: var(--text-muted);
   }
   .rule-chip:disabled { opacity: 0.5; cursor: default; }
+  /* What the rule is for. A bare id is a number to go and look up; "Path
+     Traversal Attack" is a judgement someone can make about their own app. */
+  .rule-why {
+    margin-left: 5px; font-family: var(--font-sans);
+    color: var(--text-muted); font-size: 10px;
+  }
+  /* Score machinery, not a signature. Excluding 949110 disables CRS for the
+     host outright, and it is the id most likely to be clicked because it is the
+     one reported as firing — so it must not look like its neighbours. */
+  .rule-chip--meta {
+    color: var(--warning, #d29922);
+    border-color: var(--warning, #d29922);
+    border-style: dashed;
+  }
   /* The path is the evidence; it is also frequently a 200-character signed URL. */
   .path-cell {
     display: inline-block; max-width: 380px; overflow: hidden;
