@@ -631,15 +631,22 @@ stringData:
           type="text"
           id="appsecDisabledRules"
           name="appsecDisabledRules"
-          placeholder="942100, 932130"
+          placeholder="942100, tag:attack-lfi"
         />
         <p class="help-text">
-          CRS rule numbers, CrowdSec rule names, or both. They apply to this application only,
-          matched on its hostname — on every port it serves.
+          CRS rule numbers, attack-class tags written <code>tag:attack-lfi</code>, CrowdSec rule
+          names, or any mix. They apply to this application only, matched on its hostname — on
+          every port it serves.
           {#if appType === 'k8s'}
             A <code>kubectl apply</code> carrying
             <code>rudder.dev/appsec-disable-rules</code> overwrites whatever is set here.
           {/if}
+        </p>
+        <p class="help-text">
+          <strong>Prefer a tag when a whole class misfires</strong> — <code>tag:attack-lfi</code>
+          rather than <code>930100, 930110, 930120</code>. It keeps working when CRS adds a fourth
+          rule to that class. Tags every rule carries, such as <code>OWASP_CRS</code> and
+          <code>paranoia-level/1</code>, are refused.
         </p>
       </div>
 

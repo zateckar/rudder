@@ -33,6 +33,27 @@ describe('parseRuleList', () => {
     expect(parseRuleList('942100, 942100, 933180')).toEqual([942100, 933180]);
   });
 
+  test('reads a tag, and keeps it marked as one', () => {
+    // A tag and a rule name are both plain strings and no heuristic separates
+    // them: `crowdsecurity/vpatch-git-config` is a name, `capec/1000/255` is a
+    // tag, and both contain slashes. Hence the explicit prefix.
+    expect(parseRuleList('tag:attack-lfi, 942100')).toEqual(['tag:attack-lfi', 942100]);
+  });
+
+  test('tolerates spacing around the prefix', () => {
+    expect(parseRuleList('tag:attack-sqli')).toEqual(['tag:attack-sqli']);
+    expect(parseRuleList('  tag:attack-sqli  ')).toEqual(['tag:attack-sqli']);
+  });
+
+  test('a tag with no value is rejected outright', () => {
+    // `RemoveOutBandRuleByTag("")` would match nothing or everything depending
+    // on the engine, and neither is what anybody meant to type. Rejected here
+    // rather than reaching the refusal layer, so the field reports it as the
+    // typo it is.
+    expect(parseRuleList('tag:')).toBeNull();
+    expect(parseRuleList('942100, tag:')).toBeNull();
+  });
+
   test('rejects rather than silently dropping a malformed entry', () => {
     // The whole point: a typo must be reported, not read as "exclude nothing".
     // Someone who mistypes a rule id and is told nothing will believe the rule
@@ -123,6 +144,35 @@ describe('generateAppsecConfig', () => {
 
   test('an application with no rules contributes no filter', () => {
     expect(generateAppsecConfig([{ host: 'a.example.com', rules: [] }])).not.toContain('pre_eval:');
+  });
+
+  test('removes a tag by tag, which is a different CrowdSec helper', () => {
+    // Verified on a live worker: with this hook in place, a payload that
+    // normally trips 930100, 930110, 930120, 932160, 932230 and 942100 came
+    // back having tripped only the RCE and SQLi ones — the three LFI rules
+    // were gone and nothing else was.
+    const yaml = generateAppsecConfig([{ host: 'app.example.com', rules: ['tag:attack-lfi'] }]);
+    expect(yaml).toContain('RemoveInBandRuleByTag("attack-lfi")');
+    expect(yaml).toContain('RemoveOutBandRuleByTag("attack-lfi")');
+    // Not ByName, which is what a rule name gets and would match nothing here.
+    expect(yaml).not.toContain('ByName');
+  });
+
+  test('the prefix does not leak into the emitted tag', () => {
+    const yaml = generateAppsecConfig([{ host: 'app.example.com', rules: ['tag:attack-sqli'] }]);
+    expect(yaml).not.toContain('"tag:attack-sqli"');
+  });
+
+  test('mixes ids, tags and names in one filter', () => {
+    const yaml = generateAppsecConfig([
+      {
+        host: 'app.example.com',
+        rules: [942100, 'tag:attack-lfi', 'crowdsecurity/vpatch-git-config'],
+      },
+    ]);
+    expect(yaml).toContain('RemoveOutBandRuleByID(942100)');
+    expect(yaml).toContain('RemoveOutBandRuleByTag("attack-lfi")');
+    expect(yaml).toContain('RemoveOutBandRuleByName("crowdsecurity/vpatch-git-config")');
   });
 
   test('never emits a hook for the anomaly gate, whatever the row says', () => {

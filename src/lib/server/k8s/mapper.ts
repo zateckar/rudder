@@ -562,9 +562,9 @@ export function parseDeploymentBody(body: any): {
     appsecDisabledRules = parseRuleList(String(appsecAnnotation));
     if (appsecDisabledRules === null) {
       throw new Error(
-        `rudder.dev/appsec-disable-rules must be a comma-separated list of CRS rule numbers ` +
-          `or CrowdSec rule names, for example "942100,crowdsecurity/vpatch-git-config" — ` +
-          `got "${appsecAnnotation}"`,
+        `rudder.dev/appsec-disable-rules must be a comma-separated list of CRS rule numbers, ` +
+          `attack-class tags, or CrowdSec rule names — for example ` +
+          `"942100,tag:attack-lfi,crowdsecurity/vpatch-git-config" — got "${appsecAnnotation}"`,
       );
     }
     // kubectl has to refuse the anomaly gate for the same reason the forms do,

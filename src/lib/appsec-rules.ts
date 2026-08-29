@@ -32,6 +32,45 @@ export const CRS_META_RULES: Record<string, string> = {
   '980130': 'score reporting, not a signature — excluding it does nothing useful',
 };
 
+/**
+ * How a tag is written in the exclusion list: `tag:attack-lfi`.
+ *
+ * Explicit rather than inferred. A tag and a CrowdSec rule name are both plain
+ * strings, and no heuristic separates them — `crowdsecurity/vpatch-git-config`
+ * is a name, `capec/1000/255/153/126` is a tag, and both contain slashes.
+ */
+export const TAG_PREFIX = 'tag:';
+
+/** The tag in `tag:attack-lfi`, or null when this entry is not a tag. */
+export function tagOf(entry: string | number): string | null {
+  const s = String(entry);
+  return s.startsWith(TAG_PREFIX) ? s.slice(TAG_PREFIX.length) : null;
+}
+
+/**
+ * Tags carried by every rule, or near enough.
+ *
+ * These are bookkeeping, not attack classes. Every CRS rule carries `OWASP_CRS`
+ * and a `paranoia-level/N`, and the `-multi` tags are on almost all of them —
+ * verified against the rules on a live worker, where `930100` carries
+ * `application-multi`, `language-multi`, `platform-multi`, `attack-lfi`,
+ * `paranoia-level/1` and `OWASP_CRS`.
+ *
+ * Excluding one of these disables CRS for an application wholesale while looking
+ * like a narrow exclusion — the same trap as 949110, spelled differently. The
+ * useful tags are the attack classes: `attack-lfi`, `attack-sqli`, `attack-rce`.
+ */
+function isBlanketTag(tag: string): boolean {
+  const t = tag.toLowerCase();
+  return (
+    t === 'owasp_crs' ||
+    t.startsWith('paranoia-level/') ||
+    t === 'application-multi' ||
+    t === 'language-multi' ||
+    t === 'platform-multi'
+  );
+}
+
 /** Whether excluding this rule switches CRS off for the host rather than narrowing it. */
 export function isAnomalyGate(ruleId: string | number): boolean {
   const id = String(ruleId);
@@ -64,6 +103,20 @@ export function metaRuleNote(ruleId: string | number): string | null {
  */
 export function ruleExclusionRefusal(ruleId: string | number): string | null {
   const id = String(ruleId);
+
+  const tag = tagOf(id);
+  if (tag !== null) {
+    if (tag === '') return 'A tag exclusion needs a tag after "tag:", for example tag:attack-lfi.';
+    if (isBlanketTag(tag)) {
+      return (
+        `Tag "${tag}" cannot be excluded: every CRS rule carries it, so excluding it would ` +
+        `switch the ruleset off for this application rather than narrow it. Exclude an attack ` +
+        `class instead — the tags that name one, such as attack-lfi or attack-sqli.`
+      );
+    }
+    return null;
+  }
+
   if (isAnomalyGate(id)) {
     return (
       `Rule ${id} cannot be excluded. It is not a signature — it is the anomaly-score ` +

@@ -22,14 +22,16 @@
  * application on 443.
  */
 
-/**
- * A CRS numeric id (`942100`) or a CrowdSec rule name
- * (`crowdsecurity/vpatch-git-config`). Both appear in real alerts, and the two
- * need different removal helpers, so the distinction is kept rather than
- * normalised away.
- */
-import { firstRuleRefusal, metaRuleNote } from '$lib/appsec-rules';
+import { TAG_PREFIX, firstRuleRefusal, metaRuleNote, tagOf } from '$lib/appsec-rules';
 
+/**
+ * One entry in an application's exclusion list. Three kinds, deliberately kept
+ * apart because CrowdSec needs a different removal helper for each:
+ *
+ *   `942100`                            a CRS rule id
+ *   `tag:attack-lfi`                    every rule in an attack class
+ *   `crowdsecurity/vpatch-git-config`   a CrowdSec rule name
+ */
 export type AppsecRuleId = number | string;
 
 /**
@@ -45,10 +47,17 @@ export function appsecRuleError(rules: AppsecRuleId[]): string | null {
 }
 
 export const APPSEC_RULES_ERROR =
-  'Disabled WAF rules must be a comma-separated list of CRS rule numbers (for example 942100) ' +
-  'or CrowdSec rule names (for example crowdsecurity/vpatch-git-config).';
+  'Disabled WAF rules must be a comma-separated list of CRS rule numbers (for example 942100), ' +
+  'attack-class tags (for example tag:attack-lfi), or CrowdSec rule names (for example ' +
+  'crowdsecurity/vpatch-git-config).';
 
-/** Hub rule names: the character set CrowdSec itself uses for hub items. */
+/**
+ * Hub rule names and tag values: the character set CrowdSec itself uses.
+ *
+ * The same shape serves both — `crowdsecurity/vpatch-git-config` and
+ * `capec/1000/255/153/126` are indistinguishable, which is why a tag is marked
+ * by an explicit `tag:` prefix rather than guessed at.
+ */
 const RULE_NAME = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 
 /** Hostnames Rudder routes. Anything else never reaches the generated filter. */
@@ -75,6 +84,16 @@ export function parseRuleList(value: string): AppsecRuleId[] | null {
       if (!rules.includes(id)) rules.push(id);
       continue;
     }
+    // `tag:attack-lfi` — one entry standing for a whole attack class, which
+    // keeps working when CRS adds a rule to that class where a list of ids
+    // would silently stop covering it.
+    const tag = tagOf(part);
+    if (tag !== null) {
+      if (!RULE_NAME.test(tag)) return null;
+      const normalised = `${TAG_PREFIX}${tag}`;
+      if (!rules.includes(normalised)) rules.push(normalised);
+      continue;
+    }
     if (!RULE_NAME.test(part)) return null;
     if (!rules.includes(part)) rules.push(part);
   }
@@ -98,9 +117,11 @@ export function parseAppsecRules(stored: string | null | undefined): AppsecRuleI
     for (const entry of parsed) {
       if (typeof entry === 'number' && Number.isInteger(entry) && entry > 0) {
         if (!rules.includes(entry)) rules.push(entry);
-      } else if (typeof entry === 'string' && RULE_NAME.test(entry.trim())) {
-        const name = entry.trim();
-        if (!rules.includes(name)) rules.push(name);
+      } else if (typeof entry === 'string') {
+        const value = entry.trim();
+        const tag = tagOf(value);
+        const usable = tag !== null ? RULE_NAME.test(tag) : RULE_NAME.test(value);
+        if (usable && !rules.includes(value)) rules.push(value);
       }
     }
     return rules;
@@ -193,10 +214,21 @@ export function generateAppsecConfig(exclusions: AppsecExclusion[]): string {
       if (typeof rule === 'number') {
         lines.push(`      - RemoveInBandRuleByID(${rule})`);
         lines.push(`      - RemoveOutBandRuleByID(${rule})`);
-      } else {
-        lines.push(`      - RemoveInBandRuleByName("${rule}")`);
-        lines.push(`      - RemoveOutBandRuleByName("${rule}")`);
+        continue;
       }
+      // A tag stands for a whole attack class. Verified on a live worker:
+      // `RemoveOutBandRuleByTag("attack-lfi")` took 930100, 930110 and 930120
+      // out of the match and left the RCE and SQLi rules firing. It also keeps
+      // working when CRS adds a fourth LFI rule, where a list of ids would
+      // quietly stop covering the class.
+      const tag = tagOf(rule);
+      if (tag !== null) {
+        lines.push(`      - RemoveInBandRuleByTag("${tag}")`);
+        lines.push(`      - RemoveOutBandRuleByTag("${tag}")`);
+        continue;
+      }
+      lines.push(`      - RemoveInBandRuleByName("${rule}")`);
+      lines.push(`      - RemoveOutBandRuleByName("${rule}")`);
     }
   }
 
