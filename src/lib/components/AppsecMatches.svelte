@@ -13,6 +13,7 @@
    * beside it is noise, and they look identical without the number.
    */
   import { metaRuleNote } from '$lib/appsec-rules';
+  import { timeAgo } from '$lib/format';
 
   interface Decision {
     id: number;
@@ -40,6 +41,8 @@
     hosts: string[];
     rules: RuleCount[];
     paths: string[];
+    /** ISO, or '' — these are historical and the age changes what they mean. */
+    lastSeen?: string;
   }
 
   let {
@@ -54,6 +57,8 @@
     disabledRules = [],
     /** Active CrowdSec bans on the worker, which apply to every application. */
     decisions = [],
+    /** Bans that have already lapsed, by address. */
+    banHistory = {},
     /** Lifting a ban is worker-wide, so only an admin is offered it. */
     canLiftDecisions = false,
     onLiftDecision,
@@ -67,6 +72,7 @@
     busyRule?: string | null;
     disabledRules?: string[];
     decisions?: Decision[];
+    banHistory?: Record<string, { at: string; scenario: string; expired: boolean }>;
     canLiftDecisions?: boolean;
     onLiftDecision?: (decision: Decision) => void;
     busyDecision?: number | null;
@@ -140,6 +146,9 @@
         {#if group.country || group.asName}
           <span class="origin">{[group.country, group.asName].filter(Boolean).join(' · ')}</span>
         {/if}
+        {#if group.lastSeen}
+          <span class="origin" title={group.lastSeen}>last seen {timeAgo(group.lastSeen)}</span>
+        {/if}
         {#if ban}
           <!-- The thing an owner actually came to find out. Matches say what the
                WAF noticed; this says the user is being turned away right now. -->
@@ -154,6 +163,13 @@
               title={`Lift the ban on ${group.sourceIp} across this whole worker`}
             >{busyDecision === ban.id ? 'Lifting…' : 'Unblock'}</button>
           {/if}
+        {:else if banHistory[group.sourceIp]?.expired}
+          <!-- Why an obvious attacker can show no ban: CrowdSec banned it and
+               the ban ran out. Without this the row reads as "the WAF did
+               nothing", which is the opposite of what happened. -->
+          <span class="ban-badge ban-badge--past" title={banHistory[group.sourceIp].scenario}>
+            was blocked · expired
+          </span>
         {/if}
         <span class="requests">{group.requests} request{group.requests === 1 ? '' : 's'}</span>
       </div>
@@ -165,6 +181,14 @@
           {#if !canLiftDecisions}
             Lifting it needs an administrator.
           {/if}
+        </p>
+      {:else if banHistory[group.sourceIp]?.expired}
+        <p class="ban-note ban-note--past">
+          CrowdSec banned this address {timeAgo(banHistory[group.sourceIp].at)}
+          (<span class="mono">{banHistory[group.sourceIp].scenario || 'unknown'}</span>) and
+          <strong>that ban has since expired</strong>. Bans are time-limited and are re-applied
+          when the behaviour repeats, so a source can show a large number of matches here and no
+          block right now.
         </p>
       {/if}
 
@@ -323,6 +347,14 @@
     background: color-mix(in srgb, var(--red, #f85149) 7%, transparent);
     border-bottom: 1px solid var(--border-subtle);
   }
+  /* A lapsed ban is history, not an alarm — it reads muted so a live block
+     stays the only thing on the page shouting. */
+  .ban-badge--past {
+    color: var(--text-muted);
+    background: var(--bg-overlay);
+    border-color: var(--border-default);
+  }
+  .ban-note--past { background: var(--bg-overlay); }
   .origin { font-size: 11px; color: var(--text-muted); }
   .requests { margin-left: auto; font-size: 11px; color: var(--text-muted); }
   .hosts { padding: 6px 12px 0; display: flex; gap: 6px; flex-wrap: wrap; }

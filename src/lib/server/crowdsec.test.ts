@@ -15,6 +15,7 @@ import {
   decisionsFromExec,
   groupAppsecBySource,
   parseAppsecAlerts,
+  parseBanHistory,
   parseDecisions,
 } from './crowdsec';
 
@@ -332,8 +333,114 @@ describe('parseAppsecAlerts', () => {
       ],
     };
     const [a] = parseAppsecAlerts(JSON.stringify([vpatch]), 0)!;
-    expect(a.ruleName).toBe('crowdsecurity/vpatch-git-config');
+    expect(a.ruleNames).toEqual(['crowdsecurity/vpatch-git-config']);
     expect(a.ruleIds).toEqual([]);
+  });
+
+  test('drops the engine-internal id a hub rule reports for itself', () => {
+    // `crowdsecurity/vpatch-git-config` arrives carrying `rule_ids: [340322502]`
+    // — an internal id, opaque and unstable across hub updates. It was being
+    // listed as though it were a CRS rule, offering an exclusion nobody could
+    // evaluate and that would not survive an update. The name is the handle.
+    const vpatch = {
+      events: [
+        {
+          meta: [
+            { key: 'datasource_type', value: 'appsec' },
+            { key: 'rule_name', value: 'crowdsecurity/vpatch-git-config' },
+            { key: 'rule_ids', value: '[340322502]' },
+            { key: 'target_host', value: 'app.example.com' },
+          ],
+        },
+      ],
+    };
+    const [a] = parseAppsecAlerts(JSON.stringify([vpatch]), 0)!;
+    expect(a.ruleIds).toEqual([]);
+    expect(a.ruleNames).toEqual(['crowdsecurity/vpatch-git-config']);
+  });
+
+  test('counts several hub rules from one source separately', () => {
+    // The row used to hold one name, so a source tripping three vpatch rules
+    // could only ever report the first.
+    const alert = (name: string) => ({
+      source: { value: '1.2.3.4' },
+      events: [
+        {
+          meta: [
+            { key: 'rule_name', value: name },
+            { key: 'target_fqdn', value: 'app.example.com' },
+          ],
+        },
+      ],
+    });
+    const rows = parseAppsecAlerts(
+      JSON.stringify([alert('crowdsecurity/vpatch-env-access'), alert('crowdsecurity/vpatch-git-config')]),
+      0,
+    )!;
+    const [g] = groupAppsecBySource(rows);
+    expect(g.rules.map((r) => r.id).sort()).toEqual([
+      'crowdsecurity/vpatch-env-access',
+      'crowdsecurity/vpatch-git-config',
+    ]);
+  });
+
+  describe('ban history', () => {
+    /**
+     * Why an obvious attacker can show no ban. Taken from a live worker: this
+     * address made 396 requests probing for credentials files, and the matches
+     * table showed it unblocked — because CrowdSec had banned it three times
+     * that morning and every ban had run out by the time anyone looked.
+     */
+    const BANNED_THEN_EXPIRED = {
+      created_at: '2026-08-29T03:23:53Z',
+      scenario: 'crowdsecurity/http-probing',
+      source: { value: '13.40.36.151' },
+      decisions: [
+        { id: 1, value: '13.40.36.151', type: 'ban', duration: '-13h51m41s', scenario: 'crowdsecurity/http-probing' },
+      ],
+    };
+
+    test('a lapsed ban is recognised by its negative duration', () => {
+      const history = parseBanHistory(JSON.stringify([BANNED_THEN_EXPIRED]), 0)!;
+      expect(history['13.40.36.151']).toEqual({
+        at: '2026-08-29T03:23:53Z',
+        scenario: 'crowdsecurity/http-probing',
+        expired: true,
+      });
+    });
+
+    test('a live ban is not reported as expired', () => {
+      const live = {
+        ...BANNED_THEN_EXPIRED,
+        decisions: [{ ...BANNED_THEN_EXPIRED.decisions[0], duration: '2h20m52s' }],
+      };
+      expect(parseBanHistory(JSON.stringify([live]), 0)!['13.40.36.151'].expired).toBe(false);
+    });
+
+    test('keeps the most recent ban when an address has several', () => {
+      const older = { ...BANNED_THEN_EXPIRED, created_at: '2026-08-28T01:00:00Z' };
+      const history = parseBanHistory(JSON.stringify([older, BANNED_THEN_EXPIRED]), 0)!;
+      expect(history['13.40.36.151'].at).toBe('2026-08-29T03:23:53Z');
+    });
+
+    test('ignores the community blocklist, which is not about this worker', () => {
+      // One alert carrying fifteen thousand decisions for addresses that never
+      // touched this host would drown the handful that did.
+      const capi = {
+        created_at: '2026-08-29T19:54:30Z',
+        scenario: 'update : +15000/-0 IPs',
+        decisions: Array.from({ length: 15000 }, (_, i) => ({
+          id: i, value: `10.0.${Math.floor(i / 256)}.${i % 256}`, type: 'ban', duration: '163h', scenario: 'http:scan',
+        })),
+      };
+      expect(parseBanHistory(JSON.stringify([capi]), 0)).toEqual({});
+    });
+
+    test('no answer stays distinct from no history', () => {
+      expect(parseBanHistory('', 1)).toBeNull();
+      expect(parseBanHistory('not json', 0)).toBeNull();
+      expect(parseBanHistory('null', 0)).toEqual({});
+    });
   });
 
   test('no answer stays distinct from no alerts', () => {

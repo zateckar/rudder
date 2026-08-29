@@ -213,11 +213,19 @@ export interface CrowdsecAppsecAlert {
    * can actually make. Only one of the two alert shapes carries it.
    */
   ruleMessages: Record<string, string>;
-  /** A non-numeric rule name, for vpatch matches that have no CRS id. */
-  ruleName: string;
+  /**
+   * CrowdSec hub rule names — `crowdsecurity/vpatch-git-config`.
+   *
+   * A list, because one request can trip several and because these are the
+   * stable handle for rules whose numeric id is engine-internal. Held apart
+   * from `ruleIds` since excluding one takes a different CrowdSec helper.
+   */
+  ruleNames: string[];
   /** Two-letter country of the source address, when CrowdSec resolved one. */
   country: string;
   asName: string;
+  /** When CrowdSec raised this, ISO. Alerts are history, and it matters which. */
+  at: string;
 }
 
 /** One rule, and how often it fired. */
@@ -260,6 +268,79 @@ export interface AppsecSourceGroup {
   rules: AppsecRuleCount[];
   /** A few real paths, which is what says whether a match is legitimate. */
   paths: string[];
+  /**
+   * When this source was last seen, ISO, or '' when CrowdSec did not say.
+   *
+   * Shown because these are historical: "396 requests" with no time on it reads
+   * as "right now", and on a live worker the traffic behind a number that size
+   * had finished sixteen hours earlier.
+   */
+  lastSeen: string;
+}
+
+/** What happened to an address before now. */
+export interface SourceBanHistory {
+  /** When the most recent ban on it was created. */
+  at: string;
+  scenario: string;
+  /** True when that ban has since run out — CrowdSec bans are time-limited. */
+  expired: boolean;
+}
+
+/**
+ * Bans that have already been and gone, by source address.
+ *
+ * Without this the matches table is quietly misleading. An address with four
+ * hundred requests and no ban badge reads as "the WAF did nothing", when on a
+ * live worker the truth was that CrowdSec banned it three times at 03:23 and
+ * every one of those bans expired hours before anybody looked. Decisions are
+ * live state; alerts are history; showing the two together with no time on
+ * either invites exactly the wrong conclusion.
+ *
+ * Read from the same `cscli alerts list` output the matches come from, and
+ * deliberately not restricted to AppSec alerts: what banned this address was
+ * `http-probing` and friends, which are log-derived and would otherwise be
+ * filtered out before anyone saw them.
+ */
+export function parseBanHistory(
+  stdout: string,
+  exitCode: number,
+): Record<string, SourceBanHistory> | null {
+  if (exitCode !== 0) return null;
+  const text = stdout.trim();
+  if (text === '' || text === 'null') return {};
+
+  try {
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed)) return null;
+
+    const history: Record<string, SourceBanHistory> = {};
+    for (const alert of parsed) {
+      const decisions = Array.isArray(alert?.decisions) ? alert.decisions : [];
+      // The community blocklist arrives as one alert carrying fifteen thousand
+      // decisions for addresses that never touched this worker. Including it
+      // would drown the handful that actually did something here.
+      if (decisions.length > 50) continue;
+
+      for (const decision of decisions) {
+        const value = String(decision?.value ?? '');
+        if (!value) continue;
+        const at = String(alert?.created_at ?? '');
+        const previous = history[value];
+        if (previous && previous.at >= at) continue;
+        history[value] = {
+          at,
+          scenario: String(decision?.scenario ?? alert?.scenario ?? ''),
+          // `-13h51m41s` — CrowdSec counts down and keeps going once a ban has
+          // run out, so a leading minus is what "expired" looks like.
+          expired: String(decision?.duration ?? '').trim().startsWith('-'),
+        };
+      }
+    }
+    return history;
+  } catch {
+    return null;
+  }
 }
 
 /** Every number in `[901340 911100 949110]`. CrowdSec formats it as a string. */
@@ -335,9 +416,10 @@ export function parseAppsecAlerts(stdout: string, exitCode: number): CrowdsecApp
           sourceIp: meta.source_ip || alert?.source?.value || '',
           ruleIds: [],
           ruleMessages: {},
-          ruleName: '',
+          ruleNames: [],
           country: String(alert?.source?.cn ?? ''),
           asName: String(alert?.source?.as_name ?? ''),
+          at: String(alert?.created_at ?? ''),
         };
 
         // The longest URI wins: the per-rule shape repeats it on every event,
@@ -345,8 +427,15 @@ export function parseAppsecAlerts(stdout: string, exitCode: number): CrowdsecApp
         const uri = meta.target_uri || meta.uri || '';
         if (uri.length > row.uri.length) row.uri = uri;
 
-        const ids = parseRuleIds(meta.rule_ids);
+        // A hub rule reports its own numeric id in `rule_ids` —
+        // `crowdsecurity/vpatch-git-config` arrives as `[340322502]`. That is an
+        // engine-internal id, opaque and unstable across hub updates, and
+        // listing it as though it were a CRS rule offered an exclusion nobody
+        // could evaluate and that would not survive an update. The name is the
+        // stable handle, so for those events the name is all that is kept.
         const named = nativeRuleId(ruleName);
+        const isHubRule = ruleName !== '' && named === null;
+        const ids = isHubRule ? [] : parseRuleIds(meta.rule_ids);
         if (named !== null) ids.push(named);
         for (const id of ids) {
           if (!row.ruleIds.includes(id)) row.ruleIds.push(id);
@@ -355,13 +444,13 @@ export function parseAppsecAlerts(stdout: string, exitCode: number): CrowdsecApp
         // `message` belongs to the rule this event is about, which is only
         // unambiguous in the one-event-per-rule shape.
         if (named !== null && meta.message) row.ruleMessages[String(named)] = meta.message;
-        if (!row.ruleName && ruleName && named === null) row.ruleName = ruleName;
+        if (isHubRule && !row.ruleNames.includes(ruleName)) row.ruleNames.push(ruleName);
 
         byHost.set(host, row);
       }
 
       for (const row of byHost.values()) {
-        if (!row.ruleIds.length && !row.ruleName) continue;
+        if (!row.ruleIds.length && !row.ruleNames.length) continue;
         row.ruleIds.sort((a, b) => a - b);
         rows.push(row);
       }
@@ -413,11 +502,13 @@ export function groupAppsecBySource(
       hosts: [],
       rules: [],
       paths: [],
+      lastSeen: '',
     };
     const tally =
       counts.get(ip) ?? new Map<string, { count: number; message: string; hosts: string[] }>();
 
     group.requests += 1;
+    if (row.at > group.lastSeen) group.lastSeen = row.at;
     if (!group.hosts.includes(row.host)) group.hosts.push(row.host);
     // A handful of examples, not every URL: this is evidence for a judgement,
     // and the same signed upload URL forty times over is not more evidence.
@@ -425,8 +516,9 @@ export function groupAppsecBySource(
       group.paths.push(row.uri);
     }
 
-    const ids: Array<number | string> = [...row.ruleIds];
-    if (!ids.length && row.ruleName) ids.push(row.ruleName);
+    // Both axes, not one-or-the-other: a request can trip CRS signatures and a
+    // hub rule, and counting only the first would hide the second.
+    const ids: Array<number | string> = [...row.ruleIds, ...row.ruleNames];
     for (const id of ids) {
       const key = String(id);
       const existing = tally.get(key) ?? { count: 0, message: '', hosts: [] };

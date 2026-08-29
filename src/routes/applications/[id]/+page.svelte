@@ -2128,6 +2128,7 @@
           busyRule={excludingRule}
           disabledRules={appsec.disabledRules ?? []}
           decisions={appsec.decisions ?? []}
+          banHistory={appsec.banHistory ?? {}}
           canLiftDecisions={appsec.canLiftDecisions ?? false}
           onLiftDecision={liftDecision}
           busyDecision={liftingDecision}

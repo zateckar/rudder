@@ -11,8 +11,10 @@ import {
   findCrowdsecContainer,
   groupAppsecBySource,
   parseAppsecAlerts,
+  parseBanHistory,
   type AppsecSourceGroup,
   type CrowdsecDecision,
+  type SourceBanHistory,
 } from '$lib/server/crowdsec';
 
 /**
@@ -61,6 +63,7 @@ export const GET: RequestHandler = route(async (event) => {
 
   let sources: AppsecSourceGroup[] = [];
   let decisions: CrowdsecDecision[] = [];
+  let banHistory: Record<string, SourceBanHistory> = {};
   let decisionsError = '';
   let error = '';
 
@@ -87,6 +90,12 @@ export const GET: RequestHandler = route(async (event) => {
       } else {
         sources = groupAppsecBySource(rows, hosts);
       }
+
+      // Bans that have already lapsed, from the same output. Without them a
+      // source with four hundred requests and no live ban reads as "the WAF did
+      // nothing", when what actually happened is that it was banned hours ago
+      // and the ban ran out.
+      banHistory = parseBanHistory(stdout, exitCode) ?? {};
 
       // Active bans, on the same connection.
       //
@@ -119,6 +128,7 @@ export const GET: RequestHandler = route(async (event) => {
     sources,
     disabledRules: parseAppsecRules(application.appsecDisabledRules).map(String),
     decisions,
+    banHistory,
     // Kept apart from `error`: the matches and the bans are two reads, and one
     // failing should not blank the other. A page that showed no bans because
     // the *alerts* query failed would be reassuring and wrong.
