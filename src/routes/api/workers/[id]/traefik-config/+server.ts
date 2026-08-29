@@ -3,9 +3,9 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { decryptField } from '$lib/server/encryption';
 import { buildWorkerDynamicConfig } from '$lib/server/traefik-config';
-import { createHash, timingSafeEqual } from 'crypto';
+import { authenticateWorker } from '$lib/server/worker-token';
+import { createHash } from 'crypto';
 
 /**
  * GET /api/workers/[id]/traefik-config
@@ -18,51 +18,13 @@ import { createHash, timingSafeEqual } from 'crypto';
  * and would drown the trail.
  */
 
-/** Constant-time compare that does not leak length through an early return. */
-function tokensMatch(presented: string, expected: string): boolean {
-  const a = Buffer.from(presented);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) {
-    // Still burn a comparison so the failure takes the same shape.
-    timingSafeEqual(a, a);
-    return false;
-  }
-  return timingSafeEqual(a, b);
-}
-
-/**
- * The worker's credential, from whichever header it could use.
- *
- * `Authorization: Bearer` is the normal case. But a control plane published
- * behind a proxy that demands HTTP Basic leaves that header spoken for — the
- * outer layer has to be satisfied first or the request never arrives — so the
- * worker moves its own token to `X-Rudder-Config-Token` and sends Basic in
- * `Authorization`. Both are accepted: workers provisioned before this only know
- * the Bearer form, and a control plane is upgraded before its workers are.
- */
-function presentedToken(request: Request): string {
-  const header = request.headers.get('x-rudder-config-token');
-  if (header?.trim()) return header.trim();
-
-  const auth = request.headers.get('authorization') ?? '';
-  return auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-}
-
 export const GET: RequestHandler = async ({ params, request, setHeaders }) => {
   setHeaders({ 'Cache-Control': 'no-store' });
 
-  const presented = presentedToken(request);
-  if (!presented) return json({ error: 'Unauthorized' }, { status: 401 });
-
-  const worker = await db.select().from(workers).where(eq(workers.id, params.id)).get();
   // Same response whether the worker is absent, has no token, or the token is
   // wrong — the endpoint must not be usable to enumerate worker ids.
-  if (!worker?.configToken) return json({ error: 'Unauthorized' }, { status: 401 });
-
-  const expected = decryptField(worker.configToken);
-  if (!expected || !tokensMatch(presented, expected)) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const worker = await authenticateWorker(params.id, request);
+  if (!worker) return json({ error: 'Unauthorized' }, { status: 401 });
 
   if (worker.routingMode !== 'http') {
     // Serving routes to a labels-mode worker would give Traefik two providers

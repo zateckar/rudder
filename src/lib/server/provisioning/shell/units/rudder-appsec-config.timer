@@ -1,0 +1,17 @@
+[Unit]
+Description=Poll the Rudder control plane for CrowdSec AppSec rule exclusions
+
+[Timer]
+# Far slower than the routing poll, because applying a change restarts CrowdSec.
+# Exclusions are edited by hand and are never urgent in the way a route is: a
+# minute of delay costs nothing, where a minute of route staleness is an outage.
+#
+# OnBootSec is generous for the same reason — the WAF should come up and stay up
+# through boot rather than be restarted seconds into it.
+OnBootSec=3min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=rudder-appsec-config.service
+
+[Install]
+WantedBy=timers.target

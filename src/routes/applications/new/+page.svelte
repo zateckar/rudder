@@ -614,6 +614,45 @@ stringData:
       </p>
     </div>
 
+    <!-- ── Web firewall (all app types) ────────────────────────── -->
+    <div class="form-section">
+      <h2>Web Firewall</h2>
+      <p class="help-text">
+        CrowdSec inspects every request with the OWASP Core Rule Set. CRS is <em>scored</em>: a
+        request collects points from many rules and is reported once the total crosses a threshold,
+        so no single rule is usually "the" problem. Nothing is blocked inline — but repeated hits
+        become a ban, and <strong>a ban is by source address and applies to every application on the
+        worker</strong>. One user's upload can take the whole host off the air for them.
+      </p>
+
+      <div class="form-group">
+        <label for="appsecDisabledRules">Disabled rules</label>
+        <input
+          type="text"
+          id="appsecDisabledRules"
+          name="appsecDisabledRules"
+          placeholder="942100, 932130"
+        />
+        <p class="help-text">
+          CRS rule numbers, CrowdSec rule names, or both. They apply to this application only,
+          matched on its hostname — on every port it serves.
+          {#if appType === 'k8s'}
+            A <code>kubectl apply</code> carrying
+            <code>rudder.dev/appsec-disable-rules</code> overwrites whatever is set here.
+          {/if}
+        </p>
+      </div>
+
+      <p class="help-text">
+        Leave this blank to start. The rules to disable are the ones you find actually firing on
+        the worker's CrowdSec tab, against traffic you recognise — not ones guessed in advance.
+      </p>
+      <p class="help-text">
+        Applying a change restarts CrowdSec on the worker, which takes a few seconds and is picked
+        up within a minute. Every rule you list stops protecting this application against everyone.
+      </p>
+    </div>
+
     <!-- ── Security & Access Control (all app types) ──────────── -->
     <div class="form-section">
       <h2>Security & Access Control</h2>

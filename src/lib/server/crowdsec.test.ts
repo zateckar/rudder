@@ -11,7 +11,7 @@
  * which would have deleted the wrong row.
  */
 import { describe, expect, test } from 'bun:test';
-import { decisionsFromExec, parseDecisions } from './crowdsec';
+import { decisionsFromExec, parseAppsecAlerts, parseDecisions } from './crowdsec';
 
 /** An alert shaped the way a live worker really emits it. */
 const ALERT = {
@@ -211,5 +211,89 @@ describe('decisionsFromExec', () => {
   test('treats a missing exitCodeKnown as known, for callers not passing it', () => {
     expect(decisionsFromExec({ stdout: 'null', stderr: '', exitCode: 0 }).error).toBeNull();
     expect(decisionsFromExec({ stdout: '', stderr: '', exitCode: 1 }).error).not.toBeNull();
+  });
+});
+
+/**
+ * Which rules actually fired.
+ *
+ * A decision cannot answer this. Its `rule_name` is the first id in the chain —
+ * on a live worker, `native_rule:901340`, a CRS *initialisation* rule that does
+ * nothing when disabled. Every fixture here is shaped from real production
+ * output for that reason: the whole feature is worthless if it surfaces the
+ * same misleading field the decisions table already did.
+ */
+const APPSEC_ALERT = {
+  id: 10683,
+  scenario: 'crowdsecurity/crowdsec-appsec-outofband',
+  source: { scope: 'Ip', value: '178.209.129.231', cn: 'CZ' },
+  events: [
+    {
+      meta: [
+        { key: 'datasource_type', value: 'appsec' },
+        { key: 'service', value: 'appsec' },
+        { key: 'rule_ids', value: '[901340 911100 932130 942100 949110 980170]' },
+        { key: 'rule_name', value: 'native_rule:901340' },
+        { key: 'source_ip', value: '178.209.129.231' },
+        { key: 'target_host', value: 'projectsend.gamma.apps.skoda-api.com' },
+        { key: 'target_uri', value: '/uploads/01a04d01/parts/1?expires=1788000107&signature=5b3b' },
+      ],
+    },
+  ],
+};
+
+describe('parseAppsecAlerts', () => {
+  test('surfaces every rule that scored, not just the one CrowdSec names', () => {
+    const [a] = parseAppsecAlerts(JSON.stringify([APPSEC_ALERT]), 0)!;
+    expect(a.ruleIds).toEqual([901340, 911100, 932130, 942100, 949110, 980170]);
+    // 949110 is "Inbound Anomaly Score Exceeded" — the one that actually fires.
+    // It is reachable here and is not reachable from a decision at all.
+    expect(a.ruleIds).toContain(949110);
+  });
+
+  test('carries the host and path that make a match judgeable', () => {
+    const [a] = parseAppsecAlerts(JSON.stringify([APPSEC_ALERT]), 0)!;
+    expect(a.host).toBe('projectsend.gamma.apps.skoda-api.com');
+    expect(a.uri).toStartWith('/uploads/');
+    expect(a.sourceIp).toBe('178.209.129.231');
+  });
+
+  test('collapses repeats of the same match', () => {
+    // The same false positive fires on every request of its shape. Forty
+    // identical rows would bury the one other thing that is happening.
+    const many = [APPSEC_ALERT, APPSEC_ALERT, APPSEC_ALERT];
+    expect(parseAppsecAlerts(JSON.stringify(many), 0)).toHaveLength(1);
+  });
+
+  test('ignores log-derived alerts, which have no rule to disable', () => {
+    const probing = {
+      scenario: 'crowdsecurity/http-probing',
+      source: { value: '1.2.3.4' },
+      events: [{ meta: [{ key: 'http_path', value: '/.env' }] }],
+    };
+    expect(parseAppsecAlerts(JSON.stringify([probing]), 0)).toEqual([]);
+  });
+
+  test('keeps a named rule when there are no numeric ids', () => {
+    const vpatch = {
+      events: [
+        {
+          meta: [
+            { key: 'datasource_type', value: 'appsec' },
+            { key: 'rule_name', value: 'crowdsecurity/vpatch-git-config' },
+            { key: 'target_host', value: 'app.example.com' },
+          ],
+        },
+      ],
+    };
+    const [a] = parseAppsecAlerts(JSON.stringify([vpatch]), 0)!;
+    expect(a.ruleName).toBe('crowdsecurity/vpatch-git-config');
+    expect(a.ruleIds).toEqual([]);
+  });
+
+  test('no answer stays distinct from no alerts', () => {
+    expect(parseAppsecAlerts('', 1)).toBeNull();
+    expect(parseAppsecAlerts('not json', 0)).toBeNull();
+    expect(parseAppsecAlerts('null', 0)).toEqual([]);
   });
 });

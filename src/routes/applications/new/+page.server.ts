@@ -20,6 +20,7 @@ import {
   parsePortList,
   serializeExposedPorts,
 } from '$lib/server/deploy/plan';
+import { APPSEC_RULES_ERROR, parseRuleList, serializeAppsecRules } from '$lib/server/appsec';
 
 export const load = async (event: { locals: App.Locals }) => {
   const currentUser = requirePageUser(event).user;
@@ -93,6 +94,11 @@ export const actions = {
         error: `Public ports: at most ${MAX_ROUTES_PER_CONTAINER} can be published — a worker has ${MAX_ROUTES_PER_CONTAINER} HTTPS entryPoints.`,
       });
     }
+
+    // Rejected rather than dropped: someone who mistypes a rule id and is told
+    // nothing believes the rule is off, and goes on being banned by it.
+    const appsecRules = parseRuleList(formData.get('appsecDisabledRules')?.toString() ?? '');
+    if (appsecRules === null) return fail(400, { error: APPSEC_RULES_ERROR });
 
     // The team is submitted, not derived, and the loader above only scopes the
     // *dropdown*. Without this, any authenticated user could name any team in the
@@ -307,6 +313,7 @@ export const actions = {
       volumes,
       restartPolicy,
       exposedPorts: serializeExposedPorts(exposedPorts),
+      appsecDisabledRules: serializeAppsecRules(appsecRules),
       rateLimitAvg,
       rateLimitBurst,
       authType,

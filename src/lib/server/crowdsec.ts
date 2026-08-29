@@ -191,6 +191,92 @@ export function decisionsFromExec(result: {
   return { decisions: parsed, error: null };
 }
 
+/**
+ * One AppSec alert, reduced to what makes it actionable.
+ *
+ * The point of showing these is to answer "which rule broke my application" —
+ * which a decision cannot answer, because the `rule_name` it carries is the
+ * first id in the chain and is usually a CRS initialisation rule. `ruleIds` is
+ * the real list.
+ */
+export interface CrowdsecAppsecAlert {
+  /** The `Host` the request carried — this is what identifies the application. */
+  host: string;
+  uri: string;
+  sourceIp: string;
+  /** Every CRS rule that scored on this request, in the order CrowdSec listed. */
+  ruleIds: number[];
+  /** What CrowdSec called it — kept because named vpatch rules use this form. */
+  ruleName: string;
+}
+
+/** `[901340 911100 949110]` as numbers. CrowdSec formats it as a bare string. */
+function parseRuleIds(raw: unknown): number[] {
+  if (typeof raw !== 'string') return [];
+  const ids: number[] = [];
+  for (const part of raw.replace(/[[\]]/g, ' ').split(/[\s,]+/)) {
+    if (!/^\d+$/.test(part)) continue;
+    const id = Number(part);
+    if (!ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * AppSec alerts from `cscli alerts list -a -o json`, or null for no answer.
+ *
+ * Only AppSec alerts: everything else — log-derived scenarios like http-probing
+ * — has no rule to disable and no Host to attribute, so listing it here would
+ * offer an action that cannot be taken.
+ */
+export function parseAppsecAlerts(stdout: string, exitCode: number): CrowdsecAppsecAlert[] | null {
+  if (exitCode !== 0) return null;
+  const text = stdout.trim();
+  if (text === '' || text === 'null') return [];
+
+  try {
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed)) return null;
+
+    const rows: CrowdsecAppsecAlert[] = [];
+    const seen = new Set<string>();
+
+    for (const alert of parsed) {
+      for (const event of Array.isArray(alert?.events) ? alert.events : []) {
+        const meta: Record<string, string> = {};
+        for (const m of Array.isArray(event?.meta) ? event.meta : []) {
+          if (m?.key !== undefined) meta[String(m.key)] = String(m.value ?? '');
+        }
+        if (meta.datasource_type !== 'appsec' && meta.service !== 'appsec') continue;
+
+        const host = meta.target_host ?? '';
+        const uri = meta.target_uri ?? '';
+        const ruleIds = parseRuleIds(meta.rule_ids);
+        const ruleName = meta.rule_name ?? '';
+        if (!host && !ruleIds.length && !ruleName) continue;
+
+        // One row per host+rule set. The same false positive fires on every
+        // request of the same shape, and forty identical rows would bury the
+        // one other thing that is happening.
+        const key = `${host}|${ruleName}|${ruleIds.join(',')}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        rows.push({
+          host,
+          uri,
+          sourceIp: meta.source_ip ?? (alert?.source?.value ?? ''),
+          ruleIds,
+          ruleName,
+        });
+      }
+    }
+    return rows;
+  } catch {
+    return null;
+  }
+}
+
 /** The CrowdSec container on this worker, or null. */
 export async function findCrowdsecContainer(client: {
   listContainers: (all: boolean) => Promise<any[]>;

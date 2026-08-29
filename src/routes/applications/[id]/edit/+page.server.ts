@@ -19,6 +19,12 @@ import {
   parsePortList,
   serializeExposedPorts,
 } from '$lib/server/deploy/plan';
+import {
+  APPSEC_RULES_ERROR,
+  parseAppsecRules,
+  parseRuleList,
+  serializeAppsecRules,
+} from '$lib/server/appsec';
 
 /**
  * Volume-registry ids this application's `volumes` column already names.
@@ -114,6 +120,7 @@ export const load = async (event: { params: { id: string }; locals: App.Locals; 
     // null means undeclared, which the form has to render as an empty box and
     // read back as null.
     exposedPorts: parseExposedPorts(app.exposedPorts),
+    appsecDisabledRules: parseAppsecRules(app.appsecDisabledRules),
     workers: allWorkers,
     teams: userTeams,
     volumes: availableVolumes,
@@ -169,6 +176,11 @@ export const actions = {
         error: `Public ports: at most ${MAX_ROUTES_PER_CONTAINER} can be published — a worker has ${MAX_ROUTES_PER_CONTAINER} HTTPS entryPoints.`,
       });
     }
+
+    // Rejected rather than dropped: someone who mistypes a rule id and is told
+    // nothing believes the rule is off, and goes on being banned by it.
+    const appsecRules = parseRuleList(formData.get('appsecDisabledRules')?.toString() ?? '');
+    if (appsecRules === null) return fail(400, { error: APPSEC_RULES_ERROR });
 
     // Hostnames are global — two applications sharing one would produce two
     // Traefik routers with the same Host rule and arbitrary routing between them.
@@ -356,6 +368,7 @@ export const actions = {
         volumes,
         restartPolicy,
         exposedPorts: serializeExposedPorts(exposedPorts),
+        appsecDisabledRules: serializeAppsecRules(appsecRules),
         rateLimitAvg,
         rateLimitBurst,
         authType,

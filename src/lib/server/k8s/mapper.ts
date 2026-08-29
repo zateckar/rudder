@@ -10,6 +10,7 @@ import {
   parseExposedPorts,
   parsePortList,
 } from '../deploy/plan';
+import { parseAppsecRules, parseRuleList, type AppsecRuleId } from '../appsec';
 import { k8sPodTemplate } from '../kubernetes';
 
 // ── Path matching utility ──────────────────────────────────────
@@ -122,6 +123,7 @@ export function applicationToDeployment(
     domain: string | null;
     description: string | null;
     exposedPorts: string | null;
+    appsecDisabledRules: string | null;
     createdAt: Date;
     updatedAt: Date;
   },
@@ -197,6 +199,7 @@ export function applicationToDeployment(
   }
 
   const declaredPorts = parseExposedPorts(app.exposedPorts);
+  const disabledRules = parseAppsecRules(app.appsecDisabledRules);
 
   const running = appContainers.filter((c) => c.status === 'running').length;
 
@@ -221,6 +224,12 @@ export function applicationToDeployment(
         // declaration and the extra ports go dark on the next apply, with
         // nothing in the output to explain why.
         ...(declaredPorts ? { 'rudder.dev/expose-ports': declaredPorts.join(',') } : {}),
+        // Emitted for the same round-trip reason. Losing this on an apply
+        // silently re-enables rules an application was exempt from, and the
+        // first sign of it is a user being banned.
+        ...(disabledRules.length > 0
+          ? { 'rudder.dev/appsec-disable-rules': disabledRules.join(',') }
+          : {}),
         // Names only. Says which variables exist without showing their values,
         // so a withheld secret does not look like a missing one.
         ...(withheldEnv.length > 0
@@ -500,6 +509,7 @@ export function parseDeploymentBody(body: any): {
   domain?: string;
   description?: string;
   exposedPorts?: number[] | null;
+  appsecDisabledRules?: AppsecRuleId[] | null;
 } {
   const name = body.metadata?.name;
   if (!name) throw new Error('metadata.name is required');
@@ -542,6 +552,22 @@ export function parseDeploymentBody(body: any): {
     }
   }
 
+  // Same contract as expose-ports: refused rather than ignored. Someone who
+  // mistypes a rule id and is told nothing believes the rule is off, and goes on
+  // being banned by it with no sign that anything is wrong.
+  const appsecAnnotation = body.metadata?.annotations?.['rudder.dev/appsec-disable-rules'];
+  let appsecDisabledRules: AppsecRuleId[] | null = null;
+  if (appsecAnnotation !== undefined) {
+    appsecDisabledRules = parseRuleList(String(appsecAnnotation));
+    if (appsecDisabledRules === null) {
+      throw new Error(
+        `rudder.dev/appsec-disable-rules must be a comma-separated list of CRS rule numbers ` +
+          `or CrowdSec rule names, for example "942100,crowdsecurity/vpatch-git-config" — ` +
+          `got "${appsecAnnotation}"`,
+      );
+    }
+  }
+
   const restartPolicy =
     template?.restartPolicy === 'Never'
       ? 'no'
@@ -563,6 +589,7 @@ export function parseDeploymentBody(body: any): {
       body.metadata?.annotations?.['rudder.dev/description'] ||
       body.metadata?.annotations?.['description'],
     exposedPorts,
+    appsecDisabledRules,
   };
 }
 

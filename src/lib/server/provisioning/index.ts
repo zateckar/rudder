@@ -31,6 +31,7 @@ import netavarkCleanupSh from './shell/scripts/rudder-netavark-cleanup.sh?raw';
 import metricsSh from './shell/scripts/rudder-metrics.sh?raw';
 import metricsHttpSh from './shell/scripts/rudder-metrics-http.sh?raw';
 import traefikConfigSh from './shell/scripts/rudder-traefik-config.sh?raw';
+import appsecConfigSh from './shell/scripts/rudder-appsec-config.sh?raw';
 import updatesSh from './shell/scripts/rudder-updates.sh?raw';
 import containerBootSh from './shell/scripts/rudder-container-boot.sh?raw';
 
@@ -47,6 +48,8 @@ import metricsTimerUnit from './shell/units/rudder-metrics.timer?raw';
 import metricsHttpUnit from './shell/units/rudder-metrics-http.service?raw';
 import traefikConfigUnit from './shell/units/rudder-traefik-config.service?raw';
 import traefikConfigTimerUnit from './shell/units/rudder-traefik-config.timer?raw';
+import appsecConfigUnit from './shell/units/rudder-appsec-config.service?raw';
+import appsecConfigTimerUnit from './shell/units/rudder-appsec-config.timer?raw';
 import updatesUnit from './shell/units/rudder-updates.service?raw';
 import updatesTimerUnit from './shell/units/rudder-updates.timer?raw';
 import containerBootUnit from './shell/units/rudder-container-boot.service?raw';
@@ -400,6 +403,26 @@ export interface ProvisioningOptions {
    * both modes register.
    */
   workerToken?: string;
+  /**
+   * CrowdSec AppSec exclusion delivery, planted regardless of routing mode.
+   *
+   * Which CRS rules an application is exempt from has nothing to do with how
+   * Traefik learns its routes, and a labels-mode worker whose users are being
+   * banned by a false positive needs this exactly as much as an http-mode one.
+   *
+   * Absent when the control plane has no `PUBLIC_URL` to hand out. The worker
+   * then keeps whatever exclusions it already has rather than losing them —
+   * `rudder-appsec-config.sh` exits quietly with no endpoint configured.
+   */
+  appsecConfig?: {
+    /** Absolute URL of this worker's AppSec config endpoint. */
+    endpoint: string;
+    /** Bearer token, already decrypted. The same worker token. */
+    token: string;
+    /** @see routingConfig.basicUser — the same proxy, the same credentials. */
+    basicUser?: string | null;
+    basicPassword?: string | null;
+  };
 }
 
 export function generateProvisioningScript(
@@ -414,6 +437,7 @@ export function generateProvisioningScript(
     sshPort,
     routingConfig,
     workerToken,
+    appsecConfig,
     applyUpdates = true,
   } = options;
   const bouncerKey = bouncerKeyParam || '';
@@ -473,6 +497,10 @@ export function generateProvisioningScript(
     // Quoted, unlike the generated values above: these are operator input.
     CONFIG_BASIC_USER: routingConfig?.basicUser ? shellQuote(routingConfig.basicUser) : '',
     CONFIG_BASIC_PASS: routingConfig?.basicPassword ? shellQuote(routingConfig.basicPassword) : '',
+    APPSEC_ENDPOINT: appsecConfig?.endpoint ?? '',
+    APPSEC_TOKEN: appsecConfig?.token ?? '',
+    APPSEC_BASIC_USER: appsecConfig?.basicUser ? shellQuote(appsecConfig.basicUser) : '',
+    APPSEC_BASIC_PASS: appsecConfig?.basicPassword ? shellQuote(appsecConfig.basicPassword) : '',
     WORKER_TOKEN: workerToken ?? '',
     APPLY_UPDATES: applyUpdates ? '1' : '0',
     TRAEFIK_IMAGE_VERSION: PLATFORM_IMAGES.traefik.version,
@@ -503,6 +531,8 @@ export function generateProvisioningScript(
     METRICS_HTTP_SERVICE_B64: toBase64(metricsHttpUnit),
     TRAEFIK_CONFIG_SERVICE_B64: toBase64(traefikConfigUnit),
     TRAEFIK_CONFIG_TIMER_B64: toBase64(traefikConfigTimerUnit),
+    APPSEC_CONFIG_SERVICE_B64: toBase64(appsecConfigUnit),
+    APPSEC_CONFIG_TIMER_B64: toBase64(appsecConfigTimerUnit),
     UPDATES_SERVICE_B64: toBase64(updatesUnit),
     UPDATES_TIMER_B64: toBase64(updatesTimerUnit),
     CONTAINER_BOOT_SERVICE_B64: toBase64(containerBootUnit),
@@ -513,6 +543,7 @@ export function generateProvisioningScript(
     METRICS_SCRIPT_B64: toBase64(metricsSh),
     METRICS_HTTP_SCRIPT_B64: toBase64(metricsHttpSh),
     TRAEFIK_CONFIG_SCRIPT_B64: toBase64(traefikConfigSh),
+    APPSEC_CONFIG_SCRIPT_B64: toBase64(appsecConfigSh),
     UPDATES_SCRIPT_B64: toBase64(updatesSh),
     CONTAINER_BOOT_SCRIPT_B64: toBase64(containerBootSh),
   };

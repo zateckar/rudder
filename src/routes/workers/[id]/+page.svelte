@@ -72,6 +72,10 @@
   let crowdsecLoading = $state(false);
   let removingDecision = $state<number | null>(null);
   let decisionError = $state('');
+  /** `host|rule` while that chip's request is in flight. */
+  let excludingRule = $state<string | null>(null);
+  let ruleMessage = $state('');
+  let ruleError = $state(false);
 
   let terminalReady = $state(false);
 
@@ -406,6 +410,51 @@
       // Re-read rather than splice the row out: the list is the worker's answer,
       // not ours, and a delete that half-worked should show as still there.
       await loadCrowdsec();
+    }
+  }
+
+  /**
+   * Stop one rule firing for the application on `host`.
+   *
+   * Offered here because this is where the evidence is. Making someone find the
+   * application, open its edit form and retype a six-digit number is where the
+   * mistakes come from — and the number they would most likely retype is the
+   * wrong one, since the rule a decision names is the first in the chain rather
+   * than the one that scored.
+   */
+  async function excludeRule(host: string, rule: string) {
+    if (!host) return;
+    if (!confirm(
+      `Stop rule ${rule} firing for ${host}?\n\n` +
+      `It stops protecting that application against everyone, on every port it serves. ` +
+      `CrowdSec restarts on this worker within a minute.`,
+    )) return;
+
+    ruleMessage = '';
+    ruleError = false;
+    excludingRule = `${host}|${rule}`;
+    try {
+      const res = await fetch('/api/applications/appsec-rules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host, rule }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || !body.ok) {
+        ruleError = true;
+        ruleMessage = body.error || `Could not exclude rule ${rule}.`;
+      } else if (body.added === false) {
+        ruleMessage = `${body.application} already excluded rule ${rule}.`;
+      } else {
+        ruleMessage =
+          `Rule ${rule} excluded for ${body.application}. ` +
+          `The worker applies it within a minute.`;
+      }
+    } catch (e: any) {
+      ruleError = true;
+      ruleMessage = e.message;
+    } finally {
+      excludingRule = null;
     }
   }
 
@@ -2022,6 +2071,62 @@
         {/if}
       </div>
 
+      <!-- Which rules actually fired, and against what -->
+      {#if crowdsec.appsecAlerts?.length}
+        <div class="section">
+          <div class="section-head">
+            <h3>Recent WAF matches ({crowdsec.appsecAlerts.length})</h3>
+          </div>
+          <p class="help-text">
+            The rules that scored on each request. <strong>This, not the Reason column above, is
+            what to disable</strong> — a decision names the first rule in the chain, which is
+            usually a CRS initialisation rule that does nothing when switched off.
+          </p>
+          <p class="help-text">
+            Excluding a rule applies to that application on every port it serves, takes effect
+            within a minute, and restarts CrowdSec on this worker. Only exclude rules firing on
+            traffic you recognise: an attack looks much like a false positive from here, and the
+            path is the thing that tells them apart.
+          </p>
+          <table class="mini-table">
+            <thead><tr><th>Application</th><th>Path</th><th>Source</th><th>Rules</th></tr></thead>
+            <tbody>
+              {#each crowdsec.appsecAlerts as a}
+                <tr>
+                  <td><span class="mono small">{a.host || '—'}</span></td>
+                  <td><span class="mono small path-cell" title={a.uri}>{a.uri || '—'}</span></td>
+                  <td><span class="mono small">{a.sourceIp || '—'}</span></td>
+                  <td>
+                    {#if a.ruleIds.length}
+                      {#each a.ruleIds as id}
+                        <button
+                          class="rule-chip"
+                          disabled={!a.host || excludingRule === `${a.host}|${id}`}
+                          onclick={() => excludeRule(a.host, String(id))}
+                          title={`Stop rule ${id} firing for ${a.host}`}
+                        >{id}</button>
+                      {/each}
+                    {:else if a.ruleName}
+                      <button
+                        class="rule-chip"
+                        disabled={!a.host || excludingRule === `${a.host}|${a.ruleName}`}
+                        onclick={() => excludeRule(a.host, a.ruleName)}
+                        title={`Stop ${a.ruleName} firing for ${a.host}`}
+                      >{a.ruleName}</button>
+                    {:else}
+                      —
+                    {/if}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+          {#if ruleMessage}
+            <p class={ruleError ? 'error' : 'help-text'}>{ruleMessage}</p>
+          {/if}
+        </div>
+      {/if}
+
       <!-- AppSec Rules -->
       {#if crowdsec.appsecStatus}
         <div class="section">
@@ -2721,6 +2826,24 @@
   /* Secondary to the address it sits under, not a column of its own. */
   .decision-origin {
     display: block; font-size: 10px; color: var(--text-muted); margin-top: 2px;
+  }
+  /* One clickable rule id. Deliberately quiet: the common case is reading these,
+     not clicking them, and a row of buttons that look like actions invites
+     switching rules off before anyone has read the path they fired on. */
+  .rule-chip {
+    display: inline-block; margin: 1px 3px 1px 0; padding: 1px 6px;
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--text-secondary); background: var(--bg-overlay);
+    border: 1px solid var(--border-default); border-radius: 3px; cursor: pointer;
+  }
+  .rule-chip:hover:not(:disabled) {
+    color: var(--text-primary); border-color: var(--text-muted);
+  }
+  .rule-chip:disabled { opacity: 0.5; cursor: default; }
+  /* The path is the evidence; it is also frequently a 200-character signed URL. */
+  .path-cell {
+    display: inline-block; max-width: 380px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
   }
   .mini-table th {
     text-align: left; padding: 8px 10px; font-size: 10px; font-weight: 600;

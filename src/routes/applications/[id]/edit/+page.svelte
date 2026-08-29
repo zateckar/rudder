@@ -25,6 +25,12 @@
     return Array.isArray(ports) ? ports.join(', ') : '';
   });
 
+  /** `applications.appsecDisabledRules` as the comma-separated form the field takes. */
+  const appsecRulesValue = $derived.by(() => {
+    const rules = data.appsecDisabledRules;
+    return Array.isArray(rules) ? rules.join(', ') : '';
+  });
+
   // Source toggle: 'image' or 'git'
   let sourceType = $state<'image' | 'git'>('image');
   let gitRepo = $state('');
@@ -465,6 +471,49 @@
         cannot follow one. An extra port that needs protecting must do it itself: an API key,
         signature authentication, mTLS. CrowdSec, the security headers and the rate limit apply to
         every port.
+      </p>
+    </div>
+
+    <!-- ── Web firewall (all app types) ────────────────────────── -->
+    <div class="form-section">
+      <h2>Web Firewall</h2>
+      <p class="help-text">
+        CrowdSec inspects every request with the OWASP Core Rule Set. CRS is <em>scored</em>: a
+        request collects points from many rules and is reported once the total crosses a threshold,
+        so no single rule is usually "the" problem. Nothing is blocked inline — but repeated hits
+        become a ban, and <strong>a ban is by source address and applies to every application on the
+        worker</strong>. One user's upload can take the whole host off the air for them.
+      </p>
+
+      <div class="form-group">
+        <label for="appsecDisabledRules">Disabled rules</label>
+        <input
+          type="text"
+          id="appsecDisabledRules"
+          name="appsecDisabledRules"
+          placeholder="942100, 932130"
+          value={appsecRulesValue}
+        />
+        <p class="help-text">
+          CRS rule numbers, CrowdSec rule names, or both. They apply to this application only,
+          matched on its hostname — on every port it serves.
+          {#if app.type === 'k8s'}
+            A <code>kubectl apply</code> carrying
+            <code>rudder.dev/appsec-disable-rules</code> overwrites whatever is set here.
+          {/if}
+        </p>
+      </div>
+
+      <p class="help-text">
+        <strong>Find the numbers on the worker's CrowdSec tab.</strong> Each alert lists the rules
+        that fired against the host and path that triggered them. Do not use the
+        <code>rule_name</code> a decision reports — that is the first rule in the chain, usually a
+        CRS initialisation rule, and disabling it does nothing.
+      </p>
+      <p class="help-text">
+        Applying a change restarts CrowdSec on the worker, which takes a few seconds and is picked
+        up within a minute. Disable only rules you have confirmed are firing on traffic you
+        recognise: every one you list stops protecting this application against everyone.
       </p>
     </div>
 

@@ -1,0 +1,11 @@
+[Unit]
+Description=Fetch CrowdSec AppSec rule exclusions from the Rudder control plane
+After=network-online.target crowdsec-container.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rudder-appsec-config.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rudder-appsec-config

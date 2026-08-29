@@ -513,6 +513,27 @@ step_crowdsec() {
   echo "{{CROWDSEC_ACQUIS_B64}}" | base64 -d > /etc/crowdsec/acquis.yaml
   echo "{{CROWDSEC_APPSEC_ACQUIS_B64}}" | base64 -d > /etc/crowdsec/acquis.d/appsec.yaml
   echo "{{CROWDSEC_CONFIG_LOCAL_B64}}" | base64 -d > /etc/crowdsec/config.yaml.local
+
+  # The per-application rule exclusions, bind-mounted into the container.
+  #
+  # Created here, before the container is started, and never left absent: podman
+  # creates a *directory* at a bind-mount source that does not exist, and
+  # CrowdSec would then fail to load an AppSec configuration the acquisition
+  # references by name — taking the whole AppSec component down rather than just
+  # the exclusions. An empty-but-valid document is the safe resting state, and
+  # it is what a worker with no exclusions legitimately has.
+  mkdir -p /etc/rudder/appsec
+  chmod 755 /etc/rudder/appsec
+  if [ ! -f /etc/rudder/appsec/rudder-exclusions.yaml ]; then
+    cat > /etc/rudder/appsec/rudder-exclusions.yaml <<'RXEOF'
+# Placeholder until the first fetch from the control plane. Replaced by
+# rudder-appsec-config.sh; edits here are overwritten.
+name: rudder/exclusions
+default_remediation: ban
+RXEOF
+  fi
+  chmod 644 /etc/rudder/appsec/rudder-exclusions.yaml
+
   echo "CrowdSec config written (systemd will pull image and start container)"
 }
 
@@ -761,6 +782,51 @@ else
   systemctl disable --now rudder-traefik-config.timer 2>/dev/null || true
   rm -f /etc/rudder/traefik-config.env /etc/traefik/dynamic/routes.yml
   echo "Routing mode: labels (container labels drive Traefik)"
+fi
+
+# ── CrowdSec AppSec exclusions (both routing modes) ────────────────────
+#
+# Which CRS rules an application is exempt from has nothing to do with how
+# Traefik learns its routes, so unlike the block above this is not conditional
+# on the routing mode.
+
+echo "{{APPSEC_CONFIG_SCRIPT_B64}}" | base64 -d > /usr/local/bin/rudder-appsec-config.sh
+chmod +x /usr/local/bin/rudder-appsec-config.sh
+echo "{{APPSEC_CONFIG_SERVICE_B64}}" | base64 -d > /etc/systemd/system/rudder-appsec-config.service
+echo "{{APPSEC_CONFIG_TIMER_B64}}" | base64 -d > /etc/systemd/system/rudder-appsec-config.timer
+systemctl daemon-reload
+
+if [ -n "{{APPSEC_ENDPOINT}}" ]; then
+  umask 077
+  cat > /etc/rudder/appsec-config.env <<RAEOF
+APPSEC_ENDPOINT={{APPSEC_ENDPOINT}}
+APPSEC_TOKEN={{APPSEC_TOKEN}}
+RAEOF
+  if [ -n "{{APPSEC_BASIC_USER}}" ]; then
+    cat >> /etc/rudder/appsec-config.env <<RABEOF
+APPSEC_BASIC_USER={{APPSEC_BASIC_USER}}
+APPSEC_BASIC_PASS={{APPSEC_BASIC_PASS}}
+RABEOF
+  fi
+  chmod 600 /etc/rudder/appsec-config.env
+  umask 022
+
+  systemctl enable --now rudder-appsec-config.timer
+  # Fetched once synchronously so a worker comes up with the exclusions its
+  # applications already have, rather than banning their users for a minute
+  # first. The restart inside the script is a no-op here — CrowdSec has only
+  # just been started with this file already in place.
+  if /usr/local/bin/rudder-appsec-config.sh; then
+    echo "AppSec exclusions fetched from control plane"
+  else
+    echo "WARNING: could not fetch AppSec exclusions from {{APPSEC_ENDPOINT}}"
+    echo "WARNING: the worker will retry every minute; until it succeeds the"
+    echo "WARNING: full ruleset applies to every application."
+  fi
+else
+  systemctl disable --now rudder-appsec-config.timer 2>/dev/null || true
+  rm -f /etc/rudder/appsec-config.env
+  echo "AppSec exclusions: not configured (no control-plane URL)"
 fi
 
 # ── Patch-state scan ───────────────────────────────────────────────────

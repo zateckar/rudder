@@ -102,6 +102,7 @@ sqlite.run(`
     volumes TEXT,
     restart_policy TEXT NOT NULL DEFAULT 'always',
     exposed_ports TEXT,
+    appsec_disabled_rules TEXT,
     rate_limit_avg INTEGER,
     rate_limit_burst INTEGER,
     auth_type TEXT NOT NULL DEFAULT 'global',
@@ -297,6 +298,10 @@ for (const col of [
   // that as "the domain/router_name/exposed_port columns are the whole story",
   // which is the single route those containers have always had.
   `ALTER TABLE containers ADD COLUMN routes TEXT;`,
+  // Null on every existing application, read as "excluded nothing" — the fully
+  // protected state. See applications.appsecDisabledRules.
+  `ALTER TABLE applications ADD COLUMN appsec_disabled_rules TEXT;`,
+  `ALTER TABLE application_templates ADD COLUMN appsec_disabled_rules TEXT;`,
 ]) {
   try { sqlite.run(col); } catch { /* Column already exists */ }
 }
@@ -465,6 +470,7 @@ sqlite.run(`
     volumes TEXT,
     restart_policy TEXT NOT NULL DEFAULT 'always',
     exposed_ports TEXT,
+    appsec_disabled_rules TEXT,
     created_by TEXT REFERENCES users(id),
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL

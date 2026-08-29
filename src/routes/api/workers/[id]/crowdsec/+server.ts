@@ -5,8 +5,36 @@ import { requireWorker, route } from '$lib/server/auth';
 import {
   decisionsFromExec,
   findCrowdsecContainer,
+  parseAppsecAlerts,
+  type CrowdsecAppsecAlert,
   type DecisionsRead,
 } from '$lib/server/crowdsec';
+
+/**
+ * Recent AppSec alerts, for the panel that names which rules actually fired.
+ *
+ * A decision cannot answer that question: the `rule_name` it carries is the
+ * first id in the chain, which is usually a CRS initialisation rule that does
+ * nothing when disabled. The alert's `rule_ids` is the real list, and it is only
+ * on the alert.
+ *
+ * Best-effort — an empty list on any failure. The decisions above are the part
+ * of this tab that must not lie about being complete; this is a convenience for
+ * finding rule numbers, and a missing one costs an SSH session, not a bad
+ * security decision.
+ */
+async function readAppsecAlerts(client: any, containerId: string): Promise<CrowdsecAppsecAlert[]> {
+  try {
+    const { stdout, exitCode } = await client.execContainerHttp(
+      containerId,
+      ['cscli', 'alerts', 'list', '-a', '--limit', '60', '-o', 'json'],
+      { attachStdout: true, attachStderr: true, tty: false },
+    );
+    return parseAppsecAlerts(stdout, exitCode) ?? [];
+  } catch {
+    return [];
+  }
+}
 
 /**
  * Read the worker's active CrowdSec decisions.
@@ -43,6 +71,7 @@ export const GET: RequestHandler = route(async (event) => {
     decisions: [],
     error: 'CrowdSec is not running on this worker, so no decisions could be read.',
   };
+  let appsecAlerts: CrowdsecAppsecAlert[] = [];
 
   if (worker.podmanApiUrl) {
     await withPodman(worker, async (client) => {
@@ -60,6 +89,7 @@ export const GET: RequestHandler = route(async (event) => {
           });
         } catch {}
         decisions = await readDecisions(client, csC.Id);
+        appsecAlerts = await readAppsecAlerts(client, csC.Id);
       } catch (err) {
         // An unreachable worker leaves `not_found`, which is what the tab shows.
         const message = err instanceof Error ? err.message : String(err);
@@ -93,6 +123,7 @@ export const GET: RequestHandler = route(async (event) => {
     decisions: decisions.decisions,
     decisionsAvailable: decisions.error === null,
     decisionsError: decisions.error,
+    appsecAlerts,
     appsecStatus: '',
   });
 });

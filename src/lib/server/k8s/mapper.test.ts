@@ -51,6 +51,7 @@ function deploymentFor(over: Record<string, any> = {}) {
       domain: 'shop.example.com',
       description: null,
       exposedPorts: null,
+      appsecDisabledRules: null,
       createdAt: new Date(0),
       updatedAt: new Date(0),
       ...over,

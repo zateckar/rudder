@@ -813,6 +813,68 @@ describe('generateProvisioningScript', () => {
     }
   });
 
+  describe('per-application rule exclusions', () => {
+    // `rudder/exclusions` is the one appsec_config that is *not* a hub item, so
+    // the test above cannot cover it. It arrives by bind mount instead, and the
+    // failure mode is the same one that test documents: an appsec_config the
+    // acquisition names but CrowdSec cannot find is a fatal start, forever, with
+    // the WAF down.
+    test('the acquisition names it and the container is given a file for it', () => {
+      const acquis = blobFor('/etc/crowdsec/acquis.d/appsec.yaml');
+      const unit = blobFor('/etc/systemd/system/crowdsec-container.service');
+
+      expect(acquis).toContain('- rudder/exclusions');
+      expect(unit).toContain(
+        '/etc/rudder/appsec/rudder-exclusions.yaml:/etc/crowdsec/appsec-configs/rudder-exclusions.yaml',
+      );
+    });
+
+    test('the file exists before the container that mounts it starts', () => {
+      // Podman creates a *directory* at a bind-mount source that does not
+      // exist, and CrowdSec then fails to load the config the acquisition names.
+      const created = script.indexOf('/etc/rudder/appsec/rudder-exclusions.yaml <<');
+      const started = script.indexOf('systemctl start crowdsec-container.service');
+      expect(created).toBeGreaterThan(-1);
+      expect(started).toBeGreaterThan(created);
+    });
+
+    test('the placeholder it writes is a config CrowdSec can load', () => {
+      // An empty file is not a valid appsec-config, and "no exclusions" is the
+      // resting state of almost every worker — so the placeholder has to be a
+      // real document, not a touch.
+      const at = script.indexOf('/etc/rudder/appsec/rudder-exclusions.yaml <<');
+      const open = script.indexOf('RXEOF', at);
+      const close = script.indexOf('RXEOF', open + 'RXEOF'.length);
+      expect(script.slice(open, close)).toContain('name: rudder/exclusions');
+    });
+
+    test('the fetch timer is installed in labels mode too', () => {
+      // Which CRS rules an application is exempt from has nothing to do with
+      // how Traefik learns its routes. Gating this on http mode would leave
+      // every default worker unable to ever apply an exclusion.
+      const labels = generateProvisioningScript('worker-1', {
+        baseDomain: 'apps.example.com',
+        workerToken: 'deadbeef',
+        appsecConfig: { endpoint: 'https://rudder.example.com/a', token: 'deadbeef' },
+      });
+      expect(labels).not.toContain('CONFIG_ENDPOINT=https');
+      expect(labels).toContain('systemctl enable --now rudder-appsec-config.timer');
+      expect(labels).toContain('APPSEC_ENDPOINT=https://rudder.example.com/a');
+    });
+
+    test('the token it plants is not world-readable', () => {
+      const withEndpoint = generateProvisioningScript('worker-1', {
+        appsecConfig: { endpoint: 'https://rudder.example.com/a', token: 'deadbeef' },
+      });
+      expect(withEndpoint).toContain('chmod 600 /etc/rudder/appsec-config.env');
+    });
+
+    test('no endpoint disables the timer rather than leaving it fetching nothing', () => {
+      const none = generateProvisioningScript('worker-1', { baseDomain: 'apps.example.com' });
+      expect(none).toContain('systemctl disable --now rudder-appsec-config.timer');
+    });
+  });
+
   test('opens the configured SSH port in the firewall', () => {
     expect(script).toContain('local SSH_PORT="2222"');
   });

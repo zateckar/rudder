@@ -17,6 +17,7 @@ import { redactProvisioningOutput } from '$lib/server/redaction';
 import {
   checkPublicUrlReachable,
   configEndpointUrl,
+  appsecEndpointUrl,
   generateConfigToken,
 } from '$lib/server/worker-config-endpoint';
 
@@ -280,6 +281,20 @@ export const POST: RequestHandler = route(async (event) => {
             };
           }
 
+          // AppSec exclusions go to every worker, not only http-mode ones: which
+          // CRS rules an application is exempt from has nothing to do with how
+          // Traefik learns its routes. Skipped only when there is no PUBLIC_URL
+          // to hand out, in which case the worker keeps whatever it already has
+          // rather than losing its exclusions and banning their users.
+          const appsecConfig = env.PUBLIC_URL
+            ? {
+                endpoint: appsecEndpointUrl(worker.id, env.PUBLIC_URL),
+                token: workerToken,
+                basicUser: worker.configBasicUser,
+                basicPassword: decryptField(worker.configBasicPassword),
+              }
+            : undefined;
+
           // The file this script writes is what `oidcAppliedAt` below claims is
           // in place, so it has to carry the per-application token middlewares
           // too — a re-provision that dropped them would leave those routers
@@ -296,6 +311,7 @@ export const POST: RequestHandler = route(async (event) => {
             sshPort: worker.sshPort,
             routingConfig,
             workerToken,
+            appsecConfig,
             applyUpdates,
           });
           

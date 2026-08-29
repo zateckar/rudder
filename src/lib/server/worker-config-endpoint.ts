@@ -18,6 +18,17 @@ export function configEndpointUrl(workerId: string, publicUrl: string): string {
 }
 
 /**
+ * Where a worker fetches its CrowdSec AppSec rule exclusions.
+ *
+ * Planted in both routing modes, unlike the routing endpoint: which rules an
+ * application is exempt from has nothing to do with whether Traefik learns its
+ * routes from labels or from a file.
+ */
+export function appsecEndpointUrl(workerId: string, publicUrl: string): string {
+  return `${publicUrl.replace(/\/+$/, '')}/api/workers/${workerId}/appsec-config`;
+}
+
+/**
  * Reject a `PUBLIC_URL` a worker cannot actually reach.
  *
  * A worker whose endpoint resolves to its own loopback address fetches nothing

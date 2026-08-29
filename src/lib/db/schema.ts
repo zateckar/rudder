@@ -178,6 +178,20 @@ export const applications = sqliteTable('applications', {
    * the `rudder.expose` label and overrides this.
    */
   exposedPorts: text('exposed_ports'),
+  /**
+   * CrowdSec AppSec rules this application is exempt from, as a JSON array of
+   * CRS numbers (`942100`) and CrowdSec rule names.
+   *
+   * Null and `[]` mean the same thing here — nothing excluded, full ruleset —
+   * unlike `exposedPorts`, because there is no third state to distinguish. The
+   * safe direction is unambiguous, so a row that cannot be read degrades to
+   * "excluded nothing" rather than "excluded everything".
+   *
+   * Application-scoped and matched on the request Host, which is the only thing
+   * AppSec sees that identifies an application. Deliberately not per-port: the
+   * false positives that motivated this were on ordinary 443 traffic.
+   */
+  appsecDisabledRules: text('appsec_disabled_rules'),
   rateLimitAvg: integer('rate_limit_avg'),
   rateLimitBurst: integer('rate_limit_burst'),
   authType: text('auth_type', { enum: ['none', 'oidc', 'global'] }).notNull().default('global'),
@@ -231,6 +245,8 @@ export const applicationTemplates = sqliteTable('application_templates', {
   restartPolicy: text('restart_policy', { enum: ['no', 'on-failure', 'always', 'unless-stopped'] }).notNull().default('always'),
   /** @see applications.exposedPorts — same encoding, same null semantics. */
   exposedPorts: text('exposed_ports'),
+  /** @see applications.appsecDisabledRules — same encoding. */
+  appsecDisabledRules: text('appsec_disabled_rules'),
   createdBy: text('created_by').references(() => users.id),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),

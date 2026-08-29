@@ -41,6 +41,7 @@ import { getRestPodmanClient } from '$lib/server/podman-client';
 import { checkApplicationQuota } from '$lib/server/quota';
 import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
 import { serializeExposedPorts } from '$lib/server/deploy/plan';
+import { serializeAppsecRules } from '$lib/server/appsec';
 
 // ── GET ────────────────────────────────────────────────────────
 
@@ -230,6 +231,7 @@ export async function POST({
       volumes: null,
       restartPolicy: parsed.restartPolicy as 'always' | 'no' | 'on-failure' | 'unless-stopped' | undefined,
       exposedPorts: serializeExposedPorts(parsed.exposedPorts),
+      appsecDisabledRules: serializeAppsecRules(parsed.appsecDisabledRules),
       replicas: parsed.replicas,
       createdBy: null,
       createdAt: new Date(),
@@ -474,6 +476,12 @@ async function handleUpdateDeployment(
   // rule `description` and `domain` already follow here.
   if (parsed.exposedPorts !== null && parsed.exposedPorts !== undefined) {
     updates.exposedPorts = serializeExposedPorts(parsed.exposedPorts);
+  }
+  // Same rule: only when the annotation was present. An apply that omits it
+  // leaves the exclusions alone rather than silently re-enabling every rule the
+  // application was exempt from.
+  if (parsed.appsecDisabledRules !== null && parsed.appsecDisabledRules !== undefined) {
+    updates.appsecDisabledRules = serializeAppsecRules(parsed.appsecDisabledRules);
   }
   if (parsed.domain) {
     const domainConflict = await assertDomainAvailable(parsed.domain, app.id);
