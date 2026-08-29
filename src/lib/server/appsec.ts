@@ -351,6 +351,41 @@ export async function applicationHostnames(applicationId: string): Promise<strin
 }
 
 /**
+ * The application serving a hostname, or null.
+ *
+ * The reverse of `applicationHostnames`, and it has to look in the same two
+ * places for the same reason: `applications.domain` is null for compose and k8s
+ * applications, whose hostname is on `containers.domain`. Resolving only the
+ * application column made "disable this rule" answer "no application on this
+ * Rudder serves versity.gamma.apps.skoda-api.com" for an application that was
+ * deployed, serving, and linked from the page the button was on.
+ *
+ * Hostnames are unique across applications — `assertDomainAvailable` enforces it
+ * — so this is an exact mapping rather than a best guess.
+ */
+export async function applicationIdForHostname(host: string): Promise<string | null> {
+  const bare = host.split(':')[0].trim();
+  if (!bare) return null;
+
+  const [{ db }, { applications, containers }, { eq }] = await Promise.all([
+    import('$lib/db'),
+    import('$lib/db/schema'),
+    import('drizzle-orm'),
+  ]);
+
+  const [byApplication, byContainer] = await Promise.all([
+    db.select({ id: applications.id }).from(applications).where(eq(applications.domain, bare)).get(),
+    db
+      .select({ id: containers.applicationId })
+      .from(containers)
+      .where(eq(containers.domain, bare))
+      .get(),
+  ]);
+
+  return byApplication?.id ?? byContainer?.id ?? null;
+}
+
+/**
  * Every exclusion that applies on one worker.
  *
  * One entry per hostname, because an application's exclusions have to reach

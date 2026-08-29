@@ -5,6 +5,7 @@ import { applications } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { requireApplication, route } from '$lib/server/auth';
 import {
+  applicationIdForHostname,
   appsecRuleError,
   parseAppsecRules,
   parseRuleList,
@@ -53,21 +54,22 @@ export const POST: RequestHandler = route(async (event) => {
   const refusal = appsecRuleError(parsed);
   if (refusal) return json({ error: refusal }, { status: 400 });
 
-  // The Host header carries the port on entryPoints other than 443. The
-  // application's domain never does, so it is stripped before matching —
-  // otherwise excluding a rule from an alert on :1443 would silently match no
-  // application and report success.
+  // Resolved through `applicationIdForHostname`, which looks at the containers
+  // as well as the application row. `applications.domain` is null for compose
+  // and k8s applications, so matching on it alone refused to disable anything
+  // for them — the button reported "no application serves this host" on the very
+  // page that links to that host. It also strips the port, which the Host header
+  // carries on entryPoints other than 443 and a domain never does.
   const domain = host.split(':')[0];
-
-  const found = await db.select().from(applications).where(eq(applications.domain, domain)).get();
-  if (!found) {
+  const applicationId = await applicationIdForHostname(domain);
+  if (!applicationId) {
     return json({ error: `No application on this Rudder serves ${domain}.` }, { status: 404 });
   }
 
-  // Re-fetched through the authorization helper rather than trusting the row
-  // above: the lookup is by hostname, which anyone can read off a request, so
-  // the team check has to happen before the write.
-  const { application: app } = await requireApplication(event, found.id);
+  // Fetched through the authorization helper rather than trusting the lookup:
+  // the key is a hostname, which anyone can read off a request, so the team
+  // check has to happen before the write.
+  const { application: app } = await requireApplication(event, applicationId);
 
   const existing = parseAppsecRules(app.appsecDisabledRules);
   const [addition] = parsed;
