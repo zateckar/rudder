@@ -70,6 +70,8 @@
 
   let crowdsec = $state<any>(null);
   let crowdsecLoading = $state(false);
+  let removingDecision = $state<number | null>(null);
+  let decisionError = $state('');
 
   let terminalReady = $state(false);
 
@@ -372,6 +374,38 @@
       crowdsec = { error: e.message };
     } finally {
       crowdsecLoading = false;
+    }
+  }
+
+  /**
+   * Lift one CrowdSec decision.
+   *
+   * Confirmed first, and the prompt names the address: this removes a security
+   * control on a production worker, and the row it was clicked from is one of
+   * several that look alike.
+   */
+  async function removeDecision(d: { id: number; value: string; scope: string; reason: string }) {
+    const who = d.scope ? `${d.scope}:${d.value}` : d.value;
+    if (!confirm(`Lift the ${d.reason || 'CrowdSec'} decision on ${who}?\n\nIt will be re-applied if the same behaviour repeats.`)) {
+      return;
+    }
+    decisionError = '';
+    removingDecision = d.id;
+    try {
+      const res = await fetch(`/api/workers/${workerId}/crowdsec?decision=${d.id}`, {
+        method: 'DELETE',
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || !body.ok) {
+        decisionError = body.error || body.message || `Could not remove decision ${d.id}.`;
+      }
+    } catch (e: any) {
+      decisionError = e.message;
+    } finally {
+      removingDecision = null;
+      // Re-read rather than splice the row out: the list is the worker's answer,
+      // not ours, and a delete that half-worked should show as still there.
+      await loadCrowdsec();
     }
   }
 
@@ -1917,30 +1951,61 @@
       </div>
 
       <!-- Active Decisions -->
-      {#if crowdsec.decisions && crowdsec.decisions.length > 0}
-        <div class="section">
-          <h3>Active Decisions ({crowdsec.decisions.length})</h3>
+      <div class="section">
+        <div class="section-head">
+          <h3>
+            Active Decisions{crowdsec.decisionsAvailable && crowdsec.decisions.length > 0
+              ? ` (${crowdsec.decisions.length})`
+              : ''}
+          </h3>
+          <button class="btn-tiny" onclick={loadCrowdsec} title="Re-read decisions from CrowdSec">Refresh</button>
+        </div>
+
+        {#if !crowdsec.decisionsAvailable}
+          <!-- Never "all clear" on the strength of an unanswered question: this
+               panel used to say exactly that while three bans were live. -->
+          <p class="error">
+            Could not read decisions from CrowdSec on this worker. Bans may be
+            active and are not shown here.
+          </p>
+        {:else if crowdsec.decisions.length === 0}
+          <p class="empty">No active decisions — all clear</p>
+        {:else}
+          <p class="help-text">
+            A ban is by source address and applies to every application on this worker, so an
+            address banned while testing one application loses all of them. Removing a decision
+            takes effect immediately; CrowdSec will re-apply it if the same behaviour repeats.
+          </p>
           <table class="mini-table">
-            <thead><tr><th>Source</th><th>IP</th><th>Reason</th><th>Action</th><th>Duration</th></tr></thead>
+            <thead><tr><th>Source</th><th>Address</th><th>Reason</th><th>Action</th><th>Expires in</th><th></th></tr></thead>
             <tbody>
               {#each crowdsec.decisions as d}
                 <tr>
                   <td>{d.source || '—'}</td>
-                  <td class="mono small">{d.value || '—'}</td>
+                  <td class="mono small">{d.scope ? `${d.scope}:${d.value}` : d.value || '—'}</td>
                   <td>{d.reason || '—'}</td>
                   <td>{d.type || '—'}</td>
                   <td>{d.duration || '—'}</td>
+                  <td>
+                    <button
+                      class="btn-tiny btn-danger"
+                      disabled={removingDecision === d.id}
+                      onclick={() => removeDecision(d)}
+                      title="Lift this decision on the worker"
+                    >
+                      {removingDecision === d.id ? 'Removing…' : 'Remove'}
+                    </button>
+                  </td>
                 </tr>
               {/each}
             </tbody>
           </table>
-        </div>
-      {:else}
-        <div class="section">
-          <h3>Active Decisions</h3>
-          <p class="empty">No active decisions — all clear</p>
-        </div>
-      {/if}
+        {/if}
+
+        {#if decisionError}
+          <p class="error">{decisionError}</p>
+        {/if}
+      </div>
 
       <!-- AppSec Rules -->
       {#if crowdsec.appsecStatus}

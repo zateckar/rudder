@@ -2,6 +2,30 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { withPodman } from '$lib/server/podman-client';
 import { requireWorker, route } from '$lib/server/auth';
+import {
+  findCrowdsecContainer,
+  parseDecisions,
+  type CrowdsecDecision,
+} from '$lib/server/crowdsec';
+
+/**
+ * Read the worker's active CrowdSec decisions.
+ *
+ * Returns null when the answer could not be obtained, which the caller must keep
+ * distinct from an empty list. They look the same and mean opposite things.
+ */
+async function readDecisions(client: any, containerId: string): Promise<CrowdsecDecision[] | null> {
+  try {
+    const { stdout, exitCode } = await client.execContainerHttp(
+      containerId,
+      ['cscli', 'decisions', 'list', '-o', 'json'],
+      { attachStdout: true, attachStderr: true, tty: false },
+    );
+    return parseDecisions(stdout, exitCode);
+  } catch {
+    return null;
+  }
+}
 
 export const GET: RequestHandler = route(async (event) => {
   const { worker } = await requireWorker(event, event.params.id!);
@@ -10,14 +34,12 @@ export const GET: RequestHandler = route(async (event) => {
   let crowdsecInspect: any = null;
   let crowdsecStatus = 'not_found';
   let crowdsecLogs = '';
+  let decisions: CrowdsecDecision[] | null = null;
 
   if (worker.podmanApiUrl) {
     await withPodman(worker, async (client) => {
       try {
-        const allContainers = await client.listContainers(true);
-        const csC = allContainers.find((c: any) =>
-          c.Names?.includes('/crowdsec') || c.Names?.some((n: string) => n.includes('crowdsec')),
-        );
+        const csC = await findCrowdsecContainer(client);
         if (!csC) return;
 
         crowdsecStatus = csC.State || 'unknown';
@@ -29,6 +51,7 @@ export const GET: RequestHandler = route(async (event) => {
             tail: tailLines,
           });
         } catch {}
+        decisions = await readDecisions(client, csC.Id);
       } catch {
         // An unreachable worker leaves `not_found`, which is what the tab shows.
       }
@@ -41,18 +64,67 @@ export const GET: RequestHandler = route(async (event) => {
   // The bouncer key itself is likewise never returned: whether one is
   // configured is all the page needs to say.
   //
-  // `decisions` and `appsecStatus` were declared here, never assigned, run
-  // through a JSON.parse that could only ever see an empty string, and returned
-  // as `[]` and `''`. They came from an SSH path that no longer exists; the
-  // CrowdSec LAPI listens on 127.0.0.1 and the control plane cannot reach it.
-  // Reporting them as absent is the same answer with none of the theatre.
+  // `decisions` used to be hardcoded to `[]`, on the reasoning that the LAPI is
+  // unreachable from the control plane. The page rendered that as "No active
+  // decisions — all clear", so a worker with three live bans — including one on
+  // the operator reading the page — reported itself clear. An empty list and no
+  // answer are different facts, and `decisionsAvailable` is what keeps them
+  // apart here instead of collapsing both into a reassurance.
   return json({
     status: crowdsecStatus,
     image: crowdsecInspect?.Config?.Image ?? null,
     startedAt: crowdsecInspect?.State?.StartedAt ?? null,
     logs: crowdsecLogs,
     bouncerKeyConfigured: !!worker.crowdsecBouncerKey,
-    decisions: [],
+    decisions: decisions ?? [],
+    decisionsAvailable: decisions !== null,
     appsecStatus: '',
   });
+});
+
+/**
+ * Lift one decision — the WAF equivalent of unbanning an address.
+ *
+ * Admin-only through `requireWorker`, and audited by the hook that classifies
+ * every mutating `/api/` request, because this removes a security control on a
+ * production host and "who lifted that ban" is the question afterwards.
+ */
+export const DELETE: RequestHandler = route(async (event) => {
+  const { worker } = await requireWorker(event, event.params.id!);
+
+  const raw = event.url.searchParams.get('decision') ?? '';
+  // Numeric ids only. `execContainerHttp` takes an argv array, so there is no
+  // shell to inject into — but an id is a number, and refusing anything else
+  // means a malformed one is a 400 here rather than a confusing `cscli` error.
+  if (!/^\d+$/.test(raw)) {
+    return json({ error: 'A numeric decision id is required.' }, { status: 400 });
+  }
+
+  if (!worker.podmanApiUrl) {
+    return json({ error: 'Worker has no Podman API configured.' }, { status: 409 });
+  }
+
+  let result: { ok: boolean; message: string } = {
+    ok: false,
+    message: 'CrowdSec is not running on this worker.',
+  };
+
+  await withPodman(worker, async (client) => {
+    const csC = await findCrowdsecContainer(client);
+    if (!csC) return;
+
+    const { stdout, stderr, exitCode } = await client.execContainerHttp(
+      csC.Id,
+      ['cscli', 'decisions', 'delete', '--id', raw],
+      { attachStdout: true, attachStderr: true, tty: false },
+    );
+    result = {
+      ok: exitCode === 0,
+      // `cscli` reports the outcome on stdout and problems on stderr; whichever
+      // spoke is what the operator needs to see, verbatim.
+      message: (stdout.trim() || stderr.trim() || '').slice(0, 500),
+    };
+  });
+
+  return json(result, { status: result.ok ? 200 : 502 });
 });
