@@ -648,9 +648,10 @@ stringData:
         the worker's CrowdSec tab, against traffic you recognise — not ones guessed in advance.
       </p>
       <p class="help-text">
-        <strong>Not <code>949110</code>.</strong> It is not a signature — it is the anomaly-score
-        threshold, and the only CRS rule that enforces anything; the rest just add to the score.
-        Excluding it does not narrow the ruleset for this application, it switches CRS off for it.
+        <strong><code>949110</code> is refused</strong>, and so are the CRS setup and reporting
+        rules. It is not a signature — it is the anomaly-score threshold, and the only CRS rule
+        that enforces anything; the rest just add to the score. Excluding it would not narrow the
+        ruleset for this application, it would switch CRS off for it.
       </p>
       <p class="help-text">
         Applying a change restarts CrowdSec on the worker, which takes a few seconds and is picked

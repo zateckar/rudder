@@ -6,7 +6,7 @@
   import PageHeader from '$lib/components/PageHeader.svelte';
   import { showToast } from '$lib/client/toast.svelte';
   import { confirmAction } from '$lib/client/dialog.svelte';
-  import { isAnomalyGate, metaRuleNote } from '$lib/appsec-rules';
+  import { metaRuleNote } from '$lib/appsec-rules';
 
   let { data } = $props();
 
@@ -426,26 +426,9 @@
   async function excludeRule(host: string, rule: string) {
     if (!host) return;
 
-    // 949110 is not a signature. Every other CRS rule adds to an anomaly score;
-    // this one fires when the total crosses the threshold, and it is the only
-    // rule that enforces anything. Excluding it does not narrow the ruleset for
-    // this host — it turns CRS off for it. Confirmed on alpha: excluding one
-    // signature removed exactly that rule from the match, excluding 949110
-    // produced no alert at all.
-    //
-    // It is also the id an operator is most likely to click, because it is the
-    // one CrowdSec reports as having fired. So the warning has to be here, not
-    // only in the help text.
-    if (isAnomalyGate(rule)) {
-      if (!confirm(
-        `Rule ${rule} is not a signature — it is the anomaly-score threshold, and the only ` +
-        `CRS rule that enforces anything.\n\n` +
-        `Excluding it disables the OWASP ruleset entirely for ${host}, on every port it ` +
-        `serves. The rules you actually want are the signatures that pushed the score over ` +
-        `the line — the other ids on this row.\n\n` +
-        `Disable CRS for ${host} anyway?`,
-      )) return;
-    } else if (!confirm(
+    // Anomaly-gate and setup rules are not rendered as buttons at all, so this
+    // is unreachable from the UI — the endpoint refuses them regardless.
+    if (!confirm(
       `Stop rule ${rule} firing for ${host}?\n\n` +
       `It stops protecting that application against everyone, on every port it serves. ` +
       `CrowdSec restarts on this worker within a minute.`,
@@ -2106,9 +2089,10 @@
           <p class="help-text">
             Most CRS rules only add to an anomaly score; <strong><code>949110</code> is the one
             that fires when the total crosses the threshold</strong>, and the only one that
-            enforces anything. Excluding it does not narrow the ruleset for an application — it
-            turns CRS off for it. Exclude the signatures that pushed the score over instead. Rules
-            shown in amber are this kind of machinery rather than a signature.
+            enforces anything. Excluding it would not narrow the ruleset for an application, it
+            would turn CRS off for it — so it cannot be excluded, and neither can the setup and
+            reporting rules, which would stop nothing. Those are shown in amber and are not
+            clickable. Exclude the signatures that pushed the score over instead.
           </p>
           <p class="help-text">
             Excluding a rule applies to that application on every port it serves, takes effect
@@ -2127,17 +2111,25 @@
                   <td>
                     {#if a.ruleIds.length}
                       {#each a.ruleIds as id}
-                        <button
-                          class="rule-chip"
-                          class:rule-chip--meta={metaRuleNote(id)}
-                          disabled={!a.host || excludingRule === `${a.host}|${id}`}
-                          onclick={() => excludeRule(a.host, String(id))}
-                          title={metaRuleNote(id) ??
-                            (a.ruleMessages?.[String(id)]
+                        {#if metaRuleNote(id)}
+                          <!-- Not a button. Excluding the anomaly gate would
+                               disable CRS for the application outright, and
+                               these ids do not narrow anything — so the action
+                               is not offered here at all rather than offered
+                               behind a warning nobody reads. -->
+                          <span class="rule-chip rule-chip--meta" title={metaRuleNote(id)}
+                            >{id}<span class="rule-why">{metaRuleNote(id)}</span></span>
+                        {:else}
+                          <button
+                            class="rule-chip"
+                            disabled={!a.host || excludingRule === `${a.host}|${id}`}
+                            onclick={() => excludeRule(a.host, String(id))}
+                            title={a.ruleMessages?.[String(id)]
                               ? `${a.ruleMessages[String(id)]} — click to stop it firing for ${a.host}`
-                              : `Stop rule ${id} firing for ${a.host}`)}
-                        >{id}{#if a.ruleMessages?.[String(id)]}<span class="rule-why"
-                          >{a.ruleMessages[String(id)]}</span>{/if}</button>
+                              : `Stop rule ${id} firing for ${a.host}`}
+                          >{id}{#if a.ruleMessages?.[String(id)]}<span class="rule-why"
+                            >{a.ruleMessages[String(id)]}</span>{/if}</button>
+                        {/if}
                       {/each}
                     {:else if a.ruleName}
                       <button

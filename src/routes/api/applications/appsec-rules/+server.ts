@@ -4,7 +4,12 @@ import { db } from '$lib/db';
 import { applications } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { requireApplication, route } from '$lib/server/auth';
-import { parseAppsecRules, parseRuleList, serializeAppsecRules } from '$lib/server/appsec';
+import {
+  appsecRuleError,
+  parseAppsecRules,
+  parseRuleList,
+  serializeAppsecRules,
+} from '$lib/server/appsec';
 
 /**
  * POST /api/applications/appsec-rules
@@ -35,6 +40,11 @@ export const POST: RequestHandler = route(async (event) => {
   if (parsed === null || parsed.length !== 1) {
     return json({ error: 'Exactly one valid rule id or name is required.' }, { status: 400 });
   }
+
+  // The anomaly gate is refused here as well as hidden in the UI. The button not
+  // being offered is a property of one page; this is a property of the endpoint.
+  const refusal = appsecRuleError(parsed);
+  if (refusal) return json({ error: refusal }, { status: 400 });
 
   // The Host header carries the port on entryPoints other than 443. The
   // application's domain never does, so it is stripped before matching —

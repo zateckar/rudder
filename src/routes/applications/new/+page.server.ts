@@ -20,7 +20,12 @@ import {
   parsePortList,
   serializeExposedPorts,
 } from '$lib/server/deploy/plan';
-import { APPSEC_RULES_ERROR, parseRuleList, serializeAppsecRules } from '$lib/server/appsec';
+import {
+  APPSEC_RULES_ERROR,
+  appsecRuleError,
+  parseRuleList,
+  serializeAppsecRules,
+} from '$lib/server/appsec';
 
 export const load = async (event: { locals: App.Locals }) => {
   const currentUser = requirePageUser(event).user;
@@ -99,6 +104,8 @@ export const actions = {
     // nothing believes the rule is off, and goes on being banned by it.
     const appsecRules = parseRuleList(formData.get('appsecDisabledRules')?.toString() ?? '');
     if (appsecRules === null) return fail(400, { error: APPSEC_RULES_ERROR });
+    const appsecRefusal = appsecRuleError(appsecRules);
+    if (appsecRefusal) return fail(400, { error: appsecRefusal });
 
     // The team is submitted, not derived, and the loader above only scopes the
     // *dropdown*. Without this, any authenticated user could name any team in the

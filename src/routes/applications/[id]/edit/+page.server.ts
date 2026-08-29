@@ -21,6 +21,7 @@ import {
 } from '$lib/server/deploy/plan';
 import {
   APPSEC_RULES_ERROR,
+  appsecRuleError,
   parseAppsecRules,
   parseRuleList,
   serializeAppsecRules,
@@ -181,6 +182,8 @@ export const actions = {
     // nothing believes the rule is off, and goes on being banned by it.
     const appsecRules = parseRuleList(formData.get('appsecDisabledRules')?.toString() ?? '');
     if (appsecRules === null) return fail(400, { error: APPSEC_RULES_ERROR });
+    const appsecRefusal = appsecRuleError(appsecRules);
+    if (appsecRefusal) return fail(400, { error: appsecRefusal });
 
     // Hostnames are global — two applications sharing one would produce two
     // Traefik routers with the same Host rule and arbitrary routing between them.

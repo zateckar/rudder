@@ -125,6 +125,29 @@ describe('generateAppsecConfig', () => {
     expect(generateAppsecConfig([{ host: 'a.example.com', rules: [] }])).not.toContain('pre_eval:');
   });
 
+  test('never emits a hook for the anomaly gate, whatever the row says', () => {
+    // Refused at every write path, and dropped again here. This function
+    // decides what the WAF actually does, and one row holding 949110 — restored
+    // from a backup, hand-edited, written by a caller that forgot to validate —
+    // would silently disable CRS for that application. Verified on alpha:
+    // excluding 949110 produced no alert at all, where excluding one signature
+    // removed exactly that rule and left the other eight.
+    const yaml = generateAppsecConfig([
+      { host: 'app.example.com', rules: [949110, 901340, 980170, 930100] },
+    ]);
+    expect(yaml).not.toContain('949110');
+    expect(yaml).not.toContain('901340');
+    expect(yaml).not.toContain('980170');
+    expect(yaml).toContain('RemoveOutBandRuleByID(930100)');
+  });
+
+  test('an application excluding only meta rules gets no filter at all', () => {
+    // Not an empty `apply:` block, which would be invalid — and not a filter
+    // that matches the host and removes nothing, which would be a lie.
+    expect(generateAppsecConfig([{ host: 'app.example.com', rules: [949110] }]))
+      .not.toContain('pre_eval:');
+  });
+
   test('a host that is not a hostname is dropped, not interpolated', () => {
     // The filter is a quoted expr string. Nothing that reaches it is
     // user-controlled today, and this keeps it that way if that ever changes.

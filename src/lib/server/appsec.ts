@@ -28,7 +28,21 @@
  * need different removal helpers, so the distinction is kept rather than
  * normalised away.
  */
+import { firstRuleRefusal, metaRuleNote } from '$lib/appsec-rules';
+
 export type AppsecRuleId = number | string;
+
+/**
+ * Why this rule list may not be saved, or null when it may.
+ *
+ * Every write path calls this: both application forms, the kubectl annotation
+ * and the one-click exclude on the worker page. Excluding the anomaly gate is
+ * not a narrower ruleset, it is no ruleset, and the point of the feature is to
+ * give up the least protection that solves the problem.
+ */
+export function appsecRuleError(rules: AppsecRuleId[]): string | null {
+  return firstRuleRefusal(rules);
+}
 
 export const APPSEC_RULES_ERROR =
   'Disabled WAF rules must be a comma-separated list of CRS rule numbers (for example 942100) ' +
@@ -149,9 +163,17 @@ export function generateAppsecConfig(exclusions: AppsecExclusion[]): string {
     'default_remediation: ban',
   ];
 
-  const usable = exclusions.filter(
-    (e) => e.rules.length > 0 && HOSTNAME.test(e.host) && e.host.length <= 253,
-  );
+  // Meta rules are dropped here as well as refused at every write path.
+  //
+  // Belt and braces on purpose: this function decides what the WAF actually
+  // does, and one row holding `949110` — hand-edited, restored from a backup
+  // taken before the refusal existed, written by some future caller that forgets
+  // to validate — would silently disable CRS for that application. The
+  // validation gives a person a useful error; this makes the bad state
+  // unreachable.
+  const usable = exclusions
+    .map((e) => ({ ...e, rules: e.rules.filter((r) => !metaRuleNote(r)) }))
+    .filter((e) => e.rules.length > 0 && HOSTNAME.test(e.host) && e.host.length <= 253);
 
   if (usable.length === 0) {
     // A config with no hooks is valid and loads cleanly. Emitting the file

@@ -11,6 +11,7 @@ import {
   parsePortList,
 } from '../deploy/plan';
 import { parseAppsecRules, parseRuleList, type AppsecRuleId } from '../appsec';
+import { firstRuleRefusal } from '$lib/appsec-rules';
 import { k8sPodTemplate } from '../kubernetes';
 
 // ── Path matching utility ──────────────────────────────────────
@@ -566,6 +567,10 @@ export function parseDeploymentBody(body: any): {
           `got "${appsecAnnotation}"`,
       );
     }
+    // kubectl has to refuse the anomaly gate for the same reason the forms do,
+    // or `kubectl apply` becomes the way around it.
+    const refusal = firstRuleRefusal(appsecDisabledRules);
+    if (refusal) throw new Error(refusal);
   }
 
   const restartPolicy =
