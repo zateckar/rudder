@@ -14,6 +14,17 @@
    */
   import { metaRuleNote } from '$lib/appsec-rules';
 
+  interface Decision {
+    id: number;
+    value: string;
+    scope: string;
+    reason: string;
+    type: string;
+    duration: string;
+    country: string;
+    asName: string;
+  }
+
   interface RuleCount {
     id: number | string;
     message: string;
@@ -41,6 +52,12 @@
     busyRule = null,
     /** Rules already disabled for this application, as stored. */
     disabledRules = [],
+    /** Active CrowdSec bans on the worker, which apply to every application. */
+    decisions = [],
+    /** Lifting a ban is worker-wide, so only an admin is offered it. */
+    canLiftDecisions = false,
+    onLiftDecision,
+    busyDecision = null,
   }: {
     sources: SourceGroup[];
     host?: string;
@@ -49,7 +66,29 @@
     onExclude?: (host: string, rule: string, source?: string) => void;
     busyRule?: string | null;
     disabledRules?: string[];
+    decisions?: Decision[];
+    canLiftDecisions?: boolean;
+    onLiftDecision?: (decision: Decision) => void;
+    busyDecision?: number | null;
   } = $props();
+
+  /** The active ban on this address, if there is one. */
+  function banFor(sourceIp: string): Decision | null {
+    return decisions.find((d) => d.value === sourceIp) ?? null;
+  }
+
+  /**
+   * Bans on addresses this application has no match for.
+   *
+   * A decision is worker-wide, so an address banned while probing some other
+   * application cannot reach this one either — and with nothing attributed to
+   * it here, that user would otherwise be invisible. This is the difference
+   * between "what the WAF noticed about us" and "who is actually being turned
+   * away", and the second is the question an owner is usually asking.
+   */
+  const unmatchedBans = $derived(
+    decisions.filter((d) => !sources.some((s) => s.sourceIp === d.value)),
+  );
 
   /**
    * Whether this rule is already off for this group, and at which scope.
@@ -90,18 +129,44 @@
   }
 </script>
 
-{#if sources.length === 0}
+{#if sources.length === 0 && unmatchedBans.length === 0}
   <p class="empty">Nothing has been matched by the firewall.</p>
 {:else}
   {#each sources as group}
-    <div class="source">
+    {@const ban = banFor(group.sourceIp)}
+    <div class="source" class:is-banned={ban}>
       <div class="source-head">
         <span class="mono addr">{group.sourceIp}</span>
         {#if group.country || group.asName}
           <span class="origin">{[group.country, group.asName].filter(Boolean).join(' · ')}</span>
         {/if}
+        {#if ban}
+          <!-- The thing an owner actually came to find out. Matches say what the
+               WAF noticed; this says the user is being turned away right now. -->
+          <span class="ban-badge" title={`${ban.type} — ${ban.reason || 'CrowdSec'}`}>
+            blocked{ban.duration ? ` · ${ban.duration}` : ''}
+          </span>
+          {#if canLiftDecisions && onLiftDecision}
+            <button
+              class="btn-disable btn-disable--scoped"
+              disabled={busyDecision === ban.id}
+              onclick={() => onLiftDecision(ban)}
+              title={`Lift the ban on ${group.sourceIp} across this whole worker`}
+            >{busyDecision === ban.id ? 'Lifting…' : 'Unblock'}</button>
+          {/if}
+        {/if}
         <span class="requests">{group.requests} request{group.requests === 1 ? '' : 's'}</span>
       </div>
+
+      {#if ban}
+        <p class="ban-note">
+          Blocked from <strong>every application on this worker</strong> — a ban is by address,
+          not by application. Reason: <span class="mono">{ban.reason || 'unknown'}</span>.
+          {#if !canLiftDecisions}
+            Lifting it needs an administrator.
+          {/if}
+        </p>
+      {/if}
 
       {#if !host && group.hosts.length}
         <div class="hosts">
@@ -182,6 +247,49 @@
       {/if}
     </div>
   {/each}
+
+  {#if unmatchedBans.length > 0}
+    <div class="source is-banned">
+      <div class="source-head">
+        <span class="addr">Blocked, with nothing matched here</span>
+        <span class="requests">{unmatchedBans.length}</span>
+      </div>
+      <p class="ban-note">
+        These addresses cannot reach this application either — a ban is by address and applies
+        across the worker — but what triggered them happened somewhere else, so there is nothing
+        here to disable. Lifting one is the only remedy.
+      </p>
+      <table class="rules">
+        <thead><tr><th>Address</th><th>Reason</th><th class="num">Expires in</th><th></th></tr></thead>
+        <tbody>
+          {#each unmatchedBans as ban}
+            <tr>
+              <td>
+                <span class="mono rule-id">{ban.value}</span>
+                {#if ban.country || ban.asName}
+                  <span class="note">{[ban.country, ban.asName].filter(Boolean).join(' · ')}</span>
+                {/if}
+              </td>
+              <td>{ban.reason || '—'}</td>
+              <td class="num">{ban.duration || '—'}</td>
+              <td class="action">
+                {#if canLiftDecisions && onLiftDecision}
+                  <button
+                    class="btn-disable btn-disable--scoped"
+                    disabled={busyDecision === ban.id}
+                    onclick={() => onLiftDecision(ban)}
+                    title={`Lift the ban on ${ban.value} across this whole worker`}
+                  >{busyDecision === ban.id ? 'Lifting…' : 'Unblock'}</button>
+                {:else}
+                  <span class="cannot">needs an admin</span>
+                {/if}
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  {/if}
 {/if}
 
 <style>
@@ -198,6 +306,23 @@
     border-bottom: 1px solid var(--border-subtle);
   }
   .addr { font-size: 13px; color: var(--text-primary); font-weight: 600; }
+  /* A blocked source is the one thing on this page that is happening *now*, so
+     it gets the only strong colour. Red, not amber: amber already means "this
+     rule is machinery you cannot disable", and the two must not be confused. */
+  .is-banned { border-color: color-mix(in srgb, var(--red, #f85149) 35%, var(--border-default)); }
+  .ban-badge {
+    padding: 1px 7px; border-radius: 3px; font-size: 10px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.04em;
+    color: var(--red-text, #f85149);
+    background: color-mix(in srgb, var(--red, #f85149) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--red, #f85149) 35%, transparent);
+  }
+  .ban-note {
+    margin: 0; padding: 8px 12px; font-size: 11px; line-height: 1.5;
+    color: var(--text-secondary);
+    background: color-mix(in srgb, var(--red, #f85149) 7%, transparent);
+    border-bottom: 1px solid var(--border-subtle);
+  }
   .origin { font-size: 11px; color: var(--text-muted); }
   .requests { margin-left: auto; font-size: 11px; color: var(--text-muted); }
   .hosts { padding: 6px 12px 0; display: flex; gap: 6px; flex-wrap: wrap; }

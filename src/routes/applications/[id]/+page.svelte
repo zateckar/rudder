@@ -449,6 +449,48 @@
     }
   }
 
+  /**
+   * Lift a ban, through the worker endpoint that already owns the action.
+   *
+   * A decision is worker-wide, so this is not scoped to the application the way
+   * a rule exclusion is — `requireWorker` keeps it to admins, and the page only
+   * offers the button when the server said the viewer is one.
+   */
+  let liftingDecision = $state<number | null>(null);
+
+  async function liftDecision(decision: { id: number; value: string; reason: string }) {
+    if (!confirm(
+      `Unblock ${decision.value}?\n\n` +
+      `The ban is lifted across this whole worker, not just this application. ` +
+      `CrowdSec re-applies it if the same behaviour repeats.`,
+    )) return;
+
+    appsecMessage = '';
+    appsecError = false;
+    liftingDecision = decision.id;
+    try {
+      const res = await fetch(
+        `/api/workers/${appsec.workerId}/crowdsec?decision=${decision.id}`,
+        { method: 'DELETE' },
+      );
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || !body.ok) {
+        appsecError = true;
+        appsecMessage = body.error || body.message || `Could not unblock ${decision.value}.`;
+      } else {
+        appsecMessage = `${decision.value} unblocked.`;
+      }
+    } catch (e: any) {
+      appsecError = true;
+      appsecMessage = e.message;
+    } finally {
+      liftingDecision = null;
+      // Re-read rather than splice the row out: the list is the worker's answer,
+      // not ours, and a lift that half-worked should still show as blocked.
+      await loadAppsec();
+    }
+  }
+
   $effect(() => {
     if (activeTab === 'firewall' && appsec === null && !appsecLoading) loadAppsec();
   });
@@ -2062,12 +2104,22 @@
         highest count against an address is the one to look at</strong> — check the paths it
         matched, and if that is traffic your application is supposed to serve, disable it here.
       </p>
+      <p class="help-text">
+        An address marked <strong>blocked</strong> is being turned away right now, from this
+        application and every other one on the worker. Disabling the rule that banned it stops it
+        happening again but does not lift the ban already in force.
+      </p>
 
       {#if appsec === null}
         <p class="empty">{appsecLoading ? 'Reading the firewall…' : 'Not loaded.'}</p>
       {:else if appsec.error}
         <p class="error">{appsec.error}</p>
       {:else}
+        {#if appsec.decisionsError}
+          <!-- Kept separate from the matches error: two reads, and one failing
+               must not make the other look answered. -->
+          <p class="error">Active blocks could not be read: {appsec.decisionsError}</p>
+        {/if}
         <AppsecMatches
           sources={appsec.sources}
           host={data.application.domain ?? undefined}
@@ -2075,6 +2127,10 @@
           onExclude={excludeAppsecRule}
           busyRule={excludingRule}
           disabledRules={appsec.disabledRules ?? []}
+          decisions={appsec.decisions ?? []}
+          canLiftDecisions={appsec.canLiftDecisions ?? false}
+          onLiftDecision={liftDecision}
+          busyDecision={liftingDecision}
         />
       {/if}
 

@@ -2117,6 +2117,10 @@
             canExclude={true}
             onExclude={excludeRule}
             busyRule={excludingRule}
+            decisions={crowdsec.decisionsAvailable ? crowdsec.decisions : []}
+            canLiftDecisions={true}
+            onLiftDecision={removeDecision}
+            busyDecision={removingDecision}
           />
           {#if ruleMessage}
             <p class={ruleError ? 'error' : 'help-text'}>{ruleMessage}</p>

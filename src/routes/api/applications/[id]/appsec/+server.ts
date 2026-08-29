@@ -7,10 +7,12 @@ import { requireApplication, route } from '$lib/server/auth';
 import { applicationHostnames, parseAppsecRules } from '$lib/server/appsec';
 import { withPodman } from '$lib/server/podman-client';
 import {
+  decisionsFromExec,
   findCrowdsecContainer,
   groupAppsecBySource,
   parseAppsecAlerts,
   type AppsecSourceGroup,
+  type CrowdsecDecision,
 } from '$lib/server/crowdsec';
 
 /**
@@ -58,6 +60,8 @@ export const GET: RequestHandler = route(async (event) => {
   }
 
   let sources: AppsecSourceGroup[] = [];
+  let decisions: CrowdsecDecision[] = [];
+  let decisionsError = '';
   let error = '';
 
   try {
@@ -65,6 +69,7 @@ export const GET: RequestHandler = route(async (event) => {
       const container = await findCrowdsecContainer(client);
       if (!container) {
         error = 'CrowdSec is not running on this worker.';
+        decisionsError = error;
         return;
       }
 
@@ -79,12 +84,31 @@ export const GET: RequestHandler = route(async (event) => {
         // Distinct from "nothing matched". Saying "all clear" without an answer
         // is the mistake this whole area has already made once.
         error = 'Could not read WAF matches from CrowdSec on this worker.';
-        return;
+      } else {
+        sources = groupAppsecBySource(rows, hosts);
       }
-      sources = groupAppsecBySource(rows, hosts);
+
+      // Active bans, on the same connection.
+      //
+      // Every one of them applies to this application: a decision is by source
+      // address across the whole worker, so an address banned while probing
+      // some other application is an address that cannot reach this one either.
+      // Matches say what the WAF noticed; decisions say who is actually being
+      // turned away, and an application owner asking "why can't this user reach
+      // us" needs the second, not the first.
+      const read = decisionsFromExec(
+        await client.execContainerHttp(
+          container.Id,
+          ['cscli', 'decisions', 'list', '-o', 'json'],
+          { attachStdout: true, attachStderr: true, tty: false },
+        ),
+      );
+      decisions = read.decisions;
+      decisionsError = read.error ?? '';
     });
   } catch (err: any) {
     error = `Could not reach the worker: ${err?.message ?? String(err)}`;
+    decisionsError = error;
   }
 
   // What is already off, so the page can say so. Alerts are historical: a rule
@@ -94,6 +118,16 @@ export const GET: RequestHandler = route(async (event) => {
   return json({
     sources,
     disabledRules: parseAppsecRules(application.appsecDisabledRules).map(String),
+    decisions,
+    // Kept apart from `error`: the matches and the bans are two reads, and one
+    // failing should not blank the other. A page that showed no bans because
+    // the *alerts* query failed would be reassuring and wrong.
+    decisionsAvailable: decisionsError === '',
+    decisionsError,
+    // Lifting a ban is worker-wide, so it stays an admin action. The page needs
+    // to know in order to offer it, rather than showing a button that 403s.
+    canLiftDecisions: event.locals.auth?.user.role === 'admin',
+    workerId: worker.id,
     available: error === '',
     error,
   });
