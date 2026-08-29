@@ -507,8 +507,18 @@ Three limits worth knowing before you rely on it:
   reported as a deploy note and on the application page, not silently dropped.
 - **HTTP services only.** Every entryPoint terminates TLS and speaks HTTP, so a
   database or a game server published here gets a router that cannot work.
-- **Existing workers need re-provisioning** to bind 1443–4443, and a client
-  network that blocks non-standard HTTPS ports will not reach them.
+- **Existing workers need re-provisioning** to bind 1443–4443. Traefik reads
+  entryPoints from its *static* configuration, so a worker that has not been
+  re-provisioned since this landed listens on 443 alone — `ss -lntp | grep 1443`
+  on the worker is the check.
+- **The cloud network security group has to allow them too.** Rudder's nftables
+  rule is the inner of two gates; an Azure NSG or AWS security group in front of
+  the VM drops what it does not allow before nftables ever sees it. Provisioning
+  cannot set that rule and says so in its output. The symptom when it is missing
+  is a **timed-out** connection rather than a refused one, which reads like a
+  broken application instead of a closed port.
+- A client network that blocks non-standard HTTPS ports will not reach them
+  either.
 
 Where wildcard DNS is available, separate hostnames remain the better answer: a
 multi-service compose file already gets `<app>-<service>.<base>` per service, all

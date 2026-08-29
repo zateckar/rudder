@@ -457,7 +457,7 @@ step_traefik_config() {
 
   mkdir -p /etc/traefik/dynamic /etc/traefik/acme /var/log/traefik
   echo "{{TRAEFIK_YML_B64}}" | base64 -d > /etc/traefik/traefik.yml
-  echo "traefik.yml written (port 443 only, TLS-ALPN-01, CrowdSec plugin)"
+  echo "traefik.yml written (443 + 1443-4443, TLS-ALPN-01, CrowdSec plugin)"
   sed -i "s/BOUNCER_VERSION_PLACEHOLDER/${BOUNCER_VERSION}/g" /etc/traefik/traefik.yml
   sed -i "s/OIDC_VERSION_PLACEHOLDER/${OIDC_VERSION}/g" /etc/traefik/traefik.yml
   echo "traefik.yml updated with latest plugin versions"
@@ -814,6 +814,14 @@ if nft list table inet rudder &>/dev/null; then
 else
   echo "Exposed: 22 (SSH), 443 + 1443-4443 (Traefik HTTPS entryPoints) — NOT enforced, no host firewall"
 fi
+# The host firewall is only the inner of two gates. A cloud network security
+# group in front of the VM drops what it does not allow *before* nftables sees
+# it, and the symptom is a connection that times out rather than one that is
+# refused — which reads like a broken application, not like a closed port.
+# Nothing here can open it, so it is said rather than assumed.
+echo "NOTE: 1443-4443 also have to be allowed in the cloud network security group"
+echo "      in front of this VM (Azure NSG, AWS security group, …). Rudder's own"
+echo "      firewall accepts them; a rule outside the VM cannot be set from here."
 echo "Internal: 8080 (Podman API), 8081/7422 (CrowdSec), 9100 (metrics), 8082 (Traefik Prometheus) — 127.0.0.1 only"
 echo "WAF: CrowdSec AppSec enabled on all applications via Traefik plugin"
 # This line used to claim mTLS unconditionally, including on the runs that
