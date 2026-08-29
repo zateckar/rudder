@@ -1,47 +1,119 @@
 /**
- * Reading CrowdSec's decisions, and the distinction the panel got wrong.
+ * Reading CrowdSec's decisions.
  *
- * "No decisions" and "could not ask" look identical once both are an empty
- * array, and the page rendered that as "all clear". A worker with three live
- * bans — one of them on the operator reading the page — reported itself clear,
- * which is the one answer that stops someone from looking further.
+ * Two mistakes are recorded here because both shipped. The first: reporting an
+ * empty list when the question could not be asked, which the page rendered as
+ * "all clear" while three bans were live — one of them on the operator reading
+ * it. The second: reading `cscli decisions list -o json` as a flat list of
+ * decisions when it is a list of *alerts*, each carrying the decisions it
+ * produced. `scenario` exists at both levels, so that version looked half-right —
+ * Reason filled in, everything else blank — and the id it took was the alert's,
+ * which would have deleted the wrong row.
  */
 import { describe, expect, test } from 'bun:test';
 import { parseDecisions } from './crowdsec';
 
-/** A row shaped like `cscli decisions list -o json` really emits. */
-const ROW = {
-  id: 19983302,
-  origin: 'crowdsec',
-  scope: 'Ip',
-  value: '178.209.129.231',
-  scenario: 'crowdsecurity/crowdsec-appsec-outofband',
-  type: 'ban',
-  duration: '3h42m58s',
+/** An alert shaped the way a live worker really emits it. */
+const ALERT = {
+  id: 10657,
+  scenario: 'crowdsecurity/http-probing',
+  source: {
+    as_name: 'GOOGLE-CLOUD-PLATFORM',
+    as_number: '396982',
+    cn: 'IT',
+    ip: '34.17.159.73',
+    scope: 'Ip',
+    value: '34.17.159.73',
+  },
+  decisions: [
+    {
+      duration: '3h58m7s',
+      id: 19998305,
+      origin: 'crowdsec',
+      scenario: 'crowdsecurity/http-probing',
+      scope: 'Ip',
+      simulated: false,
+      type: 'ban',
+      value: '34.17.159.73',
+    },
+  ],
+  events: [{ meta: [{ key: 'http_path', value: '/www/.git/config' }] }],
 };
 
 describe('parseDecisions', () => {
-  test('maps a decision onto what the table renders', () => {
-    expect(parseDecisions(JSON.stringify([ROW]), 0)).toEqual([
+  test('fills every column the table shows', () => {
+    // The regression this exists for: Reason alone populated, because it is the
+    // one field that also exists on the alert.
+    expect(parseDecisions(JSON.stringify([ALERT]), 0)).toEqual([
       {
-        id: 19983302,
+        id: 19998305,
         source: 'crowdsec',
         scope: 'Ip',
-        value: '178.209.129.231',
-        reason: 'crowdsecurity/crowdsec-appsec-outofband',
+        value: '34.17.159.73',
+        reason: 'crowdsecurity/http-probing',
         type: 'ban',
-        duration: '3h42m58s',
+        duration: '3h58m7s',
+        country: 'IT',
+        asName: 'GOOGLE-CLOUD-PLATFORM',
       },
     ]);
   });
 
-  test('keeps the id, because it is what lifts the ban', () => {
-    expect(parseDecisions(JSON.stringify([ROW]), 0)![0].id).toBe(19983302);
+  test('takes the decision id, not the alert id', () => {
+    // Both are called `id` at different levels of one document. The alert's is a
+    // plausible number that `cscli decisions delete --id` will not match.
+    const [d] = parseDecisions(JSON.stringify([ALERT]), 0)!;
+    expect(d.id).toBe(19998305);
+    expect(d.id).not.toBe(ALERT.id);
+  });
+
+  test('flattens several decisions from one alert', () => {
+    const alert = {
+      ...ALERT,
+      decisions: [
+        { ...ALERT.decisions[0], id: 1, value: '10.0.0.1' },
+        { ...ALERT.decisions[0], id: 2, value: '10.0.0.2' },
+      ],
+    };
+    expect(parseDecisions(JSON.stringify([alert]), 0)!.map((d) => [d.id, d.value])).toEqual([
+      [1, '10.0.0.1'],
+      [2, '10.0.0.2'],
+    ]);
+  });
+
+  test('an alert that banned nothing contributes no rows', () => {
+    expect(parseDecisions(JSON.stringify([{ ...ALERT, decisions: [] }]), 0)).toEqual([]);
+  });
+
+  test('falls back to the alert source when a decision omits its own', () => {
+    const alert = { ...ALERT, decisions: [{ id: 5, origin: 'cscli', type: 'ban', duration: '1h' }] };
+    const [d] = parseDecisions(JSON.stringify([alert]), 0)!;
+    expect(d.value).toBe('34.17.159.73');
+    expect(d.reason).toBe('crowdsecurity/http-probing');
+  });
+
+  test('reads a flat decision list too, recognised by shape not by version', () => {
+    // So a cscli upgrade that changes the envelope cannot quietly empty the
+    // table — the failure mode this whole file exists because of.
+    const flat = [{ id: 42, origin: 'cscli', scope: 'Ip', value: '1.2.3.4', type: 'ban', duration: '4h', scenario: 'manual' }];
+    expect(parseDecisions(JSON.stringify(flat), 0)).toEqual([
+      {
+        id: 42,
+        source: 'cscli',
+        scope: 'Ip',
+        value: '1.2.3.4',
+        reason: 'manual',
+        type: 'ban',
+        duration: '4h',
+        country: '',
+        asName: '',
+      },
+    ]);
   });
 
   test('`null` from cscli is an answer meaning none, not a failure', () => {
-    // This is what an actually-clear worker prints, and it has to reach the page
-    // as "all clear" rather than as "could not read".
+    // What an actually-clear worker prints. It has to reach the page as
+    // "all clear" rather than as "could not read".
     expect(parseDecisions('null', 0)).toEqual([]);
     expect(parseDecisions('', 0)).toEqual([]);
     expect(parseDecisions('  \n', 0)).toEqual([]);
@@ -49,27 +121,14 @@ describe('parseDecisions', () => {
 
   test('a non-zero exit is no answer at all, and says so', () => {
     // Distinct from `[]`. The caller turns null into "could not read decisions"
-    // and an empty array into "all clear"; collapsing them is the bug.
+    // and an empty array into "all clear"; collapsing them is the original bug.
     expect(parseDecisions('', 1)).toBeNull();
-    expect(parseDecisions(JSON.stringify([ROW]), 1)).toBeNull();
+    expect(parseDecisions(JSON.stringify([ALERT]), 1)).toBeNull();
   });
 
   test('unparseable or unexpected output is no answer either', () => {
     for (const bad of ['not json', '{"error":"nope"}', '"string"', '42']) {
       expect(parseDecisions(bad, 0), bad).toBeNull();
     }
-  });
-
-  test('a row missing fields degrades to blanks rather than losing the row', () => {
-    // A decision that renders oddly is still a decision someone has to see.
-    const [d] = parseDecisions(JSON.stringify([{ id: 7 }]), 0)!;
-    expect(d.id).toBe(7);
-    expect(d.value).toBe('');
-    expect(d.reason).toBe('');
-  });
-
-  test('several decisions all survive', () => {
-    const rows = [ROW, { ...ROW, id: 2, value: '10.0.0.1' }, { ...ROW, id: 3, value: '10.0.0.2' }];
-    expect(parseDecisions(JSON.stringify(rows), 0)!.map((d) => d.id)).toEqual([19983302, 2, 3]);
   });
 });

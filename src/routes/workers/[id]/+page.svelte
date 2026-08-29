@@ -1977,12 +1977,21 @@
             takes effect immediately; CrowdSec will re-apply it if the same behaviour repeats.
           </p>
           <table class="mini-table">
-            <thead><tr><th>Source</th><th>Address</th><th>Reason</th><th>Action</th><th>Expires in</th><th></th></tr></thead>
+            <thead><tr><th>Address</th><th>Origin</th><th>Reason</th><th>Action</th><th>Expires in</th><th></th></tr></thead>
             <tbody>
               {#each crowdsec.decisions as d}
                 <tr>
+                  <td>
+                    <span class="mono small">{d.value || '—'}</span>
+                    <!-- Country and network are what tell your own office
+                         address apart from a bot in someone's cloud. -->
+                    {#if d.country || d.asName}
+                      <span class="decision-origin">
+                        {[d.country, d.asName].filter(Boolean).join(' · ')}
+                      </span>
+                    {/if}
+                  </td>
                   <td>{d.source || '—'}</td>
-                  <td class="mono small">{d.scope ? `${d.scope}:${d.value}` : d.value || '—'}</td>
                   <td>{d.reason || '—'}</td>
                   <td>{d.type || '—'}</td>
                   <td>{d.duration || '—'}</td>
@@ -2703,6 +2712,10 @@
     margin-bottom: 6px; font-family: var(--font-mono);
   }
 
+  /* Secondary to the address it sits under, not a column of its own. */
+  .decision-origin {
+    display: block; font-size: 10px; color: var(--text-muted); margin-top: 2px;
+  }
   .mini-table th {
     text-align: left; padding: 8px 10px; font-size: 10px; font-weight: 600;
     color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em;

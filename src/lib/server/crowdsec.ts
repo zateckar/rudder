@@ -9,7 +9,13 @@
 
 /** One row of `cscli decisions list -o json`, reduced to what the tab shows. */
 export interface CrowdsecDecision {
-  /** `cscli decisions delete --id` takes this. */
+  /**
+   * The **decision** id, which is what `cscli decisions delete --id` takes.
+   *
+   * Not the alert id. They sit at different levels of the same document and are
+   * both called `id`, so reading the outer one produces a plausible number that
+   * deletes the wrong thing or nothing at all.
+   */
   id: number;
   /** `crowdsec`, `cscli`, `CAPI`… — who decided. */
   source: string;
@@ -21,6 +27,21 @@ export interface CrowdsecDecision {
   /** `ban`, `captcha`… */
   type: string;
   duration: string;
+  /** Two-letter country of the source address, when CrowdSec resolved one. */
+  country: string;
+  /** Autonomous system name, e.g. `GOOGLE-CLOUD-PLATFORM`. */
+  asName: string;
+}
+
+/** Alert-level fields worth carrying down onto each of its decisions. */
+function alertContext(alert: any): { scope: string; value: string; country: string; asName: string } {
+  const source = alert?.source ?? {};
+  return {
+    scope: String(source.scope ?? ''),
+    value: String(source.value ?? source.ip ?? ''),
+    country: String(source.cn ?? ''),
+    asName: String(source.as_name ?? ''),
+  };
 }
 
 /**
@@ -44,20 +65,60 @@ export function parseDecisions(stdout: string, exitCode: number): CrowdsecDecisi
     const parsed = JSON.parse(text);
     if (!Array.isArray(parsed)) return null;
 
-    // A row missing fields still renders, because a decision that displays
-    // oddly is one somebody nonetheless has to see.
-    return parsed.map((d: any) => ({
-      id: Number(d?.id ?? 0),
-      source: String(d?.origin ?? ''),
-      scope: String(d?.scope ?? ''),
-      value: String(d?.value ?? ''),
-      reason: String(d?.scenario ?? ''),
-      type: String(d?.type ?? ''),
-      duration: String(d?.duration ?? ''),
-    }));
+    // Despite the command's name, this is a list of *alerts*, each carrying the
+    // decisions it produced. `scenario` exists at both levels, which is what made
+    // the first version look half-right: Reason filled in while Source, Address,
+    // Action and Expiry stayed blank, and the id it read was the alert's rather
+    // than the decision's — a plausible number that deletes the wrong row.
+    const rows: CrowdsecDecision[] = [];
+    for (const alert of parsed) {
+      const context = alertContext(alert);
+      const nested = Array.isArray(alert?.decisions) ? alert.decisions : null;
+
+      if (nested === null) {
+        // Some `cscli` versions, and `-o json` on a decisions-only endpoint,
+        // return the decisions flat. Recognised by shape rather than by version
+        // so an upgrade cannot quietly empty this table.
+        if (alert?.type === undefined && alert?.value === undefined) continue;
+        rows.push(decisionRow(alert, context, alert?.scenario));
+        continue;
+      }
+
+      // An alert with no decisions fired without banning anything: nothing to
+      // show here and nothing to lift.
+      for (const decision of nested) {
+        rows.push(decisionRow(decision, context, alert?.scenario));
+      }
+    }
+    return rows;
   } catch {
     return null;
   }
+}
+
+/**
+ * One decision as a row. Missing fields become blanks rather than dropping the
+ * row — a decision that displays oddly is one somebody nonetheless has to see.
+ */
+function decisionRow(
+  d: any,
+  context: { scope: string; value: string; country: string; asName: string },
+  alertScenario: unknown,
+): CrowdsecDecision {
+  return {
+    id: Number(d?.id ?? 0),
+    source: String(d?.origin ?? ''),
+    // The decision's own scope/value when it has them; the alert's source
+    // otherwise. They agree in practice, and the fallback is what keeps the
+    // address column populated if that ever stops being true.
+    scope: String(d?.scope ?? context.scope ?? ''),
+    value: String(d?.value ?? context.value ?? ''),
+    reason: String(d?.scenario ?? alertScenario ?? ''),
+    type: String(d?.type ?? ''),
+    duration: String(d?.duration ?? ''),
+    country: context.country,
+    asName: context.asName,
+  };
 }
 
 /** The CrowdSec container on this worker, or null. */
