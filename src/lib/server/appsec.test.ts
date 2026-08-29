@@ -54,6 +54,23 @@ describe('parseRuleList', () => {
     expect(parseRuleList('942100, tag:')).toBeNull();
   });
 
+  test('reads a rule scoped to a source address', () => {
+    expect(parseRuleList('930100@203.0.113.4, 942100')).toEqual(['930100@203.0.113.4', 942100]);
+    expect(parseRuleList('tag:attack-lfi@10.0.0.0/8')).toEqual(['tag:attack-lfi@10.0.0.0/8']);
+  });
+
+  test('refuses a source that is not an address or range', () => {
+    // Anything else would be interpolated into an expr filter.
+    for (const bad of ['930100@nope', '930100@1.2.3', '930100@999.1.1.1', "930100@' or '", '930100@1.2.3.4/33', '930100@']) {
+      expect(parseRuleList(bad), bad).toBeNull();
+    }
+  });
+
+  test('accepts IPv6 and CIDR forms', () => {
+    expect(parseRuleList('930100@2001:db8::1')).toEqual(['930100@2001:db8::1']);
+    expect(parseRuleList('930100@203.0.113.0/24')).toEqual(['930100@203.0.113.0/24']);
+  });
+
   test('rejects rather than silently dropping a malformed entry', () => {
     // The whole point: a typo must be reported, not read as "exclude nothing".
     // Someone who mistypes a rule id and is told nothing will believe the rule
@@ -173,6 +190,78 @@ describe('generateAppsecConfig', () => {
     expect(yaml).toContain('RemoveOutBandRuleByID(942100)');
     expect(yaml).toContain('RemoveOutBandRuleByTag("attack-lfi")');
     expect(yaml).toContain('RemoveOutBandRuleByName("crowdsecurity/vpatch-git-config")');
+  });
+
+  describe('scoped to a source address', () => {
+    // Verified on a live worker: with `req.RemoteAddr == '<the real source>'`
+    // the excluded rule stopped firing, and with any other address it fired as
+    // normal. `IpInRange` behaves the same way for a range and correctly does
+    // not match outside it.
+    test('narrows the filter to one address', () => {
+      const yaml = generateAppsecConfig([
+        { host: 'app.example.com', rules: ['930100@203.0.113.4'] },
+      ]);
+      expect(yaml).toContain("req.RemoteAddr == '203.0.113.4'");
+      expect(yaml).toContain('RemoveOutBandRuleByID(930100)');
+    });
+
+    test('uses IpInRange for a CIDR, which is a different expr call', () => {
+      const yaml = generateAppsecConfig([
+        { host: 'app.example.com', rules: ['930100@203.0.113.0/24'] },
+      ]);
+      expect(yaml).toContain("IpInRange(req.RemoteAddr, '203.0.113.0/24')");
+      expect(yaml).not.toContain("req.RemoteAddr == '203.0.113.0/24'");
+    });
+
+    test('parenthesises the host clause', () => {
+      // The host clause is itself an `||`. Unparenthesised, `a || b && c` binds
+      // as `a || (b && c)` and the exclusion would apply to every request on
+      // port 443 whoever sent it — the exact opposite of narrowing, and silent.
+      const yaml = generateAppsecConfig([
+        { host: 'app.example.com', rules: ['930100@203.0.113.4'] },
+      ]);
+      const filter = yaml.split('\n').find((l) => l.includes('filter:'))!;
+      expect(filter).toContain("(req.Host == 'app.example.com' || req.Host startsWith 'app.example.com:')");
+      expect(filter.indexOf('&&')).toBeGreaterThan(filter.indexOf(')'));
+    });
+
+    test('an all-traffic and a scoped exclusion of one rule are separate blocks', () => {
+      // They are different exclusions with different filters, so they cannot
+      // share an `apply` list — one would silently take the other's scope.
+      const yaml = generateAppsecConfig([
+        { host: 'app.example.com', rules: [930100, '942100@203.0.113.4'] },
+      ]);
+      const filters = yaml.split('\n').filter((l) => l.includes('filter:'));
+      expect(filters).toHaveLength(2);
+      expect(filters.filter((f) => f.includes('RemoteAddr'))).toHaveLength(1);
+    });
+
+    test('several rules for one address share one block', () => {
+      const yaml = generateAppsecConfig([
+        { host: 'app.example.com', rules: ['930100@203.0.113.4', '942100@203.0.113.4'] },
+      ]);
+      expect(yaml.split('\n').filter((l) => l.includes('filter:'))).toHaveLength(1);
+      expect(yaml).toContain('RemoveOutBandRuleByID(930100)');
+      expect(yaml).toContain('RemoveOutBandRuleByID(942100)');
+    });
+
+    test('a tag can be scoped too', () => {
+      const yaml = generateAppsecConfig([
+        { host: 'app.example.com', rules: ['tag:attack-lfi@203.0.113.4'] },
+      ]);
+      expect(yaml).toContain('RemoveOutBandRuleByTag("attack-lfi")');
+      expect(yaml).toContain("req.RemoteAddr == '203.0.113.4'");
+    });
+
+    test('a source that is not an address never reaches the filter', () => {
+      // The value is interpolated into a single-quoted expr string, so this is
+      // what keeps a quote out of it.
+      const yaml = generateAppsecConfig([
+        { host: 'app.example.com', rules: ["930100@' || true || '", '942100@203.0.113.4'] },
+      ]);
+      expect(yaml).not.toContain('true');
+      expect(yaml).toContain('942100');
+    });
   });
 
   test('never emits a hook for the anomaly gate, whatever the row says', () => {

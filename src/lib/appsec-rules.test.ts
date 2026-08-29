@@ -11,8 +11,11 @@ import { describe, expect, test } from 'bun:test';
 import {
   firstRuleRefusal,
   isAnomalyGate,
+  isValidSource,
+  joinRuleSource,
   metaRuleNote,
   ruleExclusionRefusal,
+  splitRuleSource,
   tagOf,
 } from './appsec-rules';
 
@@ -128,6 +131,63 @@ describe('tag exclusions', () => {
     // Both contain slashes; only the prefix separates them.
     expect(tagOf('crowdsecurity/vpatch-git-config')).toBeNull();
     expect(tagOf(942100)).toBeNull();
+  });
+});
+
+describe('source-scoped exclusions', () => {
+  test('splits a rule from the address it is scoped to', () => {
+    expect(splitRuleSource('930100@203.0.113.4')).toEqual({
+      rule: '930100',
+      source: '203.0.113.4',
+    });
+    expect(splitRuleSource('tag:attack-lfi@10.0.0.0/8')).toEqual({
+      rule: 'tag:attack-lfi',
+      source: '10.0.0.0/8',
+    });
+    // No `@` means all traffic, which is the common case.
+    expect(splitRuleSource(930100)).toEqual({ rule: '930100', source: null });
+  });
+
+  test('a scoped signature is allowed', () => {
+    expect(ruleExclusionRefusal('930100@203.0.113.4')).toBeNull();
+    expect(ruleExclusionRefusal('tag:attack-lfi@203.0.113.0/24')).toBeNull();
+  });
+
+  test('narrowing to one address does not make the anomaly gate excludable', () => {
+    // `949110@1.2.3.4` reads as a narrow exclusion but means "no CRS at all for
+    // this source" — an allowlist entry wearing a rule id. Whether an address
+    // should be trusted outright is a different decision from which rules
+    // misfire, and CrowdSec allowlists are where it belongs.
+    expect(ruleExclusionRefusal('949110@203.0.113.4')).toContain('cannot be excluded');
+    expect(ruleExclusionRefusal('tag:OWASP_CRS@203.0.113.4')).toContain('cannot be excluded');
+  });
+
+  test('refuses a source that is not an address, naming the right form', () => {
+    const refusal = ruleExclusionRefusal('930100@not-an-ip');
+    expect(refusal).toContain('not an address or range');
+    expect(refusal).toContain('930100@203.0.113.4');
+  });
+
+  test('validates addresses strictly, because the value reaches an expr filter', () => {
+    expect(isValidSource('203.0.113.4')).toBe(true);
+    expect(isValidSource('203.0.113.0/24')).toBe(true);
+    expect(isValidSource('2001:db8::1')).toBe(true);
+    expect(isValidSource('2001:db8::/32')).toBe(true);
+
+    expect(isValidSource("' || true || '")).toBe(false);
+    expect(isValidSource('203.0.113.999')).toBe(false);
+    expect(isValidSource('203.0.113.4/33')).toBe(false);
+    expect(isValidSource('203.0.113')).toBe(false);
+    expect(isValidSource('')).toBe(false);
+  });
+
+  test('round-trips through join and split', () => {
+    expect(splitRuleSource(joinRuleSource(930100, '203.0.113.4'))).toEqual({
+      rule: '930100',
+      source: '203.0.113.4',
+    });
+    expect(joinRuleSource(930100, null)).toBe('930100');
+    expect(joinRuleSource(930100)).toBe('930100');
   });
 });
 

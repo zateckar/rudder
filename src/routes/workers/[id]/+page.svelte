@@ -423,25 +423,27 @@
    * wrong one, since the rule a decision names is the first in the chain rather
    * than the one that scored.
    */
-  async function excludeRule(host: string, rule: string) {
+  async function excludeRule(host: string, rule: string, source?: string) {
     if (!host) return;
 
     // Anomaly-gate and setup rules are not rendered as buttons at all, so this
     // is unreachable from the UI — the endpoint refuses them regardless.
-    if (!confirm(
-      `Stop rule ${rule} firing for ${host}?\n\n` +
-      `It stops protecting that application against everyone, on every port it serves. ` +
-      `CrowdSec restarts on this worker within a minute.`,
-    )) return;
+    const scope = source
+      ? `only for requests from ${source}. The rule keeps protecting that application ` +
+        `against every other address.`
+      : `for all traffic. It stops protecting that application against everyone, on every ` +
+        `port it serves.`;
+    if (!confirm(`Stop rule ${rule} firing for ${host}?\n\nDisabled ${scope}\n\n` +
+      `CrowdSec restarts on this worker within a minute.`)) return;
 
     ruleMessage = '';
     ruleError = false;
-    excludingRule = `${host}|${rule}`;
+    excludingRule = `${host}|${rule}${source ? `@${source}` : ''}`;
     try {
       const res = await fetch('/api/applications/appsec-rules', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ host, rule }),
+        body: JSON.stringify({ host, rule, source }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok || !body.ok) {
@@ -2086,6 +2088,11 @@
             what to disable</strong> — a decision names the first rule in the chain, which is
             usually a CRS initialisation rule that does nothing when switched off. The rule with
             the highest count against an address is the one breaking it.
+          </p>
+          <p class="help-text">
+            Each rule can be disabled <strong>for all traffic</strong> or <strong>only for this
+            address</strong>. Prefer the second when one caller is the only thing tripping it: the
+            rule keeps protecting the application against everyone else.
           </p>
           <p class="help-text">
             An application's own page shows the same thing for that application alone, and its

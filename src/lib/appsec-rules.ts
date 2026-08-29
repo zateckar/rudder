@@ -48,6 +48,80 @@ export function tagOf(entry: string | number): string | null {
 }
 
 /**
+ * Separates a rule from the source address it is excluded for:
+ * `930100@178.209.129.231`.
+ *
+ * Safe as a separator because `@` appears in no CRS id, no CrowdSec rule name
+ * and no CRS tag — the character set for all three is letters, digits and
+ * `._/-`.
+ */
+export const SOURCE_SEPARATOR = '@';
+
+/**
+ * An IPv4 or IPv6 address, or a CIDR range. Nothing else.
+ *
+ * This value is interpolated into a single-quoted expr string in the generated
+ * AppSec configuration, so the validation is what keeps a quote out of it. Only
+ * hex digits, dots, colons and one slash can pass, none of which can end the
+ * string early.
+ */
+const IPV4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+const IPV6 = /^[0-9A-Fa-f:]+$/;
+
+export function isValidSource(value: string): boolean {
+  const [addr, ...rest] = value.split('/');
+  if (rest.length > 1) return false;
+
+  const v4 = IPV4.exec(addr);
+  if (v4) {
+    if (v4.slice(1).some((o) => Number(o) > 255 || (o.length > 1 && o.startsWith('0')))) {
+      return false;
+    }
+    if (rest.length === 1) {
+      const bits = Number(rest[0]);
+      if (!/^\d{1,2}$/.test(rest[0]) || bits > 32) return false;
+    }
+    return true;
+  }
+
+  // Loose on IPv6 shape and strict on its alphabet: an address CrowdSec
+  // reported is one the engine will match, and the point of the check here is
+  // that nothing which could break out of the quoting gets through.
+  if (addr.includes(':') && IPV6.test(addr)) {
+    if (rest.length === 1) {
+      const bits = Number(rest[0]);
+      if (!/^\d{1,3}$/.test(rest[0]) || bits > 128) return false;
+    }
+    return true;
+  }
+
+  return false;
+}
+
+/** Whether this source is a range rather than a single address. */
+export function isSourceRange(source: string): boolean {
+  return source.includes('/');
+}
+
+/**
+ * `930100@1.2.3.4` → the rule and the address it is scoped to.
+ *
+ * `source` is null for the common case: the rule is excluded for this
+ * application whoever sends the request.
+ */
+export function splitRuleSource(entry: string | number): { rule: string; source: string | null } {
+  const s = String(entry);
+  const at = s.indexOf(SOURCE_SEPARATOR);
+  if (at === -1) return { rule: s, source: null };
+  return { rule: s.slice(0, at), source: s.slice(at + 1) };
+}
+
+/** `930100` + `1.2.3.4` → `930100@1.2.3.4`; a null source gives the rule alone. */
+export function joinRuleSource(rule: string | number, source?: string | null): string {
+  return source ? `${rule}${SOURCE_SEPARATOR}${source}` : String(rule);
+}
+
+/**
  * Tags carried by every rule, or near enough.
  *
  * These are bookkeeping, not attack classes. Every CRS rule carries `OWASP_CRS`
@@ -102,7 +176,22 @@ export function metaRuleNote(ruleId: string | number): string | null {
  * deliberately not expressible as a rule id.
  */
 export function ruleExclusionRefusal(ruleId: string | number): string | null {
-  const id = String(ruleId);
+  const { rule, source } = splitRuleSource(ruleId);
+
+  if (source !== null) {
+    if (!isValidSource(source)) {
+      return (
+        `"${source}" is not an address or range. Scope a rule to a source with ` +
+        `930100@203.0.113.4 or 930100@203.0.113.0/24.`
+      );
+    }
+    // The rule half is judged on its own terms. Narrowing an exclusion to one
+    // address does not make the anomaly gate safe to exclude — it still means
+    // "no CRS for this source", which is an allowlist entry wearing a rule id.
+    return ruleExclusionRefusal(rule);
+  }
+
+  const id = rule;
 
   const tag = tagOf(id);
   if (tag !== null) {

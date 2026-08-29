@@ -10,6 +10,7 @@ import {
   parseRuleList,
   serializeAppsecRules,
 } from '$lib/server/appsec';
+import { joinRuleSource } from '$lib/appsec-rules';
 
 /**
  * POST /api/applications/appsec-rules
@@ -31,12 +32,18 @@ export const POST: RequestHandler = route(async (event) => {
   const body = await event.request.json().catch(() => null);
   const host = typeof body?.host === 'string' ? body.host.trim() : '';
   const rule = typeof body?.rule === 'string' ? body.rule.trim() : String(body?.rule ?? '').trim();
+  // Optional. Present when the exclusion should apply only to requests from one
+  // address, which keeps the rule protecting the application against everyone
+  // else — the narrower of the two scopes the matches table offers.
+  const source = typeof body?.source === 'string' ? body.source.trim() : '';
 
   if (!host) return json({ error: 'A host is required.' }, { status: 400 });
 
   // Through the same parser the form uses, so a rule id that would be refused
   // on the application page cannot get in through this door instead.
-  const parsed = parseRuleList(rule);
+  // Composed before parsing, so `930100@203.0.113.4` goes through exactly the
+  // same validation as a hand-typed entry rather than a looser path of its own.
+  const parsed = parseRuleList(joinRuleSource(rule, source || null));
   if (parsed === null || parsed.length !== 1) {
     return json({ error: 'Exactly one valid rule id or name is required.' }, { status: 400 });
   }

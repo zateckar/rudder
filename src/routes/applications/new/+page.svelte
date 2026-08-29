@@ -636,7 +636,8 @@ stringData:
         <p class="help-text">
           CRS rule numbers, attack-class tags written <code>tag:attack-lfi</code>, CrowdSec rule
           names, or any mix. They apply to this application only, matched on its hostname — on
-          every port it serves.
+          every port it serves. Append <code>@</code> and an address or range to narrow one to a
+          single source: <code>930100@203.0.113.4</code>.
           {#if appType === 'k8s'}
             A <code>kubectl apply</code> carrying
             <code>rudder.dev/appsec-disable-rules</code> overwrites whatever is set here.

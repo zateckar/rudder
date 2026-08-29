@@ -497,7 +497,8 @@
         <p class="help-text">
           CRS rule numbers, attack-class tags written <code>tag:attack-lfi</code>, CrowdSec rule
           names, or any mix. They apply to this application only, matched on its hostname — on
-          every port it serves.
+          every port it serves. Append <code>@</code> and an address or range to narrow one to a
+          single source: <code>930100@203.0.113.4</code>, <code>tag:attack-lfi@203.0.113.0/24</code>.
           {#if app.type === 'k8s'}
             A <code>kubectl apply</code> carrying
             <code>rudder.dev/appsec-disable-rules</code> overwrites whatever is set here.
@@ -510,6 +511,13 @@
           to that class, where a list of numbers would silently stop covering it. Tags every rule
           carries — <code>OWASP_CRS</code>, <code>paranoia-level/1</code>, the
           <code>-multi</code> ones — are refused, for the same reason <code>949110</code> is.
+        </p>
+        <p class="help-text">
+          <strong>Prefer a source when only one caller misfires.</strong> If a partner integration
+          or your own office address is the only thing tripping a rule, scoping it to that address
+          keeps the rule protecting this application against everyone else — which is almost always
+          better than switching it off outright. The Firewall tab offers both as one click each,
+          against the addresses that actually tripped something.
         </p>
       </div>
 

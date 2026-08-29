@@ -409,21 +409,23 @@
     }
   }
 
-  async function excludeAppsecRule(host: string, rule: string) {
-    if (!confirm(
-      `Stop rule ${rule} firing for ${host}?\n\n` +
-      `It stops protecting this application against everyone, on every port it serves. ` +
-      `The change takes effect within a minute.`,
-    )) return;
+  async function excludeAppsecRule(host: string, rule: string, source?: string) {
+    const scope = source
+      ? `only for requests from ${source}. The rule keeps protecting this application ` +
+        `against every other address.`
+      : `for all traffic. It stops protecting this application against everyone, on every ` +
+        `port it serves.`;
+    if (!confirm(`Stop rule ${rule} firing for ${host}?\n\nDisabled ${scope}\n\n` +
+      `The change takes effect within a minute.`)) return;
 
     appsecMessage = '';
     appsecError = false;
-    excludingRule = `${host}|${rule}`;
+    excludingRule = `${host}|${rule}${source ? `@${source}` : ''}`;
     try {
       const res = await fetch('/api/applications/appsec-rules', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ host, rule }),
+        body: JSON.stringify({ host, rule, source }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok || !body.ok) {
@@ -432,7 +434,9 @@
       } else if (body.added === false) {
         appsecMessage = `Rule ${rule} was already disabled for this application.`;
       } else {
-        appsecMessage = `Rule ${rule} disabled. The worker applies it within a minute.`;
+        appsecMessage =
+          `Rule ${rule} disabled${source ? ` for ${source}` : ''}. ` +
+          `The worker applies it within a minute.`;
         // Re-read so the row marks itself disabled. Otherwise it still offers
         // "Disable", which reads as the click having failed.
         await loadAppsec();

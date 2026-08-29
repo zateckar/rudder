@@ -39,16 +39,34 @@
     canExclude = false,
     onExclude,
     busyRule = null,
-    /** Rules already disabled for this application, as strings. */
+    /** Rules already disabled for this application, as stored. */
     disabledRules = [],
   }: {
     sources: SourceGroup[];
     host?: string;
     canExclude?: boolean;
-    onExclude?: (host: string, rule: string) => void;
+    /** `source` narrows the exclusion to one address; omitted means all traffic. */
+    onExclude?: (host: string, rule: string, source?: string) => void;
     busyRule?: string | null;
     disabledRules?: string[];
   } = $props();
+
+  /**
+   * Whether this rule is already off for this group, and at which scope.
+   *
+   * Two independent exclusions can exist for one rule — everywhere, and for one
+   * address — so the row has to say which of the two is in force rather than
+   * collapsing them into "disabled" and leaving the other button looking
+   * available when it is not.
+   */
+  function disabledScope(rule: RuleCount, sourceIp: string): 'all' | 'source' | null {
+    const id = String(rule.id);
+    if (disabledRules.includes(id)) return 'all';
+    if (disabledRules.includes(`${id}@${sourceIp}`)) return 'source';
+    // A range that covers this address is stored as its own entry; without
+    // parsing CIDR in the browser, an exact match is all this can claim.
+    return null;
+  }
 
   /**
    * The hostnames an exclusion for this rule could apply to.
@@ -97,24 +115,28 @@
           {#each group.rules as rule}
             {@const note = metaRuleNote(rule.id)}
             {@const hostsFor = targets(rule)}
-            {@const off = disabledRules.includes(String(rule.id))}
-            <tr class:is-meta={note} class:is-off={off}>
+            {@const scope = disabledScope(rule, group.sourceIp)}
+            <tr class:is-meta={note} class:is-off={scope}>
               <td><span class="mono rule-id">{rule.id}</span></td>
               <td>
                 {rule.message || (note ? '' : '—')}
                 {#if note}<span class="note">{note}</span>{/if}
-                {#if off}
+                {#if scope}
                   <!-- Alerts are historical: a rule disabled a minute ago is
                        still in everything recorded before that. Without saying
-                       so, offering "Disable" again reads as the click having
-                       failed. -->
-                  <span class="note">already disabled — older matches still listed</span>
+                       so, offering to disable it again reads as the click
+                       having failed. -->
+                  <span class="note">
+                    already disabled {scope === 'all'
+                      ? 'for all traffic'
+                      : `for ${group.sourceIp}`} — older matches still listed
+                  </span>
                 {/if}
               </td>
               <td class="num"><strong>{rule.count}</strong></td>
               <td class="action">
-                {#if off}
-                  <span class="cannot">disabled</span>
+                {#if scope}
+                  <span class="cannot">{scope === 'all' ? 'disabled' : 'disabled for this IP'}</span>
                 {:else if note}
                   <!-- Not offered. Excluding the anomaly gate switches CRS off
                        for the application rather than narrowing it, and the
@@ -122,16 +144,26 @@
                   <span class="cannot">cannot be disabled</span>
                 {:else if canExclude && onExclude}
                   {#each hostsFor as target}
+                    {@const label = hostsFor.length > 1 ? `${target.split('.')[0]}: ` : ''}
+                    <!-- Two scopes, because they are genuinely different
+                         decisions. "All traffic" gives up the rule for everyone;
+                         "This IP" keeps it protecting the application against
+                         every other source, which is what you want when one
+                         partner or office address is the only thing tripping it. -->
                     <button
                       class="btn-disable"
                       disabled={busyRule === `${target}|${rule.id}`}
                       onclick={() => onExclude(target, String(rule.id))}
-                      title={`Stop rule ${rule.id} firing for ${target}`}
-                    >{busyRule === `${target}|${rule.id}`
+                      title={`Stop rule ${rule.id} firing for ${target}, whoever sends the request`}
+                    >{busyRule === `${target}|${rule.id}` ? 'Disabling…' : `${label}all traffic`}</button>
+                    <button
+                      class="btn-disable btn-disable--scoped"
+                      disabled={busyRule === `${target}|${rule.id}@${group.sourceIp}`}
+                      onclick={() => onExclude(target, String(rule.id), group.sourceIp)}
+                      title={`Stop rule ${rule.id} firing for ${target}, but only for requests from ${group.sourceIp}`}
+                    >{busyRule === `${target}|${rule.id}@${group.sourceIp}`
                       ? 'Disabling…'
-                      : hostsFor.length > 1
-                        ? target.split('.')[0]
-                        : 'Disable'}</button>
+                      : `${label}this IP`}</button>
                   {/each}
                 {/if}
               </td>
@@ -188,7 +220,7 @@
   .rule-id { font-size: 12px; }
   /* Wider than one button needs: on the worker page a rule that fired against
      several applications gets one button each, labelled by application. */
-  .action { width: 190px; text-align: right; white-space: nowrap; }
+  .action { width: 250px; text-align: right; }
 
   /* Styled here rather than borrowing the host page's `btn-tiny`. Svelte scopes
      styles to the component that declares them, so a class defined in the page
@@ -216,6 +248,14 @@
     border-color: color-mix(in srgb, var(--warning, #d29922) 40%, transparent);
   }
   .btn-disable:disabled { opacity: 0.4; cursor: not-allowed; }
+  /* The narrower of the two reads as the lighter action, because it is: it
+     keeps the rule protecting the application against every other source. */
+  .btn-disable--scoped { background: transparent; }
+  .btn-disable--scoped:hover:not(:disabled) {
+    color: var(--text-primary);
+    border-color: var(--border-strong, var(--text-muted));
+  }
+  .btn-disable + .btn-disable { margin-left: 4px; }
   .is-meta .rule-id { color: var(--warning, #d29922); }
   /* Already off. Kept visible rather than filtered out, so a rule that is still
      matching after being disabled is something you can actually notice. */

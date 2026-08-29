@@ -22,7 +22,16 @@
  * application on 443.
  */
 
-import { TAG_PREFIX, firstRuleRefusal, metaRuleNote, tagOf } from '$lib/appsec-rules';
+import {
+  TAG_PREFIX,
+  firstRuleRefusal,
+  isSourceRange,
+  isValidSource,
+  joinRuleSource,
+  metaRuleNote,
+  splitRuleSource,
+  tagOf,
+} from '$lib/appsec-rules';
 
 /**
  * One entry in an application's exclusion list. Three kinds, deliberately kept
@@ -77,6 +86,19 @@ export function parseRuleList(value: string): AppsecRuleId[] | null {
   const rules: AppsecRuleId[] = [];
   for (const part of trimmed.split(',').map((p) => p.trim())) {
     if (part === '') continue;
+
+    // `930100@203.0.113.4` — the same rule, but only for requests from that
+    // address. The rule half is validated exactly as it would be on its own.
+    const scoped = splitRuleSource(part);
+    if (scoped.source !== null) {
+      if (!isValidSource(scoped.source)) return null;
+      const inner = parseRuleList(scoped.rule);
+      if (inner === null || inner.length !== 1) return null;
+      const entry = joinRuleSource(inner[0], scoped.source);
+      if (!rules.includes(entry)) rules.push(entry);
+      continue;
+    }
+
     if (/^\d+$/.test(part)) {
       const id = Number(part);
       // CRS ids are six digits; the bound is a sanity check, not a schema.
@@ -119,8 +141,10 @@ export function parseAppsecRules(stored: string | null | undefined): AppsecRuleI
         if (!rules.includes(entry)) rules.push(entry);
       } else if (typeof entry === 'string') {
         const value = entry.trim();
-        const tag = tagOf(value);
-        const usable = tag !== null ? RULE_NAME.test(tag) : RULE_NAME.test(value);
+        const { rule, source } = splitRuleSource(value);
+        if (source !== null && !isValidSource(source)) continue;
+        const tag = tagOf(rule);
+        const usable = tag !== null ? RULE_NAME.test(tag) : RULE_NAME.test(rule);
         if (usable && !rules.includes(value)) rules.push(value);
       }
     }
@@ -160,6 +184,26 @@ function hostFilter(host: string): string {
 }
 
 /**
+ * The filter for one host, optionally narrowed to one source address.
+ *
+ * Verified on a live worker: with `req.RemoteAddr == '<the real source>'` the
+ * excluded rule stopped firing, and with any other address it fired as normal.
+ * `IpInRange` behaves the same way for a range, and correctly does not match
+ * outside it.
+ *
+ * The host clause is parenthesised because it is itself an `||`. Without that,
+ * `a || b && c` binds as `a || (b && c)` and the exclusion would apply to every
+ * request on port 443 regardless of who sent it — the opposite of narrowing.
+ */
+function scopeFilter(host: string, source: string | null): string {
+  if (!source) return hostFilter(host);
+  const match = isSourceRange(source)
+    ? `IpInRange(req.RemoteAddr, '${source}')`
+    : `req.RemoteAddr == '${source}'`;
+  return `(${hostFilter(host)}) && ${match}`;
+}
+
+/**
  * A CrowdSec AppSec configuration that removes the listed rules per host.
  *
  * Loaded alongside `crowdsecurity/appsec-default` and `crowdsecurity/crs`
@@ -192,9 +236,36 @@ export function generateAppsecConfig(exclusions: AppsecExclusion[]): string {
   // to validate — would silently disable CRS for that application. The
   // validation gives a person a useful error; this makes the bad state
   // unreachable.
-  const usable = exclusions
-    .map((e) => ({ ...e, rules: e.rules.filter((r) => !metaRuleNote(r)) }))
-    .filter((e) => e.rules.length > 0 && HOSTNAME.test(e.host) && e.host.length <= 253);
+  // Split into one block per (host, source): `930100` and `930100@203.0.113.4`
+  // are different exclusions and need different filters, so they cannot share
+  // an `apply` list.
+  //
+  // Meta rules are dropped here as well as refused at every write path. Belt and
+  // braces on purpose: this function decides what the WAF actually does, and one
+  // row holding `949110` — hand-edited, restored from a backup taken before the
+  // refusal existed, written by some future caller that forgets to validate —
+  // would silently disable CRS. The validation gives a person a useful error;
+  // this makes the bad state unreachable.
+  const usable: Array<{ host: string; source: string | null; rules: AppsecRuleId[] }> = [];
+
+  for (const exclusion of exclusions) {
+    if (!HOSTNAME.test(exclusion.host) || exclusion.host.length > 253) continue;
+
+    const bySource = new Map<string, AppsecRuleId[]>();
+    for (const entry of exclusion.rules) {
+      const { rule, source } = splitRuleSource(entry);
+      if (metaRuleNote(rule)) continue;
+      if (source !== null && !isValidSource(source)) continue;
+      const key = source ?? '';
+      const bucket = bySource.get(key) ?? [];
+      bucket.push(/^\d+$/.test(rule) ? Number(rule) : rule);
+      bySource.set(key, bucket);
+    }
+
+    for (const [source, rules] of bySource) {
+      if (rules.length > 0) usable.push({ host: exclusion.host, source: source || null, rules });
+    }
+  }
 
   if (usable.length === 0) {
     // A config with no hooks is valid and loads cleanly. Emitting the file
@@ -206,9 +277,9 @@ export function generateAppsecConfig(exclusions: AppsecExclusion[]): string {
   }
 
   lines.push('pre_eval:');
-  for (const { host, rules } of usable) {
-    lines.push(`  # ${host}`);
-    lines.push(`  - filter: "${hostFilter(host)}"`);
+  for (const { host, source, rules } of usable) {
+    lines.push(`  # ${host}${source ? ` — only from ${source}` : ''}`);
+    lines.push(`  - filter: "${scopeFilter(host, source)}"`);
     lines.push('    apply:');
     for (const rule of rules) {
       if (typeof rule === 'number') {
