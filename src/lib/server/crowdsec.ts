@@ -121,6 +121,76 @@ function decisionRow(
   };
 }
 
+/** What one attempt to read the decisions produced. */
+export interface DecisionsRead {
+  decisions: CrowdsecDecision[];
+  /**
+   * Why there is no answer, in words an operator can act on. Null when there
+   * is one — including when the answer is legitimately "none".
+   */
+  error: string | null;
+}
+
+/** The first line of `cscli`'s complaint, trimmed to something renderable. */
+function firstLine(text: string): string {
+  return (text.split('\n').find((l) => l.trim() !== '') ?? '').trim().slice(0, 300);
+}
+
+/**
+ * Judge one `cscli decisions list` run.
+ *
+ * Split out from `parseDecisions` because the three ways this fails are three
+ * different problems and the tab used to render all of them as one red sentence
+ * with no detail: "could not read decisions". An operator seeing that
+ * intermittently has nothing to report and nowhere to look — which is exactly
+ * the position the last one was left in.
+ */
+export function decisionsFromExec(result: {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  exitCodeKnown?: boolean;
+  exitCodeError?: string | null;
+}): DecisionsRead {
+  const { stdout, stderr, exitCode } = result;
+  const exitCodeKnown = result.exitCodeKnown ?? true;
+
+  // cscli was asked and refused — a LAPI it cannot reach, a locked database.
+  // Its own words are more use than anything this function could invent.
+  if (exitCodeKnown && exitCode !== 0) {
+    const said = firstLine(stderr) || firstLine(stdout);
+    return {
+      decisions: [],
+      error: said
+        ? `CrowdSec could not list decisions: ${said}`
+        : `CrowdSec exited ${exitCode} without explaining why.`,
+    };
+  }
+
+  // The status never came back *and* nothing was printed: nothing was learned.
+  // Letting this through would parse to `[]` and render as "all clear", which
+  // is the reassurance-without-an-answer bug all over again.
+  if (!exitCodeKnown && stdout.trim() === '') {
+    const detail = result.exitCodeError ? ` (${firstLine(result.exitCodeError)})` : '';
+    return {
+      decisions: [],
+      error: `The worker never confirmed whether the query ran, and returned nothing${detail}.`,
+    };
+  }
+
+  const parsed = parseDecisions(stdout, 0);
+  if (parsed === null) {
+    return {
+      decisions: [],
+      error:
+        `CrowdSec returned ${stdout.length} bytes that Rudder could not parse as a decision list. ` +
+        `This usually means cscli's output format has changed.`,
+    };
+  }
+
+  return { decisions: parsed, error: null };
+}
+
 /** The CrowdSec container on this worker, or null. */
 export async function findCrowdsecContainer(client: {
   listContainers: (all: boolean) => Promise<any[]>;

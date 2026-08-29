@@ -3,27 +3,32 @@ import type { RequestHandler } from './$types';
 import { withPodman } from '$lib/server/podman-client';
 import { requireWorker, route } from '$lib/server/auth';
 import {
+  decisionsFromExec,
   findCrowdsecContainer,
-  parseDecisions,
-  type CrowdsecDecision,
+  type DecisionsRead,
 } from '$lib/server/crowdsec';
 
 /**
  * Read the worker's active CrowdSec decisions.
  *
- * Returns null when the answer could not be obtained, which the caller must keep
+ * An `error` means the answer could not be obtained, which the caller must keep
  * distinct from an empty list. They look the same and mean opposite things.
  */
-async function readDecisions(client: any, containerId: string): Promise<CrowdsecDecision[] | null> {
+async function readDecisions(client: any, containerId: string): Promise<DecisionsRead> {
   try {
-    const { stdout, exitCode } = await client.execContainerHttp(
+    const result = await client.execContainerHttp(
       containerId,
       ['cscli', 'decisions', 'list', '-o', 'json'],
       { attachStdout: true, attachStderr: true, tty: false },
     );
-    return parseDecisions(stdout, exitCode);
-  } catch {
-    return null;
+    return decisionsFromExec(result);
+  } catch (err) {
+    // The reason is the whole value here. This used to be a bare `catch {}`
+    // returning null, so a worker that was unreachable, a CrowdSec that was
+    // restarting and a TLS handshake that failed all reached the operator as
+    // the same red sentence with nothing to go on.
+    const message = err instanceof Error ? err.message : String(err);
+    return { decisions: [], error: `Could not run cscli on this worker: ${message}` };
   }
 }
 
@@ -34,7 +39,10 @@ export const GET: RequestHandler = route(async (event) => {
   let crowdsecInspect: any = null;
   let crowdsecStatus = 'not_found';
   let crowdsecLogs = '';
-  let decisions: CrowdsecDecision[] | null = null;
+  let decisions: DecisionsRead = {
+    decisions: [],
+    error: 'CrowdSec is not running on this worker, so no decisions could be read.',
+  };
 
   if (worker.podmanApiUrl) {
     await withPodman(worker, async (client) => {
@@ -52,8 +60,10 @@ export const GET: RequestHandler = route(async (event) => {
           });
         } catch {}
         decisions = await readDecisions(client, csC.Id);
-      } catch {
+      } catch (err) {
         // An unreachable worker leaves `not_found`, which is what the tab shows.
+        const message = err instanceof Error ? err.message : String(err);
+        decisions = { decisions: [], error: `Could not reach the worker: ${message}` };
       }
     });
   }
@@ -70,14 +80,19 @@ export const GET: RequestHandler = route(async (event) => {
   // the operator reading the page — reported itself clear. An empty list and no
   // answer are different facts, and `decisionsAvailable` is what keeps them
   // apart here instead of collapsing both into a reassurance.
+  //
+  // `decisionsError` carries *which* failure it was. Without it the tab could
+  // only say "could not read decisions", which is not enough to act on when it
+  // happens on one refresh in ten.
   return json({
     status: crowdsecStatus,
     image: crowdsecInspect?.Config?.Image ?? null,
     startedAt: crowdsecInspect?.State?.StartedAt ?? null,
     logs: crowdsecLogs,
     bouncerKeyConfigured: !!worker.crowdsecBouncerKey,
-    decisions: decisions ?? [],
-    decisionsAvailable: decisions !== null,
+    decisions: decisions.decisions,
+    decisionsAvailable: decisions.error === null,
+    decisionsError: decisions.error,
     appsecStatus: '',
   });
 });
@@ -113,11 +128,26 @@ export const DELETE: RequestHandler = route(async (event) => {
     const csC = await findCrowdsecContainer(client);
     if (!csC) return;
 
-    const { stdout, stderr, exitCode } = await client.execContainerHttp(
+    const { stdout, stderr, exitCode, exitCodeKnown } = await client.execContainerHttp(
       csC.Id,
       ['cscli', 'decisions', 'delete', '--id', raw],
       { attachStdout: true, attachStderr: true, tty: false },
     );
+
+    // An unread exit code reports 0, which for a *read* is worth trusting
+    // alongside the output. Here it is not: claiming a ban was lifted when the
+    // worker never confirmed it sends someone away believing they have access
+    // they may not have. Say what is actually known and let them re-check.
+    if (!exitCodeKnown) {
+      result = {
+        ok: false,
+        message:
+          'Rudder could not confirm the outcome on the worker. Refresh the decisions ' +
+          'list to see whether the ban was lifted.',
+      };
+      return;
+    }
+
     result = {
       ok: exitCode === 0,
       // `cscli` reports the outcome on stdout and problems on stderr; whichever

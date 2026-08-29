@@ -1963,11 +1963,17 @@
 
         {#if !crowdsec.decisionsAvailable}
           <!-- Never "all clear" on the strength of an unanswered question: this
-               panel used to say exactly that while three bans were live. -->
+               panel used to say exactly that while three bans were live.
+               `decisionsError` says which failure it was, because this one is
+               intermittent and "could not read decisions" alone left an
+               operator with nothing to report and nowhere to look. -->
           <p class="error">
             Could not read decisions from CrowdSec on this worker. Bans may be
             active and are not shown here.
           </p>
+          {#if crowdsec.decisionsError}
+            <p class="help-text mono small">{crowdsec.decisionsError}</p>
+          {/if}
         {:else if crowdsec.decisions.length === 0}
           <p class="empty">No active decisions — all clear</p>
         {:else}

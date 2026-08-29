@@ -374,6 +374,27 @@ export interface ImageInspect {
  * narrow surface is what lets the TTY and multiplexed cases hide behind one
  * shape.
  */
+/** The result of a one-shot `execContainerHttp`. */
+export interface ExecResult {
+  stdout: string;
+  stderr: string;
+  /**
+   * The command's exit code — 0 when it could not be determined, so check
+   * `exitCodeKnown` before treating 0 as success.
+   */
+  exitCode: number;
+  /**
+   * Whether `exitCode` was actually read back from the worker.
+   *
+   * The output and the status are fetched over two separate connections, and
+   * the second can fail on its own. Callers that only render output can ignore
+   * this; callers that turn an empty result into a reassurance must not.
+   */
+  exitCodeKnown: boolean;
+  /** Why the status could not be read, when it could not. */
+  exitCodeError: string | null;
+}
+
 export interface ExecStream {
   execId: string;
   /**
@@ -1629,7 +1650,7 @@ export class PodmanClient {
       attachStdin?: boolean;
       tty?: boolean;
     } = {}
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  ): Promise<ExecResult> {
     // Without a TTY, Podman frames the two streams with an 8-byte header each,
     // which is the only way to tell them apart. With one, they are merged and
     // stderr is unrecoverable — which is why this used to return `stderr: ''`
@@ -1683,7 +1704,20 @@ export class PodmanClient {
     // Step 3: Read the exit code, allowing for the exec not having been reaped
     // yet. A fixed 50 ms sleep was a guess that got the wrong answer whenever
     // the worker was busy.
+    //
+    // A lookup that fails is not a command that failed. This used to answer the
+    // first error with `exitCode = 1` and give up — so a connection that broke
+    // *after* the command had run, with its output already in hand, reported
+    // the command as having failed. That is not hypothetical here:
+    // `/exec/{id}/start` hijacks the connection, and the keep-alive agent can
+    // dispatch this GET onto that socket at the moment the worker closes it.
+    // Intermittent by construction, and indistinguishable from a real failure —
+    // which is why the CrowdSec tab said "could not read decisions" on an
+    // occasional refresh while holding a perfectly good answer.
     let exitCode = 0;
+    let exitCodeKnown = false;
+    let exitCodeError: string | null = null;
+
     for (let attempt = 0; attempt < 10; attempt++) {
       try {
         const inspectResult = await this.request<{
@@ -1692,16 +1726,24 @@ export class PodmanClient {
         }>(`/exec/${execId}/json`);
         if (!inspectResult.Running) {
           exitCode = inspectResult.ExitCode ?? 0;
+          exitCodeKnown = true;
+          exitCodeError = null;
           break;
         }
-      } catch {
-        exitCode = 1;
-        break;
+      } catch (err) {
+        // Keep going rather than breaking: the next attempt opens a new socket,
+        // which is exactly what the racing-close case needs.
+        exitCodeError = err instanceof Error ? err.message : String(err);
       }
       await new Promise((r) => setTimeout(r, 50));
     }
 
-    return { stdout, stderr, exitCode };
+    // An undetermined exit code stays 0, because the output is what callers
+    // came for and withholding it over an unread status byte loses more than it
+    // protects. `exitCodeKnown` is for the callers that must tell "succeeded"
+    // from "never found out" — see the CrowdSec tab, where an unconfirmed empty
+    // result must not be rendered as "all clear".
+    return { stdout, stderr, exitCode, exitCodeKnown, exitCodeError };
   }
 
   async getContainerStats(id: string): Promise<ContainerStats> {

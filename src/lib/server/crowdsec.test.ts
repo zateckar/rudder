@@ -11,7 +11,7 @@
  * which would have deleted the wrong row.
  */
 import { describe, expect, test } from 'bun:test';
-import { parseDecisions } from './crowdsec';
+import { decisionsFromExec, parseDecisions } from './crowdsec';
 
 /** An alert shaped the way a live worker really emits it. */
 const ALERT = {
@@ -130,5 +130,86 @@ describe('parseDecisions', () => {
     for (const bad of ['not json', '{"error":"nope"}', '"string"', '42']) {
       expect(parseDecisions(bad, 0), bad).toBeNull();
     }
+  });
+});
+
+/**
+ * Judging a whole `cscli` run, not just its stdout.
+ *
+ * The tab reported "could not read decisions" on an occasional refresh with no
+ * further detail, because a failed exec, a refusing cscli and unreadable output
+ * all collapsed into one null. Two things came out of that: the reason now
+ * travels to the page, and `exitCodeKnown` distinguishes a command that
+ * succeeded from one whose status was never read back — the exec output and the
+ * exit code come over two separate connections, and the second can fail alone.
+ */
+describe('decisionsFromExec', () => {
+  const ok = { stdout: JSON.stringify([ALERT]), stderr: '', exitCode: 0, exitCodeKnown: true };
+
+  test('a good run yields decisions and no error', () => {
+    const read = decisionsFromExec(ok);
+    expect(read.error).toBeNull();
+    expect(read.decisions).toHaveLength(1);
+  });
+
+  test('output stands even when the exit code was never read back', () => {
+    // The regression this exists for. `/exec/{id}/start` hijacks the
+    // connection, so the follow-up status GET can lose a race with the worker
+    // closing it — while 77KB of perfectly good JSON is already in hand.
+    const read = decisionsFromExec({ ...ok, exitCodeKnown: false, exitCodeError: 'ECONNRESET' });
+    expect(read.error).toBeNull();
+    expect(read.decisions).toHaveLength(1);
+  });
+
+  test('but an unconfirmed empty result is not "all clear"', () => {
+    // Nothing printed and no status: nothing was learned. Rendering this as an
+    // empty list is the reassurance-without-an-answer bug returning.
+    const read = decisionsFromExec({
+      stdout: '',
+      stderr: '',
+      exitCode: 0,
+      exitCodeKnown: false,
+      exitCodeError: 'socket hang up',
+    });
+    expect(read.decisions).toEqual([]);
+    expect(read.error).toContain('never confirmed');
+    expect(read.error).toContain('socket hang up');
+  });
+
+  test('a confirmed empty result is "all clear"', () => {
+    expect(decisionsFromExec({ stdout: 'null', stderr: '', exitCode: 0, exitCodeKnown: true }))
+      .toEqual({ decisions: [], error: null });
+  });
+
+  test("cscli's own complaint is what the operator gets to read", () => {
+    const read = decisionsFromExec({
+      stdout: '',
+      stderr: 'level=fatal msg="unable to query decisions: dial tcp 127.0.0.1:8080: connect: connection refused"',
+      exitCode: 1,
+      exitCodeKnown: true,
+    });
+    expect(read.decisions).toEqual([]);
+    expect(read.error).toContain('connection refused');
+  });
+
+  test('a silent failure still says something', () => {
+    const read = decisionsFromExec({ stdout: '', stderr: '', exitCode: 2, exitCodeKnown: true });
+    expect(read.error).toContain('2');
+  });
+
+  test('output it cannot parse is named as such, not as a read failure', () => {
+    const read = decisionsFromExec({
+      stdout: '{"unexpected":"envelope"}',
+      stderr: '',
+      exitCode: 0,
+      exitCodeKnown: true,
+    });
+    expect(read.decisions).toEqual([]);
+    expect(read.error).toContain('could not parse');
+  });
+
+  test('treats a missing exitCodeKnown as known, for callers not passing it', () => {
+    expect(decisionsFromExec({ stdout: 'null', stderr: '', exitCode: 0 }).error).toBeNull();
+    expect(decisionsFromExec({ stdout: '', stderr: '', exitCode: 1 }).error).not.toBeNull();
   });
 });
