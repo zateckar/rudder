@@ -123,7 +123,7 @@
                 {:else if canExclude && onExclude}
                   {#each hostsFor as target}
                     <button
-                      class="btn-tiny"
+                      class="btn-disable"
                       disabled={busyRule === `${target}|${rule.id}`}
                       onclick={() => onExclude(target, String(rule.id))}
                       title={`Stop rule ${rule.id} firing for ${target}`}
@@ -188,8 +188,34 @@
   .rule-id { font-size: 12px; }
   /* Wider than one button needs: on the worker page a rule that fired against
      several applications gets one button each, labelled by application. */
-  .action { width: 190px; text-align: right; }
-  .action :global(button) { margin-left: 4px; }
+  .action { width: 190px; text-align: right; white-space: nowrap; }
+
+  /* Styled here rather than borrowing the host page's `btn-tiny`. Svelte scopes
+     styles to the component that declares them, so a class defined in the page
+     never reaches this markup — the buttons rendered as raw browser controls on
+     both pages, and the application page does not define `btn-tiny` at all. */
+  .btn-disable {
+    padding: 3px 10px;
+    margin-left: 4px;
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    font-weight: 500;
+    font-family: inherit;
+    cursor: pointer;
+    border: 1px solid var(--border-default);
+    background: var(--bg-raised);
+    color: var(--text-secondary);
+    transition: all 0.15s;
+  }
+  /* Amber on hover, not red. Disabling a rule gives up protection, so it should
+     not read as the neutral action — but it is reversible, and red belongs to
+     the things that are not. */
+  .btn-disable:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: var(--warning, #d29922);
+    border-color: color-mix(in srgb, var(--warning, #d29922) 40%, transparent);
+  }
+  .btn-disable:disabled { opacity: 0.4; cursor: not-allowed; }
   .is-meta .rule-id { color: var(--warning, #d29922); }
   /* Already off. Kept visible rather than filtered out, so a rule that is still
      matching after being disabled is something you can actually notice. */

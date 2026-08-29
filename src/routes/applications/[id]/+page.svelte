@@ -2039,7 +2039,10 @@
     <div class="section">
       <div class="section-head">
         <h3>Web firewall matches</h3>
-        <button class="btn-tiny" onclick={loadAppsec} disabled={appsecLoading}>
+        <!-- `btn-act`, not `btn-tiny`: this page has no `btn-tiny`, so that
+             class rendered a raw browser button. -->
+        <button class="btn-act" onclick={loadAppsec} disabled={appsecLoading}
+          title="Re-read the firewall matches from the worker">
           {appsecLoading ? 'Reading…' : 'Refresh'}
         </button>
       </div>
