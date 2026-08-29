@@ -236,40 +236,96 @@ export function generateAppsecConfig(exclusions: AppsecExclusion[]): string {
 }
 
 /**
+ * Every hostname an application answers on.
+ *
+ * **Not `applications.domain`.** That column is null for compose and k8s
+ * applications — the hostname lives on `containers.domain`, which is what
+ * `routeUrls` reads and what Traefik's `Host()` rules are built from. Reading
+ * only the application column made the firewall tab tell a compose application
+ * it had no hostname while its own page header linked to it, and silently
+ * generated no exclusions for it either.
+ *
+ * Containers in any state, not just active ones: a hostname does not stop being
+ * the application's because a container is draining, and an exclusion that
+ * vanished mid-deploy would ban whoever was using it at the time.
+ */
+export async function applicationHostnames(applicationId: string): Promise<string[]> {
+  const [{ db }, { applications, containers }, { eq }] = await Promise.all([
+    import('$lib/db'),
+    import('$lib/db/schema'),
+    import('drizzle-orm'),
+  ]);
+
+  const [app, rows] = await Promise.all([
+    db
+      .select({ domain: applications.domain })
+      .from(applications)
+      .where(eq(applications.id, applicationId))
+      .get(),
+    db
+      .select({ domain: containers.domain })
+      .from(containers)
+      .where(eq(containers.applicationId, applicationId))
+      .all(),
+  ]);
+
+  const hosts: string[] = [];
+  for (const domain of [app?.domain, ...rows.map((r) => r.domain)]) {
+    // Bare hostnames. `containers.domain` holds no port, but a value that
+    // somehow carried one would never match an application's traffic.
+    const host = (domain ?? '').split(':')[0].trim();
+    if (host && !hosts.includes(host)) hosts.push(host);
+  }
+  return hosts;
+}
+
+/**
  * Every exclusion that applies on one worker.
  *
- * Read from `applications`, not from `containers`: an application whose
- * containers are between generations still has a hostname, and an exclusion
- * that vanished mid-deploy would ban whoever was using it at the time. Routing
- * cares which containers are live; AppSec does not.
+ * One entry per hostname, because an application's exclusions have to reach
+ * every name it answers on — and for compose and k8s applications that name is
+ * on the containers, not on `applications.domain`.
  */
 export async function appsecExclusionsForWorker(workerId: string): Promise<AppsecExclusion[]> {
   // Lazily imported so the generators above stay usable from tests and from
   // modules that must not open the database — the same reason
   // `routeGroupsForWorker` does it.
-  const [{ db }, { applications }, { eq }] = await Promise.all([
+  const [{ db }, { applications, containers }, { eq }] = await Promise.all([
     import('$lib/db'),
     import('$lib/db/schema'),
     import('drizzle-orm'),
   ]);
 
   const rows = await db
-    .select({ domain: applications.domain, rules: applications.appsecDisabledRules })
+    .select({
+      appId: applications.id,
+      appDomain: applications.domain,
+      rules: applications.appsecDisabledRules,
+      containerDomain: containers.domain,
+    })
     .from(applications)
+    .leftJoin(containers, eq(containers.applicationId, applications.id))
     .where(eq(applications.workerId, workerId))
     .all();
 
-  const exclusions: AppsecExclusion[] = [];
+  /** host → the rules excluded on it. */
+  const byHost = new Map<string, AppsecRuleId[]>();
+
   for (const row of rows) {
-    if (!row.domain) continue;
     const rules = parseAppsecRules(row.rules);
     if (rules.length === 0) continue;
-    exclusions.push({ host: row.domain, rules });
+    for (const domain of [row.appDomain, row.containerDomain]) {
+      const host = (domain ?? '').split(':')[0].trim();
+      if (!host || byHost.has(host)) continue;
+      byHost.set(host, rules);
+    }
   }
 
   // Sorted so the generated document is stable: the worker compares it against
   // the installed one and restarts CrowdSec on any difference. Row order from
   // SQLite is not guaranteed, and an unstable document would restart the WAF on
   // every poll.
-  return exclusions.sort((a, b) => a.host.localeCompare(b.host));
+  return [...byHost.entries()]
+    .map(([host, rules]) => ({ host, rules }))
+    .sort((a, b) => a.host.localeCompare(b.host));
 }

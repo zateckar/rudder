@@ -14,7 +14,13 @@
    */
   import { metaRuleNote } from '$lib/appsec-rules';
 
-  interface RuleCount { id: number | string; message: string; count: number }
+  interface RuleCount {
+    id: number | string;
+    message: string;
+    count: number;
+    /** The hostnames this rule fired against, for this source. */
+    hosts?: string[];
+  }
   interface SourceGroup {
     sourceIp: string;
     country: string;
@@ -45,15 +51,24 @@
   } = $props();
 
   /**
-   * The host an exclusion from this group would apply to.
+   * The hostnames an exclusion for this rule could apply to.
    *
-   * On an application's own page that is settled. On the worker page a source
-   * may have hit several applications, and there is no honest answer to "which
-   * one" — so the action is simply not offered for those groups.
+   * Per rule, not per group. One source commonly hits several applications — a
+   * real group covered versity on three ports, projectsend, uptime-kuma and
+   * seatsurfing — so asking the question at the group level left every button
+   * hidden, which is how this shipped with nothing actionable on it at all.
+   *
+   * On an application's own page there is exactly one answer, so exactly one
+   * button.
    */
-  function targetHost(group: SourceGroup): string | null {
-    if (host) return host;
-    return group.hosts.length === 1 ? group.hosts[0].split(':')[0] : null;
+  function targets(rule: RuleCount): string[] {
+    if (host) return [host];
+    const seen: string[] = [];
+    for (const h of rule.hosts ?? []) {
+      const bare = h.split(':')[0];
+      if (bare && !seen.includes(bare)) seen.push(bare);
+    }
+    return seen;
   }
 </script>
 
@@ -81,7 +96,7 @@
         <tbody>
           {#each group.rules as rule}
             {@const note = metaRuleNote(rule.id)}
-            {@const target = targetHost(group)}
+            {@const hostsFor = targets(rule)}
             {@const off = disabledRules.includes(String(rule.id))}
             <tr class:is-meta={note} class:is-off={off}>
               <td><span class="mono rule-id">{rule.id}</span></td>
@@ -105,13 +120,19 @@
                        for the application rather than narrowing it, and the
                        setup and reporting rules stop nothing. -->
                   <span class="cannot">cannot be disabled</span>
-                {:else if canExclude && target && onExclude}
-                  <button
-                    class="btn-tiny"
-                    disabled={busyRule === `${target}|${rule.id}`}
-                    onclick={() => onExclude(target, String(rule.id))}
-                    title={`Stop rule ${rule.id} firing for ${target}`}
-                  >{busyRule === `${target}|${rule.id}` ? 'Disabling…' : 'Disable'}</button>
+                {:else if canExclude && onExclude}
+                  {#each hostsFor as target}
+                    <button
+                      class="btn-tiny"
+                      disabled={busyRule === `${target}|${rule.id}`}
+                      onclick={() => onExclude(target, String(rule.id))}
+                      title={`Stop rule ${rule.id} firing for ${target}`}
+                    >{busyRule === `${target}|${rule.id}`
+                      ? 'Disabling…'
+                      : hostsFor.length > 1
+                        ? target.split('.')[0]
+                        : 'Disable'}</button>
+                  {/each}
                 {/if}
               </td>
             </tr>
@@ -165,7 +186,10 @@
   /* The count is the point of the table, so it reads before the prose. */
   .num strong { font-size: 14px; color: var(--text-primary); }
   .rule-id { font-size: 12px; }
-  .action { width: 110px; text-align: right; }
+  /* Wider than one button needs: on the worker page a rule that fired against
+     several applications gets one button each, labelled by application. */
+  .action { width: 190px; text-align: right; }
+  .action :global(button) { margin-left: 4px; }
   .is-meta .rule-id { color: var(--warning, #d29922); }
   /* Already off. Kept visible rather than filtered out, so a rule that is still
      matching after being disabled is something you can actually notice. */

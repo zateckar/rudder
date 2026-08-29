@@ -228,6 +228,15 @@ export interface AppsecRuleCount {
   message: string;
   /** Requests from this source that this rule matched. */
   count: number;
+  /**
+   * The hostnames this rule matched against, for this source.
+   *
+   * An exclusion has to name a host. One source commonly hits several
+   * applications — a single group on a live worker covered versity on three
+   * ports, projectsend, uptime-kuma and seatsurfing — so "which application"
+   * cannot be answered at the group level, only per rule.
+   */
+  hosts: string[];
 }
 
 /**
@@ -372,23 +381,28 @@ export function parseAppsecAlerts(stdout: string, exitCode: number): CrowdsecApp
  * what is breaking that user; a rule that fired once beside it is noise, and the
  * two look identical without the count.
  *
- * @param host When given, only this application's traffic. The application page
- *   passes its own domain, and passing it here rather than filtering afterwards
- *   is what keeps one team from seeing another team's requests.
+ * @param hosts When given, only these hostnames' traffic. The application page
+ *   passes every name it answers on, and passing them here rather than
+ *   filtering afterwards is what keeps one team from seeing another's requests.
  */
 export function groupAppsecBySource(
   rows: CrowdsecAppsecAlert[],
-  host?: string,
+  hosts?: string[],
 ): AppsecSourceGroup[] {
   const groups = new Map<string, AppsecSourceGroup>();
-  // Per group: rule id → count and message, kept aside so the public shape stays
-  // an array sorted by what matters.
-  const counts = new Map<string, Map<string, { count: number; message: string }>>();
+  // Per group: rule id → count, message and the hosts it fired against, kept
+  // aside so the public shape stays an array sorted by what matters.
+  const counts = new Map<
+    string,
+    Map<string, { count: number; message: string; hosts: string[] }>
+  >();
+  const wanted = hosts?.length ? new Set(hosts) : null;
 
   for (const row of rows) {
-    // The Host header carries the port on entryPoints other than 443; an
-    // application's domain never does.
-    if (host && row.host.split(':')[0] !== host) continue;
+    // The Host header carries the port on entryPoints other than 443 —
+    // `versity.example.com:1443` — where an application's domain never does.
+    const bare = row.host.split(':')[0];
+    if (wanted && !wanted.has(bare)) continue;
 
     const ip = row.sourceIp || 'unknown';
     const group = groups.get(ip) ?? {
@@ -400,7 +414,8 @@ export function groupAppsecBySource(
       rules: [],
       paths: [],
     };
-    const tally = counts.get(ip) ?? new Map<string, { count: number; message: string }>();
+    const tally =
+      counts.get(ip) ?? new Map<string, { count: number; message: string; hosts: string[] }>();
 
     group.requests += 1;
     if (!group.hosts.includes(row.host)) group.hosts.push(row.host);
@@ -414,9 +429,12 @@ export function groupAppsecBySource(
     if (!ids.length && row.ruleName) ids.push(row.ruleName);
     for (const id of ids) {
       const key = String(id);
-      const existing = tally.get(key) ?? { count: 0, message: '' };
+      const existing = tally.get(key) ?? { count: 0, message: '', hosts: [] };
       existing.count += 1;
       if (!existing.message && row.ruleMessages[key]) existing.message = row.ruleMessages[key];
+      // Bare, because that is what an exclusion names: the same rule firing on
+      // :443 and :1443 of one application is one application, not two.
+      if (!existing.hosts.includes(bare)) existing.hosts.push(bare);
       tally.set(key, existing);
     }
 
@@ -427,10 +445,11 @@ export function groupAppsecBySource(
   for (const [ip, tally] of counts) {
     const group = groups.get(ip)!;
     group.rules = [...tally.entries()]
-      .map(([key, { count, message }]) => ({
+      .map(([key, { count, message, hosts: firedOn }]) => ({
         id: /^\d+$/.test(key) ? Number(key) : key,
         message,
         count,
+        hosts: firedOn,
       }))
       // Loudest first — that is the one to look at. Ties break on the id so the
       // order is stable between polls rather than shuffling under the cursor.

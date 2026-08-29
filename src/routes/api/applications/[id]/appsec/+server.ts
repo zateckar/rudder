@@ -4,7 +4,7 @@ import { db } from '$lib/db';
 import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { requireApplication, route } from '$lib/server/auth';
-import { parseAppsecRules } from '$lib/server/appsec';
+import { applicationHostnames, parseAppsecRules } from '$lib/server/appsec';
 import { withPodman } from '$lib/server/podman-client';
 import {
   findCrowdsecContainer,
@@ -34,8 +34,19 @@ export const GET: RequestHandler = route(async (event) => {
 
   const empty = { sources: [] as AppsecSourceGroup[], available: false, error: '' };
 
-  if (!application.domain) {
-    return json({ ...empty, error: 'This application has no hostname, so the WAF cannot attribute anything to it.' });
+  // Not `application.domain` — that is null for compose and k8s applications,
+  // whose hostname lives on their containers. Reading only the application
+  // column told a deployed compose application it had no hostname while its own
+  // page header linked to it.
+  const hosts = await applicationHostnames(application.id);
+
+  if (hosts.length === 0) {
+    return json({
+      ...empty,
+      error:
+        'This application has no hostname yet, so the firewall has nothing to attribute to it. ' +
+        'Deploy it first.',
+    });
   }
   if (!application.workerId) {
     return json({ ...empty, error: 'This application is not assigned to a worker.' });
@@ -70,7 +81,7 @@ export const GET: RequestHandler = route(async (event) => {
         error = 'Could not read WAF matches from CrowdSec on this worker.';
         return;
       }
-      sources = groupAppsecBySource(rows, application.domain!);
+      sources = groupAppsecBySource(rows, hosts);
     });
   } catch (err: any) {
     error = `Could not reach the worker: ${err?.message ?? String(err)}`;

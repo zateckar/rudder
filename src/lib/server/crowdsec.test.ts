@@ -397,10 +397,77 @@ describe('parseAppsecAlerts', () => {
       };
       const groups = groupAppsecBySource(
         [...repeated(1), ...repeated(1, other)],
-        'routecheck.alpha.apps.skoda-api.com',
+        ['routecheck.alpha.apps.skoda-api.com'],
       );
       expect(groups).toHaveLength(1);
       expect(groups[0].hosts).toEqual(['routecheck.alpha.apps.skoda-api.com']);
+    });
+
+    test('accepts several hostnames, which is what a compose application has', () => {
+      // Versity answers on its bare name and on :1443 and :2443, and a compose
+      // application's name lives on its containers rather than on
+      // `applications.domain`. Filtering on one name would show it a fraction
+      // of its own traffic.
+      const second = {
+        ...SCORED_ALERT,
+        events: [
+          {
+            meta: [
+              { key: 'rule_name', value: 'native_rule:942100' },
+              { key: 'target_fqdn', value: 'versity.example.com:2443' },
+            ],
+          },
+        ],
+      };
+      const groups = groupAppsecBySource(
+        [...repeated(1), ...repeated(1, second)],
+        ['routecheck.alpha.apps.skoda-api.com', 'versity.example.com'],
+      );
+      expect(groups).toHaveLength(1);
+      expect(groups[0].requests).toBe(2);
+    });
+
+    test('records which hosts each rule fired against', () => {
+      // An exclusion has to name a host, and one source commonly hits several
+      // applications. Asking that at the group level left every button hidden.
+      const other = {
+        ...SCORED_ALERT,
+        events: [
+          {
+            meta: [
+              { key: 'rule_name', value: 'native_rule:930100' },
+              { key: 'target_fqdn', value: 'other.example.com' },
+            ],
+          },
+        ],
+      };
+      const [g] = groupAppsecBySource([...repeated(1), ...repeated(1, other)]);
+      expect(g.rules.find((r) => r.id === 930100)?.hosts).toEqual([
+        'routecheck.alpha.apps.skoda-api.com',
+        'other.example.com',
+      ]);
+      // 949110 only ever fired on the first, so it offers only that one.
+      expect(g.rules.find((r) => r.id === 949110)?.hosts).toEqual([
+        'routecheck.alpha.apps.skoda-api.com',
+      ]);
+    });
+
+    test('one application on two ports is one host, not two', () => {
+      const ported = {
+        ...SCORED_ALERT,
+        events: [
+          {
+            meta: [
+              { key: 'rule_name', value: 'native_rule:930100' },
+              { key: 'target_fqdn', value: 'routecheck.alpha.apps.skoda-api.com:1443' },
+            ],
+          },
+        ],
+      };
+      const [g] = groupAppsecBySource([...repeated(1), ...repeated(1, ported)]);
+      expect(g.rules.find((r) => r.id === 930100)?.hosts).toEqual([
+        'routecheck.alpha.apps.skoda-api.com',
+      ]);
     });
 
     test('a host filter matches when the request came in on a non-443 port', () => {
@@ -417,7 +484,9 @@ describe('parseAppsecAlerts', () => {
           },
         ],
       };
-      const groups = groupAppsecBySource(repeated(1, ported), 'routecheck.alpha.apps.skoda-api.com');
+      const groups = groupAppsecBySource(repeated(1, ported), [
+        'routecheck.alpha.apps.skoda-api.com',
+      ]);
       expect(groups).toHaveLength(1);
     });
 
