@@ -11,7 +11,12 @@
  * which would have deleted the wrong row.
  */
 import { describe, expect, test } from 'bun:test';
-import { decisionsFromExec, parseAppsecAlerts, parseDecisions } from './crowdsec';
+import {
+  decisionsFromExec,
+  groupAppsecBySource,
+  parseAppsecAlerts,
+  parseDecisions,
+} from './crowdsec';
 
 /** An alert shaped the way a live worker really emits it. */
 const ALERT = {
@@ -296,11 +301,13 @@ describe('parseAppsecAlerts', () => {
     expect(a.sourceIp).toBe('178.209.129.231');
   });
 
-  test('collapses repeats of the same match', () => {
-    // The same false positive fires on every request of its shape. Forty
-    // identical rows would bury the one other thing that is happening.
+  test('keeps repeats rather than collapsing them', () => {
+    // These used to be deduplicated so the table would not fill with copies.
+    // But the number of copies *is* the signal — a rule firing ninety times
+    // against one address is the culprit, and one firing once beside it is
+    // noise. `groupAppsecBySource` turns them into counts.
     const many = [APPSEC_ALERT, APPSEC_ALERT, APPSEC_ALERT];
-    expect(parseAppsecAlerts(JSON.stringify(many), 0)).toHaveLength(1);
+    expect(parseAppsecAlerts(JSON.stringify(many), 0)).toHaveLength(3);
   });
 
   test('ignores log-derived alerts, which have no rule to disable', () => {
@@ -335,6 +342,98 @@ describe('parseAppsecAlerts', () => {
     expect(parseAppsecAlerts('null', 0)).toEqual([]);
   });
 
+  describe('grouped by source, with counts', () => {
+    /** n copies of one alert, as a source hammering the same broken endpoint. */
+    const repeated = (n: number, alert: unknown = SCORED_ALERT) =>
+      parseAppsecAlerts(JSON.stringify(Array.from({ length: n }, () => alert)), 0)!;
+
+    test('counts how often each rule fired, which is what names the culprit', () => {
+      const [g] = groupAppsecBySource(repeated(9));
+      expect(g.requests).toBe(9);
+      expect(g.rules.find((r) => r.id === 930100)?.count).toBe(9);
+    });
+
+    test('puts the loudest rule first', () => {
+      // The whole point of the ordering: the operator should not have to scan
+      // for the culprit, it should be the first row.
+      const traversalOnly = { ...SCORED_ALERT, events: [SCORED_ALERT.events[1]] }; // 930100
+      const gateOnly = { ...SCORED_ALERT, events: [SCORED_ALERT.events[2]] };      // 949110
+      const [g] = groupAppsecBySource([...repeated(5, traversalOnly), ...repeated(1, gateOnly)]);
+      expect(g.rules.map((r) => [r.id, r.count])).toEqual([
+        [930100, 5],
+        [949110, 1],
+      ]);
+    });
+
+    test('keeps what each rule matched, so a number becomes a judgement', () => {
+      const [g] = groupAppsecBySource(repeated(2));
+      expect(g.rules.find((r) => r.id === 930100)?.message).toBe(
+        'Path Traversal Attack (/../) or (/.../)',
+      );
+    });
+
+    test('separates two addresses rather than summing them', () => {
+      // A ban is per address. Merging two sources would hide which user is
+      // actually being locked out.
+      const other = { ...SCORED_ALERT, source: { scope: 'Ip', value: '9.9.9.9', cn: 'US' } };
+      const groups = groupAppsecBySource([...repeated(3), ...repeated(1, other)]);
+      expect(groups.map((g) => [g.sourceIp, g.requests])).toEqual([
+        ['20.166.29.62', 3],
+        ['9.9.9.9', 1],
+      ]);
+    });
+
+    test('a host filter keeps one team from seeing another team traffic', () => {
+      const other = {
+        ...SCORED_ALERT,
+        events: [
+          {
+            meta: [
+              { key: 'rule_name', value: 'native_rule:942100' },
+              { key: 'target_fqdn', value: 'someone-else.example.com' },
+            ],
+          },
+        ],
+      };
+      const groups = groupAppsecBySource(
+        [...repeated(1), ...repeated(1, other)],
+        'routecheck.alpha.apps.skoda-api.com',
+      );
+      expect(groups).toHaveLength(1);
+      expect(groups[0].hosts).toEqual(['routecheck.alpha.apps.skoda-api.com']);
+    });
+
+    test('a host filter matches when the request came in on a non-443 port', () => {
+      // `req.Host` carries the port on entryPoints 1443-4443; a domain never
+      // does. Comparing them raw would show an application nothing at all.
+      const ported = {
+        ...SCORED_ALERT,
+        events: [
+          {
+            meta: [
+              { key: 'rule_name', value: 'native_rule:942100' },
+              { key: 'target_fqdn', value: 'routecheck.alpha.apps.skoda-api.com:1443' },
+            ],
+          },
+        ],
+      };
+      const groups = groupAppsecBySource(repeated(1, ported), 'routecheck.alpha.apps.skoda-api.com');
+      expect(groups).toHaveLength(1);
+    });
+
+    test('collects a few example paths, not every copy of one URL', () => {
+      const [g] = groupAppsecBySource(repeated(40));
+      expect(g.paths).toHaveLength(1);
+      expect(g.paths[0]).toContain('/etc/passwd');
+    });
+
+    test('busiest source first', () => {
+      const other = { ...SCORED_ALERT, source: { scope: 'Ip', value: '9.9.9.9' } };
+      const groups = groupAppsecBySource([...repeated(1), ...repeated(4, other)]);
+      expect(groups[0].sourceIp).toBe('9.9.9.9');
+    });
+  });
+
   describe('the one-event-per-rule shape', () => {
     test('is recognised at all, despite carrying no datasource_type', () => {
       // The regression. Filtering on `datasource_type === "appsec"` dropped
@@ -359,6 +458,11 @@ describe('parseAppsecAlerts', () => {
     test('falls back to the alert source for the address', () => {
       const [a] = parseAppsecAlerts(JSON.stringify([SCORED_ALERT]), 0)!;
       expect(a.sourceIp).toBe('20.166.29.62');
+    });
+
+    test('carries the country and network from the alert source', () => {
+      const [a] = parseAppsecAlerts(JSON.stringify([SCORED_ALERT]), 0)!;
+      expect(a.country).toBe('IE');
     });
 
     test('separates two hosts inside one alert', () => {

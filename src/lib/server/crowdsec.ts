@@ -215,6 +215,42 @@ export interface CrowdsecAppsecAlert {
   ruleMessages: Record<string, string>;
   /** A non-numeric rule name, for vpatch matches that have no CRS id. */
   ruleName: string;
+  /** Two-letter country of the source address, when CrowdSec resolved one. */
+  country: string;
+  asName: string;
+}
+
+/** One rule, and how often it fired. */
+export interface AppsecRuleCount {
+  /** A CRS number, or a CrowdSec rule name for vpatch matches. */
+  id: number | string;
+  /** What the rule is for, when CrowdSec said. */
+  message: string;
+  /** Requests from this source that this rule matched. */
+  count: number;
+}
+
+/**
+ * Everything one source address tripped, with counts.
+ *
+ * Grouped by address because that is the unit a ban applies to: the question an
+ * operator has is "who is being blocked and what set it off", and a flat list of
+ * matches answers neither. Counts are the other half — a rule that fired ninety
+ * times on one address is the one breaking that user's uploads, and a rule that
+ * fired once alongside it is noise.
+ */
+export interface AppsecSourceGroup {
+  sourceIp: string;
+  country: string;
+  asName: string;
+  /** Requests from this address that matched anything. */
+  requests: number;
+  /** Hostnames this address hit. One, on an application's own page. */
+  hosts: string[];
+  /** Descending by count: the culprit first. */
+  rules: AppsecRuleCount[];
+  /** A few real paths, which is what says whether a match is legitimate. */
+  paths: string[];
 }
 
 /** Every number in `[901340 911100 949110]`. CrowdSec formats it as a string. */
@@ -262,7 +298,6 @@ export function parseAppsecAlerts(stdout: string, exitCode: number): CrowdsecApp
     if (!Array.isArray(parsed)) return null;
 
     const rows: CrowdsecAppsecAlert[] = [];
-    const seen = new Set<string>();
 
     for (const alert of parsed) {
       /** host → the one row that host contributes to this alert. */
@@ -292,6 +327,8 @@ export function parseAppsecAlerts(stdout: string, exitCode: number): CrowdsecApp
           ruleIds: [],
           ruleMessages: {},
           ruleName: '',
+          country: String(alert?.source?.cn ?? ''),
+          asName: String(alert?.source?.as_name ?? ''),
         };
 
         // The longest URI wins: the per-rule shape repeats it on every event,
@@ -317,12 +354,6 @@ export function parseAppsecAlerts(stdout: string, exitCode: number): CrowdsecApp
       for (const row of byHost.values()) {
         if (!row.ruleIds.length && !row.ruleName) continue;
         row.ruleIds.sort((a, b) => a - b);
-
-        // The same false positive fires on every request of the same shape.
-        // Forty identical rows would bury the one other thing happening.
-        const key = `${row.host}|${row.ruleName}|${row.ruleIds.join(',')}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
         rows.push(row);
       }
     }
@@ -330,6 +361,83 @@ export function parseAppsecAlerts(stdout: string, exitCode: number): CrowdsecApp
   } catch {
     return null;
   }
+}
+
+/**
+ * Matches folded by source address, newest CrowdSec has first.
+ *
+ * Repeats are counted rather than discarded. An earlier version deduplicated
+ * identical matches so the table would not fill with copies — but the number of
+ * copies *is* the signal. A rule that fired ninety times against one address is
+ * what is breaking that user; a rule that fired once beside it is noise, and the
+ * two look identical without the count.
+ *
+ * @param host When given, only this application's traffic. The application page
+ *   passes its own domain, and passing it here rather than filtering afterwards
+ *   is what keeps one team from seeing another team's requests.
+ */
+export function groupAppsecBySource(
+  rows: CrowdsecAppsecAlert[],
+  host?: string,
+): AppsecSourceGroup[] {
+  const groups = new Map<string, AppsecSourceGroup>();
+  // Per group: rule id → count and message, kept aside so the public shape stays
+  // an array sorted by what matters.
+  const counts = new Map<string, Map<string, { count: number; message: string }>>();
+
+  for (const row of rows) {
+    // The Host header carries the port on entryPoints other than 443; an
+    // application's domain never does.
+    if (host && row.host.split(':')[0] !== host) continue;
+
+    const ip = row.sourceIp || 'unknown';
+    const group = groups.get(ip) ?? {
+      sourceIp: ip,
+      country: row.country,
+      asName: row.asName,
+      requests: 0,
+      hosts: [],
+      rules: [],
+      paths: [],
+    };
+    const tally = counts.get(ip) ?? new Map<string, { count: number; message: string }>();
+
+    group.requests += 1;
+    if (!group.hosts.includes(row.host)) group.hosts.push(row.host);
+    // A handful of examples, not every URL: this is evidence for a judgement,
+    // and the same signed upload URL forty times over is not more evidence.
+    if (row.uri && group.paths.length < 5 && !group.paths.includes(row.uri)) {
+      group.paths.push(row.uri);
+    }
+
+    const ids: Array<number | string> = [...row.ruleIds];
+    if (!ids.length && row.ruleName) ids.push(row.ruleName);
+    for (const id of ids) {
+      const key = String(id);
+      const existing = tally.get(key) ?? { count: 0, message: '' };
+      existing.count += 1;
+      if (!existing.message && row.ruleMessages[key]) existing.message = row.ruleMessages[key];
+      tally.set(key, existing);
+    }
+
+    counts.set(ip, tally);
+    groups.set(ip, group);
+  }
+
+  for (const [ip, tally] of counts) {
+    const group = groups.get(ip)!;
+    group.rules = [...tally.entries()]
+      .map(([key, { count, message }]) => ({
+        id: /^\d+$/.test(key) ? Number(key) : key,
+        message,
+        count,
+      }))
+      // Loudest first — that is the one to look at. Ties break on the id so the
+      // order is stable between polls rather than shuffling under the cursor.
+      .sort((a, b) => b.count - a.count || String(a.id).localeCompare(String(b.id)));
+  }
+
+  return [...groups.values()].sort((a, b) => b.requests - a.requests);
 }
 
 /** The CrowdSec container on this worker, or null. */

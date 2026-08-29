@@ -5,8 +5,9 @@ import { requireWorker, route } from '$lib/server/auth';
 import {
   decisionsFromExec,
   findCrowdsecContainer,
+  groupAppsecBySource,
   parseAppsecAlerts,
-  type CrowdsecAppsecAlert,
+  type AppsecSourceGroup,
   type DecisionsRead,
 } from '$lib/server/crowdsec';
 
@@ -23,14 +24,14 @@ import {
  * finding rule numbers, and a missing one costs an SSH session, not a bad
  * security decision.
  */
-async function readAppsecAlerts(client: any, containerId: string): Promise<CrowdsecAppsecAlert[]> {
+async function readAppsecAlerts(client: any, containerId: string): Promise<AppsecSourceGroup[]> {
   try {
     const { stdout, exitCode } = await client.execContainerHttp(
       containerId,
-      ['cscli', 'alerts', 'list', '-a', '--limit', '60', '-o', 'json'],
+      ['cscli', 'alerts', 'list', '-a', '--limit', '200', '-o', 'json'],
       { attachStdout: true, attachStderr: true, tty: false },
     );
-    return parseAppsecAlerts(stdout, exitCode) ?? [];
+    return groupAppsecBySource(parseAppsecAlerts(stdout, exitCode) ?? []);
   } catch {
     return [];
   }
@@ -71,7 +72,7 @@ export const GET: RequestHandler = route(async (event) => {
     decisions: [],
     error: 'CrowdSec is not running on this worker, so no decisions could be read.',
   };
-  let appsecAlerts: CrowdsecAppsecAlert[] = [];
+  let appsecAlerts: AppsecSourceGroup[] = [];
 
   if (worker.podmanApiUrl) {
     await withPodman(worker, async (client) => {

@@ -8,6 +8,7 @@
   import { showToast } from '$lib/client/toast.svelte';
   import { confirmAction, type ConfirmRequest } from '$lib/client/dialog.svelte';
   import { lifecycleControls, lifecycleLabel } from '$lib/client/lifecycle-controls';
+  import AppsecMatches from '$lib/components/AppsecMatches.svelte';
 
   /**
    * Deploy errors and deployment notes, shown properly.
@@ -382,6 +383,70 @@
     if (activeTab === 'deployments' && !deploymentsLoaded) {
       fetchDeployments();
     }
+  });
+
+  // ── Web firewall ──────────────────────────────────────────────────────────
+  //
+  // The same evidence the worker page shows, scoped to this application and
+  // authorised on it. The worker page is admin-only, so the team that owns an
+  // application — the only people who can say whether a match is their own
+  // legitimate traffic — could not see any of it, and could not act on it.
+  let appsec = $state<any>(null);
+  let appsecLoading = $state(false);
+  let excludingRule = $state<string | null>(null);
+  let appsecMessage = $state('');
+  let appsecError = $state(false);
+
+  async function loadAppsec() {
+    appsecLoading = true;
+    try {
+      const res = await fetch(`/api/applications/${data.application.id}/appsec`);
+      appsec = await res.json();
+    } catch (e: any) {
+      appsec = { sources: [], available: false, error: e.message };
+    } finally {
+      appsecLoading = false;
+    }
+  }
+
+  async function excludeAppsecRule(host: string, rule: string) {
+    if (!confirm(
+      `Stop rule ${rule} firing for ${host}?\n\n` +
+      `It stops protecting this application against everyone, on every port it serves. ` +
+      `The change takes effect within a minute.`,
+    )) return;
+
+    appsecMessage = '';
+    appsecError = false;
+    excludingRule = `${host}|${rule}`;
+    try {
+      const res = await fetch('/api/applications/appsec-rules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host, rule }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || !body.ok) {
+        appsecError = true;
+        appsecMessage = body.error || `Could not disable rule ${rule}.`;
+      } else if (body.added === false) {
+        appsecMessage = `Rule ${rule} was already disabled for this application.`;
+      } else {
+        appsecMessage = `Rule ${rule} disabled. The worker applies it within a minute.`;
+        // Re-read so the row marks itself disabled. Otherwise it still offers
+        // "Disable", which reads as the click having failed.
+        await loadAppsec();
+      }
+    } catch (e: any) {
+      appsecError = true;
+      appsecMessage = e.message;
+    } finally {
+      excludingRule = null;
+    }
+  }
+
+  $effect(() => {
+    if (activeTab === 'firewall' && appsec === null && !appsecLoading) loadAppsec();
   });
 
   // ── Storage ───────────────────────────────────────────────────────────────
@@ -1279,7 +1344,7 @@
 
 <!-- ── Tabs ────────────────────────────────────────────────────────────── -->
 <div class="tabs">
-  {#each [['containers','Containers'],['metrics','Metrics'],['storage','Storage'],['config','Configuration'],['deployments','Deployments']] as [id, label]}
+  {#each [['containers','Containers'],['metrics','Metrics'],['storage','Storage'],['firewall','Firewall'],['config','Configuration'],['deployments','Deployments']] as [id, label]}
     <button class:active={activeTab === id} onclick={() => activeTab = id}>{label}</button>
   {/each}
 </div>
@@ -1968,6 +2033,58 @@
         </div>
       {/if}
     {/if}
+
+  <!-- ── Firewall tab ───────────────────────────────────────────────────── -->
+  {:else if activeTab === 'firewall'}
+    <div class="section">
+      <div class="section-head">
+        <h3>Web firewall matches</h3>
+        <button class="btn-tiny" onclick={loadAppsec} disabled={appsecLoading}>
+          {appsecLoading ? 'Reading…' : 'Refresh'}
+        </button>
+      </div>
+
+      <p class="help-text">
+        Every request to this application is inspected against the OWASP Core Rule Set. Rules do
+        not block on their own — they add to a score, and an address that keeps crossing the
+        threshold is <strong>banned from every application on the worker</strong>. So a rule
+        matching your own legitimate traffic is not noise: it eventually locks that user out.
+      </p>
+      <p class="help-text">
+        Grouped by the address the requests came from, and counted. <strong>The rule with the
+        highest count against an address is the one to look at</strong> — check the paths it
+        matched, and if that is traffic your application is supposed to serve, disable it here.
+      </p>
+
+      {#if appsec === null}
+        <p class="empty">{appsecLoading ? 'Reading the firewall…' : 'Not loaded.'}</p>
+      {:else if appsec.error}
+        <p class="error">{appsec.error}</p>
+      {:else}
+        <AppsecMatches
+          sources={appsec.sources}
+          host={data.application.domain ?? undefined}
+          canExclude={true}
+          onExclude={excludeAppsecRule}
+          busyRule={excludingRule}
+          disabledRules={appsec.disabledRules ?? []}
+        />
+      {/if}
+
+      {#if appsecMessage}
+        <p class={appsecError ? 'error' : 'help-text'}>{appsecMessage}</p>
+      {/if}
+
+      {#if appsec && !appsec.error && appsec.sources.length > 0}
+        <p class="help-text">
+          Disabling a rule stops it protecting this application against everyone, on every port it
+          serves. It takes effect within a minute. Rules shown as "cannot be disabled" are the
+          anomaly-score threshold and CRS bookkeeping — the threshold is the only rule that
+          enforces anything, so switching it off would disable the ruleset for this application
+          rather than narrow it.
+        </p>
+      {/if}
+    </div>
 
   <!-- ── Configuration tab ──────────────────────────────────────────────── -->
   {:else if activeTab === 'config'}

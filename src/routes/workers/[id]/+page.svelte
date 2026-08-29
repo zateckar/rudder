@@ -6,7 +6,7 @@
   import PageHeader from '$lib/components/PageHeader.svelte';
   import { showToast } from '$lib/client/toast.svelte';
   import { confirmAction } from '$lib/client/dialog.svelte';
-  import { metaRuleNote } from '$lib/appsec-rules';
+  import AppsecMatches from '$lib/components/AppsecMatches.svelte';
 
   let { data } = $props();
 
@@ -2079,12 +2079,17 @@
       {#if crowdsec.appsecAlerts?.length}
         <div class="section">
           <div class="section-head">
-            <h3>Recent WAF matches ({crowdsec.appsecAlerts.length})</h3>
+            <h3>WAF matches by source ({crowdsec.appsecAlerts.length})</h3>
           </div>
           <p class="help-text">
-            The rules that scored on each request. <strong>This, not the Reason column above, is
+            The rules that scored, and how often. <strong>This, not the Reason column above, is
             what to disable</strong> — a decision names the first rule in the chain, which is
-            usually a CRS initialisation rule that does nothing when switched off.
+            usually a CRS initialisation rule that does nothing when switched off. The rule with
+            the highest count against an address is the one breaking it.
+          </p>
+          <p class="help-text">
+            An application's own page shows the same thing for that application alone, and its
+            team can act on it there without access to this worker.
           </p>
           <p class="help-text">
             Most CRS rules only add to an anomaly score; <strong><code>949110</code> is the one
@@ -2100,52 +2105,12 @@
             traffic you recognise: an attack looks much like a false positive from here, and the
             path is the thing that tells them apart.
           </p>
-          <table class="mini-table">
-            <thead><tr><th>Application</th><th>Path</th><th>Source</th><th>Rules</th></tr></thead>
-            <tbody>
-              {#each crowdsec.appsecAlerts as a}
-                <tr>
-                  <td><span class="mono small">{a.host || '—'}</span></td>
-                  <td><span class="mono small path-cell" title={a.uri}>{a.uri || '—'}</span></td>
-                  <td><span class="mono small">{a.sourceIp || '—'}</span></td>
-                  <td>
-                    {#if a.ruleIds.length}
-                      {#each a.ruleIds as id}
-                        {#if metaRuleNote(id)}
-                          <!-- Not a button. Excluding the anomaly gate would
-                               disable CRS for the application outright, and
-                               these ids do not narrow anything — so the action
-                               is not offered here at all rather than offered
-                               behind a warning nobody reads. -->
-                          <span class="rule-chip rule-chip--meta" title={metaRuleNote(id)}
-                            >{id}<span class="rule-why">{metaRuleNote(id)}</span></span>
-                        {:else}
-                          <button
-                            class="rule-chip"
-                            disabled={!a.host || excludingRule === `${a.host}|${id}`}
-                            onclick={() => excludeRule(a.host, String(id))}
-                            title={a.ruleMessages?.[String(id)]
-                              ? `${a.ruleMessages[String(id)]} — click to stop it firing for ${a.host}`
-                              : `Stop rule ${id} firing for ${a.host}`}
-                          >{id}{#if a.ruleMessages?.[String(id)]}<span class="rule-why"
-                            >{a.ruleMessages[String(id)]}</span>{/if}</button>
-                        {/if}
-                      {/each}
-                    {:else if a.ruleName}
-                      <button
-                        class="rule-chip"
-                        disabled={!a.host || excludingRule === `${a.host}|${a.ruleName}`}
-                        onclick={() => excludeRule(a.host, a.ruleName)}
-                        title={`Stop ${a.ruleName} firing for ${a.host}`}
-                      >{a.ruleName}</button>
-                    {:else}
-                      —
-                    {/if}
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
+          <AppsecMatches
+            sources={crowdsec.appsecAlerts}
+            canExclude={true}
+            onExclude={excludeRule}
+            busyRule={excludingRule}
+          />
           {#if ruleMessage}
             <p class={ruleError ? 'error' : 'help-text'}>{ruleMessage}</p>
           {/if}
