@@ -3,6 +3,8 @@ import type { RequestHandler } from './$types';
 import { withPodman } from '$lib/server/podman-client';
 import { requireWorker, route } from '$lib/server/auth';
 import {
+  crowdsecReadError,
+  crowdsecUnavailable,
   decisionsFromExec,
   findCrowdsecContainer,
   groupAppsecBySource,
@@ -55,9 +57,10 @@ async function readDecisions(client: any, containerId: string): Promise<Decision
     // The reason is the whole value here. This used to be a bare `catch {}`
     // returning null, so a worker that was unreachable, a CrowdSec that was
     // restarting and a TLS handshake that failed all reached the operator as
-    // the same red sentence with nothing to go on.
-    const message = err instanceof Error ? err.message : String(err);
-    return { decisions: [], error: `Could not run cscli on this worker: ${message}` };
+    // the same red sentence with nothing to go on. A restarting CrowdSec is
+    // named as such rather than passed through as Podman's `container state
+    // improper`, which is true and tells nobody what to do about it.
+    return { decisions: [], error: crowdsecReadError(err) };
   }
 }
 
@@ -89,6 +92,18 @@ export const GET: RequestHandler = route(async (event) => {
             tail: tailLines,
           });
         } catch {}
+
+        // Logs are readable on a stopped container and are the most useful thing
+        // on the tab when CrowdSec has just gone down, so they are fetched
+        // first and unconditionally. `cscli` is not: exec needs it running, and
+        // asking anyway returns Podman's `container state improper` in place of
+        // the fact that it is restarting.
+        const unavailable = crowdsecUnavailable(csC);
+        if (unavailable) {
+          decisions = { decisions: [], error: unavailable };
+          return;
+        }
+
         decisions = await readDecisions(client, csC.Id);
         appsecAlerts = await readAppsecAlerts(client, csC.Id);
       } catch (err) {

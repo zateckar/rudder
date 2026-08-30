@@ -551,6 +551,84 @@ export function groupAppsecBySource(
   return [...groups.values()].sort((a, b) => b.requests - a.requests);
 }
 
+/**
+ * What an application owner is told while CrowdSec is restarting.
+ *
+ * Naming the cause matters more than it looks. The restart is not a fault and
+ * not something they should report — it is the direct consequence of the button
+ * they just pressed, because AppSec configuration is only read at startup. Told
+ * that much, the action is obvious: wait and refresh. Told "Could not reach the
+ * worker", the reasonable conclusion is that the worker is down.
+ */
+const RESTARTING =
+  'CrowdSec is restarting on this worker, so its records cannot be read for a few seconds. ' +
+  'Applying a rule exclusion restarts it — this is what that looks like. Refresh shortly.';
+
+/**
+ * Why CrowdSec cannot be queried right now, or null when it can.
+ *
+ * The container is looked up with `all: true`, so a stopped one is still found
+ * — which is what made this worth stating separately. The page reported the
+ * container as present, tried to exec into it, and passed Podman's own words
+ * through to an application owner: `can only create exec sessions on running
+ * containers: container state improper`.
+ */
+export function crowdsecUnavailable(container: { State?: string } | null): string | null {
+  if (!container) return 'CrowdSec is not running on this worker.';
+  const state = String(container.State ?? '').toLowerCase();
+  // Named states only, rather than "anything that is not `running`".
+  //
+  // Being wrong in this direction is free: a state nobody listed here falls
+  // through to the exec, and `crowdsecReadError` turns Podman's refusal into
+  // the same sentence. Being wrong the other way is not — a spelling this
+  // function did not expect would leave the panel permanently reporting a
+  // restart that is not happening, with no way to reach the data.
+  return STOPPED_STATES.has(state) ? RESTARTING : null;
+}
+
+/** Container states in which `podman exec` cannot work. */
+const STOPPED_STATES = new Set([
+  'created',
+  'configured',
+  'restarting',
+  'removing',
+  'paused',
+  'stopping',
+  'exited',
+  'stopped',
+  'dead',
+]);
+
+/**
+ * A failed `cscli` call, in words the person reading the page can act on.
+ *
+ * The two failures below are one event seen at two moments. Restarting CrowdSec
+ * between the exec being created and the command finishing kills the connection
+ * mid-stream, which Node reports as `aborted`; a request that arrives a moment
+ * later instead finds the container stopped and gets Podman's 500. Both were
+ * reaching the browser verbatim — one as "Could not reach the worker: aborted",
+ * which names neither the cause nor the remedy.
+ */
+export function crowdsecReadError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+
+  if (/container state improper|exec sessions on running containers/i.test(message)) {
+    return RESTARTING;
+  }
+  // A connection that died mid-command. A restart is much the likeliest cause
+  // on this path, so the message says so — hedged, because a genuinely broken
+  // connection looks identical from here and refreshing is the right move for
+  // both.
+  if (/\baborted\b|socket hang up|ECONNRESET|EPIPE/i.test(message)) {
+    return (
+      'The connection to CrowdSec was cut before the command finished, which is usually a ' +
+      'restart — applying a rule exclusion restarts it on this worker. Refresh shortly.'
+    );
+  }
+
+  return `Could not reach the worker: ${message}`;
+}
+
 /** The CrowdSec container on this worker, or null. */
 export async function findCrowdsecContainer(client: {
   listContainers: (all: boolean) => Promise<any[]>;

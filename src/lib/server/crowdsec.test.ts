@@ -12,6 +12,8 @@
  */
 import { describe, expect, test } from 'bun:test';
 import {
+  crowdsecReadError,
+  crowdsecUnavailable,
   decisionsFromExec,
   groupAppsecBySource,
   parseAppsecAlerts,
@@ -45,6 +47,64 @@ const ALERT = {
   ],
   events: [{ meta: [{ key: 'http_path', value: '/www/.git/config' }] }],
 };
+
+/**
+ * Reading CrowdSec while it is restarting.
+ *
+ * Applying a rule exclusion restarts CrowdSec on the worker — AppSec
+ * configuration is only read at startup — and on a live worker that takes about
+ * twenty seconds. Anyone who presses the button and then refreshes the page
+ * lands in that window, so it is a normal state of the feature rather than a
+ * fault, and the two ways it surfaced were both reaching the browser verbatim.
+ */
+describe('reading CrowdSec while it restarts', () => {
+  test('a container that is not running is a restart, not a missing worker', () => {
+    // Found in any state, because the lookup passes `all: true` — so "present"
+    // was never the same as "can be asked anything".
+    expect(crowdsecUnavailable({ State: 'exited' })).toContain('restarting');
+    expect(crowdsecUnavailable({ State: 'created' })).toContain('restarting');
+    expect(crowdsecUnavailable(null)).toBe('CrowdSec is not running on this worker.');
+  });
+
+  test('a running container is not an excuse to skip the read', () => {
+    expect(crowdsecUnavailable({ State: 'running' })).toBeNull();
+    // An unrecognised state is left to the exec to judge. Inventing an outage
+    // from a string Podman changed the spelling of is the same mistake pointing
+    // the other way.
+    expect(crowdsecUnavailable({ State: 'some-future-state' })).toBeNull();
+    expect(crowdsecUnavailable({})).toBeNull();
+  });
+
+  test("names the restart instead of passing on Podman's words", () => {
+    // Verbatim from the worker, on an application page, in red.
+    const podman = new Error(
+      'Podman API error: 500 - {"cause":"container state improper","message":"can only ' +
+        'create exec sessions on running containers: container state improper","response":500}',
+    );
+    expect(crowdsecReadError(podman)).toContain('restarting');
+    expect(crowdsecReadError(podman)).not.toContain('container state improper');
+  });
+
+  test('a connection cut mid-command says so, and says what to do', () => {
+    // The same restart, a moment earlier: the exec was already running and the
+    // container went away under it. Node calls that `aborted`, which reached
+    // the page as "Could not reach the worker: aborted" — naming neither the
+    // cause nor the remedy, and reading like the worker is down.
+    for (const message of ['aborted', 'socket hang up', 'read ECONNRESET']) {
+      const said = crowdsecReadError(new Error(message));
+      expect(said, message).toContain('Refresh shortly');
+      expect(said, message).not.toBe(`Could not reach the worker: ${message}`);
+    }
+  });
+
+  test('anything else keeps its own words', () => {
+    // The translation is for two known cases. A failure nobody has seen before
+    // must not be flattened into a reassuring one.
+    expect(crowdsecReadError(new Error('certificate has expired'))).toBe(
+      'Could not reach the worker: certificate has expired',
+    );
+  });
+});
 
 describe('parseDecisions', () => {
   test('fills every column the table shows', () => {

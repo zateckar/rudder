@@ -7,6 +7,8 @@ import { requireApplication, route } from '$lib/server/auth';
 import { applicationHostnames, parseAppsecRules } from '$lib/server/appsec';
 import { withPodman } from '$lib/server/podman-client';
 import {
+  crowdsecReadError,
+  crowdsecUnavailable,
   decisionsFromExec,
   findCrowdsecContainer,
   groupAppsecBySource,
@@ -70,32 +72,49 @@ export const GET: RequestHandler = route(async (event) => {
   try {
     await withPodman(worker, async (client) => {
       const container = await findCrowdsecContainer(client);
-      if (!container) {
-        error = 'CrowdSec is not running on this worker.';
-        decisionsError = error;
+
+      // Checked before either command rather than letting the exec fail. The
+      // container is looked up in any state, so a restarting CrowdSec is found,
+      // and execing into it put Podman's own words on an application page:
+      // `can only create exec sessions on running containers: container state
+      // improper`. Applying a rule exclusion restarts CrowdSec, so this is
+      // reached by using the feature as intended.
+      const unavailable = crowdsecUnavailable(container);
+      if (unavailable) {
+        error = unavailable;
+        decisionsError = unavailable;
         return;
       }
 
-      const { stdout, exitCode } = await client.execContainerHttp(
-        container.Id,
-        ['cscli', 'alerts', 'list', '-a', '--limit', '200', '-o', 'json'],
-        { attachStdout: true, attachStderr: true, tty: false },
-      );
+      // The two reads are in separate try blocks, and that is the whole point of
+      // splitting them. They were already reported apart — one failing must not
+      // blank the other — but a throw from either escaped to the outer catch and
+      // blanked both, which is exactly what happened when a restart cut the
+      // second command: the matches had already been read and were discarded.
+      try {
+        const { stdout, exitCode } = await client.execContainerHttp(
+          container.Id,
+          ['cscli', 'alerts', 'list', '-a', '--limit', '200', '-o', 'json'],
+          { attachStdout: true, attachStderr: true, tty: false },
+        );
 
-      const rows = parseAppsecAlerts(stdout, exitCode);
-      if (rows === null) {
-        // Distinct from "nothing matched". Saying "all clear" without an answer
-        // is the mistake this whole area has already made once.
-        error = 'Could not read WAF matches from CrowdSec on this worker.';
-      } else {
-        sources = groupAppsecBySource(rows, hosts);
+        const rows = parseAppsecAlerts(stdout, exitCode);
+        if (rows === null) {
+          // Distinct from "nothing matched". Saying "all clear" without an answer
+          // is the mistake this whole area has already made once.
+          error = 'Could not read WAF matches from CrowdSec on this worker.';
+        } else {
+          sources = groupAppsecBySource(rows, hosts);
+        }
+
+        // Bans that have already lapsed, from the same output. Without them a
+        // source with four hundred requests and no live ban reads as "the WAF did
+        // nothing", when what actually happened is that it was banned hours ago
+        // and the ban ran out.
+        banHistory = parseBanHistory(stdout, exitCode) ?? {};
+      } catch (err) {
+        error = crowdsecReadError(err);
       }
-
-      // Bans that have already lapsed, from the same output. Without them a
-      // source with four hundred requests and no live ban reads as "the WAF did
-      // nothing", when what actually happened is that it was banned hours ago
-      // and the ban ran out.
-      banHistory = parseBanHistory(stdout, exitCode) ?? {};
 
       // Active bans, on the same connection.
       //
@@ -105,18 +124,25 @@ export const GET: RequestHandler = route(async (event) => {
       // Matches say what the WAF noticed; decisions say who is actually being
       // turned away, and an application owner asking "why can't this user reach
       // us" needs the second, not the first.
-      const read = decisionsFromExec(
-        await client.execContainerHttp(
-          container.Id,
-          ['cscli', 'decisions', 'list', '-o', 'json'],
-          { attachStdout: true, attachStderr: true, tty: false },
-        ),
-      );
-      decisions = read.decisions;
-      decisionsError = read.error ?? '';
+      try {
+        const read = decisionsFromExec(
+          await client.execContainerHttp(
+            container.Id,
+            ['cscli', 'decisions', 'list', '-o', 'json'],
+            { attachStdout: true, attachStderr: true, tty: false },
+          ),
+        );
+        decisions = read.decisions;
+        decisionsError = read.error ?? '';
+      } catch (err) {
+        decisionsError = crowdsecReadError(err);
+      }
     });
-  } catch (err: any) {
-    error = `Could not reach the worker: ${err?.message ?? String(err)}`;
+  } catch (err) {
+    // Reaching the worker at all, rather than reading CrowdSec on it. Through
+    // the same translator so a connection cut here does not read as a different
+    // class of problem from one cut a line lower down.
+    error = crowdsecReadError(err);
     decisionsError = error;
   }
 
