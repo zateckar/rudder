@@ -29,7 +29,7 @@ import { ensureAppNetwork, teardownAppNetwork } from '$lib/server/networks';
 import { env } from '$lib/server/env';
 import { MountPolicyError, realizeMounts, type MountIntent } from '$lib/server/mounts';
 // Deploys are serialized per worker; see `workerDeployLock`.
-import { LockError, withLock, workerDeployLock } from '$lib/server/locks';
+import { isLocked, LockError, withLock, workerDeployLock } from '$lib/server/locks';
 import {
   parseDigestRecord,
   pinnedImageFor,
@@ -644,6 +644,86 @@ export async function sweepExpiredGenerations(): Promise<{
       client?.destroy();
     }
   }
+  return { reaped: removedContainerIds.length, removedContainerIds };
+}
+
+/**
+ * Remove `pending` generations belonging to a deploy that is no longer running.
+ *
+ * A blue-green deploy writes its container rows as `pending` and promotes them
+ * to `active` at cutover. When the deploy fails, its own `catch` discards them.
+ * When the *process* dies — SIGKILL, an OOM, a restart in the middle of a
+ * deploy — that `catch` never runs, and nothing else ever looked at those rows
+ * again: the reconciler does not route to them, no cutover will ever promote
+ * them, and `sweepExpiredGenerations` only considers `draining`. They sat
+ * there holding their host ports out of `reservedPortsForWorker` permanently,
+ * with the containers themselves still on the worker, until somebody noticed
+ * and redeployed by hand.
+ *
+ * The test for "no longer running" is the deployment row, not a timeout: a row
+ * is orphaned exactly when its deploy has reached a terminal status, and an
+ * in-flight deploy's is `pending` for its whole duration. Nothing here can
+ * therefore tear down a generation that is still being built, however long it
+ * takes — which a wall-clock threshold could not promise. `recoverInterrupted
+ * Deploys` runs at startup and is what turns a killed process's `pending`
+ * deployment into `failed`, so its containers become visible to this.
+ *
+ * The lock check is belt and braces for the one remaining overlap: a deploy
+ * that has already written `failed` but has not finished its own discard.
+ * Rather than race it, leave the worker to the next sweep.
+ *
+ * Called from the metrics loop, so an unreachable worker is simply retried.
+ */
+export async function sweepInterruptedGenerations(): Promise<{
+  reaped: number;
+  removedContainerIds: string[];
+}> {
+  const orphaned = await db
+    .select({ container: containers, worker: workers, deployStatus: deployments.status })
+    .from(containers)
+    .innerJoin(workers, eq(containers.workerId, workers.id))
+    // Left, not inner: a row whose deployment has been pruned from the history
+    // is orphaned too, and an inner join would hide it forever.
+    .leftJoin(deployments, eq(containers.deploymentId, deployments.id))
+    .where(eq(containers.state, 'pending'))
+    .all();
+
+  const removedContainerIds: string[] = [];
+  const byWorker = new Map<
+    string,
+    { worker: typeof workers.$inferSelect; rows: Array<typeof containers.$inferSelect> }
+  >();
+
+  for (const row of orphaned) {
+    if (row.deployStatus === 'pending') continue; // still being deployed
+    if (isLocked(workerDeployLock(row.worker.id))) continue;
+    const bucket = byWorker.get(row.worker.id) ?? { worker: row.worker, rows: [] };
+    bucket.rows.push(row.container);
+    byWorker.set(row.worker.id, bucket);
+  }
+
+  for (const { worker, rows } of byWorker.values()) {
+    let client: PodmanRestClient | null = null;
+    try {
+      client = getRestPodmanClient(worker);
+      const reaped = await reapContainers(client, rows);
+      removedContainerIds.push(...reaped);
+      if (reaped.length > 0) {
+        console.log(
+          `[deploy] Discarded ${reaped.length} container(s) from an interrupted deploy ` +
+            `on worker ${worker.name}.`,
+        );
+      }
+    } catch (e: any) {
+      console.warn(
+        `[deploy] Could not discard the interrupted generation on worker ${worker.name}:`,
+        e.message,
+      );
+    } finally {
+      client?.destroy();
+    }
+  }
+
   return { reaped: removedContainerIds.length, removedContainerIds };
 }
 

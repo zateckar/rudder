@@ -19,12 +19,12 @@
  * and the container list is handed to reconciliation rather than fetched again.
  */
 import { db, sqlite } from '$lib/db';
-import { containers, workers, containerMetrics, workerMetrics, workerPings, systemSettings } from '$lib/db/schema';
+import { containers, workers, containerMetrics, workerMetrics, workerPings } from '$lib/db/schema';
 import { eq, lt, inArray } from 'drizzle-orm';
 import { getRestPodmanClient } from './podman-client';
 import { getHostStatsHttp } from './host-metrics-http';
-import { evaluateAlerts } from './alerts';
 import { reconcileAllWorkers, toObserved, type ObservedContainer } from './reconcile';
+import { numericSetting } from './settings';
 import { mapWithConcurrency } from './concurrency';
 import type { PodmanClient } from './podman';
 
@@ -51,23 +51,12 @@ const WORKER_CONCURRENCY = 8;
  */
 const STATS_CONCURRENCY = 4;
 
-async function getSettings(key: string, defaultValue: number, min: number, max: number): Promise<number> {
-  try {
-    const row = await db.select().from(systemSettings).where(eq(systemSettings.key, key)).get();
-    if (row) {
-      const val = parseInt(row.value);
-      if (val >= min && val <= max) return val;
-    }
-  } catch {}
-  return defaultValue;
-}
-
 async function getIntervalMs(): Promise<number> {
-  return (await getSettings('metrics_interval_seconds', DEFAULT_INTERVAL_SECONDS, 10, 3600)) * 1000;
+  return (await numericSetting('metrics_interval_seconds', DEFAULT_INTERVAL_SECONDS, 10, 3600)) * 1000;
 }
 
 async function getRetentionDays(): Promise<number> {
-  return getSettings('metrics_retention_days', DEFAULT_RETENTION_DAYS, 1, 365);
+  return numericSetting('metrics_retention_days', DEFAULT_RETENTION_DAYS, 1, 365);
 }
 
 // ── One worker, one pass ─────────────────────────────────────────────────────
@@ -579,6 +568,27 @@ async function collectAll(): Promise<void> {
     console.error('[metrics] Generation sweep failed:', (e as any).message || e);
   }
 
+  // Generations abandoned by a control-plane restart rather than by a retention
+  // window. `recoverInterruptedDeploys` tries this once at startup, but the
+  // worker holding the containers may be unreachable then; this is the retry.
+  try {
+    const { sweepInterruptedGenerations } = await import('./deploy');
+    const { removedContainerIds } = await sweepInterruptedGenerations();
+    if (removedContainerIds.length > 0) {
+      // Same reason as the sweep above: keep the pre-sweep listing consistent
+      // with the rows the reconciler is about to compare it against.
+      const removed = new Set(removedContainerIds);
+      observedByWorker = new Map(
+        [...observedByWorker].map(([workerId, list]) => [
+          workerId,
+          list.filter((c) => !removed.has(c.id)),
+        ]),
+      );
+    }
+  } catch (e) {
+    console.error('[metrics] Interrupted-generation sweep failed:', (e as any).message || e);
+  }
+
   // Diff what should be running against what is. Read-only: the pass makes no
   // Podman call of its own now — it is handed the container list the sweep
   // above already fetched — and has no path to a create, start, stop or remove.
@@ -588,6 +598,14 @@ async function collectAll(): Promise<void> {
   //
   // Runs after the sweep so container statuses in the database are as fresh as
   // they get before the comparison reads them.
+  //
+  // Reconciliation stays a passenger on this loop deliberately: it is handed the
+  // listing above and makes no Podman call of its own, so giving it a schedule
+  // would double the fleet's API load to re-derive what has just been fetched.
+  // It does mean `metrics_interval_seconds` is also the drift-detection
+  // interval — see the note on that setting in the settings page. That is a
+  // reasonable trade for a read-only diagnostic pass; it was not one for
+  // alerting, which now has its own timer in `alerts.ts`.
   try {
     const reports = await reconcileAllWorkers({ apply: false, observedByWorker });
     const drifted = reports.filter((r) => !r.clean).length;
@@ -596,13 +614,6 @@ async function collectAll(): Promise<void> {
     }
   } catch (e) {
     console.error('[metrics] Reconciliation failed:', (e as any).message || e);
-  }
-
-  // Evaluate alert rules against freshly collected metrics
-  try {
-    await evaluateAlerts();
-  } catch (e) {
-    console.error('[metrics] Alert evaluation failed:', (e as any).message || e);
   }
 }
 

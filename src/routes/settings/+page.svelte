@@ -9,10 +9,14 @@
   let metricsRetentionDays = $state(30);
   let savingRetention = $state(false);
   let retentionSaved = $state(false);
+  let alertInterval = $state(60);
+  let savingAlertInterval = $state(false);
+  let alertIntervalSaved = $state(false);
 
   $effect(() => {
     metricsInterval = data.metricsInterval;
     metricsRetentionDays = data.metricsRetentionDays;
+    alertInterval = data.alertInterval;
   });
 
   async function saveInterval() {
@@ -56,6 +60,27 @@
       savingRetention = false;
     }
   }
+
+  async function saveAlertInterval() {
+    savingAlertInterval = true;
+    alertIntervalSaved = false;
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ alert_interval_seconds: String(alertInterval) }),
+      });
+      if (res.ok) {
+        alertIntervalSaved = true;
+        setTimeout(() => alertIntervalSaved = false, 2000);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast('error', err.error || 'Failed to save the alert interval');
+      }
+    } finally {
+      savingAlertInterval = false;
+    }
+  }
 </script>
 
 <div class="settings-section">
@@ -63,7 +88,12 @@
   <div class="setting-row">
     <div class="setting-info">
       <span class="setting-label">Metrics collection interval</span>
-      <span class="setting-hint">How often worker and container metrics are collected</span>
+      <span class="setting-hint">
+        How often worker and container metrics are collected. Drift detection runs on the
+        same cycle, because it reuses the container listing this sweep already fetches —
+        so a long interval also means drift is noticed less often. Alerting has its own
+        interval below.
+      </span>
     </div>
     <div class="setting-control">
       <select bind:value={metricsInterval}>
@@ -95,6 +125,30 @@
       </select>
       <button class="btn-tiny btn-save" disabled={savingRetention} onclick={saveRetention} title="Save the data retention period">
         {savingRetention ? '…' : retentionSaved ? '✓' : 'Save'}
+      </button>
+    </div>
+  </div>
+  <div class="setting-row">
+    <div class="setting-info">
+      <span class="setting-label">Alert evaluation interval</span>
+      <span class="setting-hint">
+        How often alert rules are checked against the latest metrics, and so the worst case
+        delay before an alert fires. Independent of the collection interval above: checking
+        more often than metrics arrive is harmless, since a rule that has fired is suppressed
+        for five minutes.
+      </span>
+    </div>
+    <div class="setting-control">
+      <select bind:value={alertInterval}>
+        <option value={30}>30 seconds</option>
+        <option value={60}>1 minute</option>
+        <option value={120}>2 minutes</option>
+        <option value={300}>5 minutes</option>
+        <option value={600}>10 minutes</option>
+        <option value={1800}>30 minutes</option>
+      </select>
+      <button class="btn-tiny btn-save" disabled={savingAlertInterval} onclick={saveAlertInterval} title="Save the alert evaluation interval">
+        {savingAlertInterval ? '…' : alertIntervalSaved ? '✓' : 'Save'}
       </button>
     </div>
   </div>

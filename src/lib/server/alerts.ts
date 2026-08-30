@@ -13,6 +13,7 @@ import {
 } from '$lib/db/schema';
 import { eq, and, desc } from 'drizzle-orm';
 import { sendNotification } from './notifications';
+import { numericSetting } from './settings';
 
 /** Deduplication window: don't re-trigger the same rule within this period */
 const DEDUP_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
@@ -39,6 +40,48 @@ export async function evaluateAlerts(): Promise<void> {
       console.error(`[alerts] Error evaluating rule "${rule.name}" (${rule.id}):`, e);
     }
   }
+}
+
+// ── Scheduler ───────────────────────────────────────────────────────────────
+//
+// Alerting used to be the last statement of the metrics collection cycle, so
+// `metrics_interval_seconds` silently doubled as the alerting interval. An
+// operator raising it to an hour — a reasonable thing to do to a fleet whose
+// graphs they read once a day — got alerts up to an hour late, with nothing in
+// the settings page saying so. Reconciliation is still a passenger on that
+// loop, because it reuses the container listing the sweep has just fetched;
+// this is not, because it only reads metrics rows the collector has already
+// written, so its own timer costs nothing but a database read.
+//
+// Evaluating more often than metrics are collected is harmless: a rule that has
+// fired is suppressed for DEDUP_WINDOW_MS, and re-reading the same latest row
+// reaches the same verdict.
+
+const DEFAULT_ALERT_INTERVAL_SECONDS = 60;
+
+async function alertLoop(): Promise<void> {
+  try {
+    await evaluateAlerts();
+  } catch (e) {
+    console.error('[alerts] Evaluation cycle failed:', (e as any)?.message ?? e);
+  }
+  // Re-read every cycle so a change in the settings page takes effect without a
+  // restart, and scheduled from the end of the run so a slow cycle cannot
+  // overlap the next one.
+  const seconds = await numericSetting(
+    'alert_interval_seconds',
+    DEFAULT_ALERT_INTERVAL_SECONDS,
+    10,
+    3600,
+  ).catch(() => DEFAULT_ALERT_INTERVAL_SECONDS);
+  setTimeout(alertLoop, seconds * 1000).unref?.();
+}
+
+export function startAlertEvaluation(): void {
+  console.log('[alerts] Starting rule evaluation');
+  // Same delay as the metrics collector: let database initialization finish,
+  // and let the first collection put something there to evaluate.
+  setTimeout(alertLoop, 10_000).unref?.();
 }
 
 type AlertRule = typeof alertRules.$inferSelect;

@@ -199,6 +199,19 @@ export const handle = sequence(securityHeaders, authentication);
 // see src/lib/server/ws/registry.ts.
 import '$lib/server/ws/handlers';
 
+// ── Recovery from an interrupted deploy ──────────────────────────────────────
+// Before anything else touches the fleet: a deploy that was running when this
+// process last stopped left a `pending` deployment row and a `pending` container
+// generation that nothing would ever have looked at again. See recover.ts. Runs
+// once, at startup only — the same statement at any other time would fail a
+// deploy that is legitimately in flight.
+if (!(globalThis as any).__recoveryRan) {
+  (globalThis as any).__recoveryRan = true;
+  import('$lib/server/recover')
+    .then(({ recoverInterruptedDeploys }) => recoverInterruptedDeploys())
+    .catch((e) => console.error('[recover] Failed to run startup recovery:', e));
+}
+
 // ── Background metrics collection ────────────────────────────────────────────
 // Guard against re-initialization (e.g. HMR hot reloads in dev)
 if (!(globalThis as any).__metricsStarted) {
@@ -206,6 +219,17 @@ if (!(globalThis as any).__metricsStarted) {
   import('$lib/server/metrics')
     .then(({ startMetricsCollection }) => startMetricsCollection())
     .catch((e) => console.error('[metrics] Failed to start collection:', e));
+}
+
+// ── Alert evaluation ─────────────────────────────────────────────────────────
+// On its own timer rather than as the last step of the metrics cycle, so
+// raising `metrics_interval_seconds` no longer silently delays alerting by the
+// same amount. See the scheduler note in alerts.ts.
+if (!(globalThis as any).__alertsStarted) {
+  (globalThis as any).__alertsStarted = true;
+  import('$lib/server/alerts')
+    .then(({ startAlertEvaluation }) => startAlertEvaluation())
+    .catch((e) => console.error('[alerts] Failed to start evaluation:', e));
 }
 
 // ── Backup scheduler ─────────────────────────────────────────────────────────
