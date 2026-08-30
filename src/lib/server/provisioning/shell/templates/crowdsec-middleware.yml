@@ -1,3 +1,9 @@
+# The WAF, first in every application's middleware chain — so anything this
+# refuses is refused for every application on the worker at once.
+#
+# The three AppSec settings below are all plugin defaults being overridden. Each
+# default is safe on a single-application host and wrong here, because here one
+# middleware fronts every team's application.
 http:
   middlewares:
     crowdsec:
@@ -9,6 +15,43 @@ http:
           crowdsecLapiHost: 127.0.0.1:8081
           crowdsecLapiKey: {{BOUNCER_KEY}}
           crowdsecMode: stream
+
+          # How much of a request body is forwarded to AppSec for inspection.
+          # The plugin's default is 10 MB, and it buffers that much in Traefik's
+          # memory, POSTs it to AppSec and waits — with a 10-second client
+          # timeout on the call. A file upload therefore had its first ten
+          # megabytes read into memory and run through the whole CRS regex set
+          # before the request could be forwarded, and a body that could not be
+          # inspected inside ten seconds became a 403 for the uploader.
+          #
+          # 64 KB is where the detection actually is: an injection payload is at
+          # the front of a form or JSON body, and the megabytes behind it in a
+          # multipart upload are file content, which CRS can only mistake for an
+          # attack — a compressed archive is arbitrary bytes and will eventually
+          # contain something that reads like a shell expression. Truncating is
+          # not the same as switching body inspection off: CRS still sees the
+          # start of every body.
+          crowdsecAppsecBodyLimit: 65536
+
+          # What to do when AppSec cannot answer — unreachable, or answering
+          # 500. The plugin defaults both to blocking, which on this worker
+          # means every application returns 403 to every visitor for as long as
+          # CrowdSec is not answering.
+          #
+          # That is not a hypothetical window. Applying an exclusion restarts
+          # CrowdSec (AppSec configuration is read at startup, so
+          # rudder-appsec-config.sh has to), and with these left at their
+          # defaults each restart took the whole worker off the air for the few
+          # seconds it took — with nothing in Rudder saying so, because a
+          # bouncer-side 403 is not a CrowdSec decision and appears in no
+          # `cscli` output.
+          #
+          # Failing open here gives up in-band virtual patching for those
+          # seconds. It does not give up ban enforcement: `stream` mode keeps
+          # the last decision list in the plugin's own cache, so addresses
+          # CrowdSec has already banned stay banned while it restarts.
+          crowdsecAppsecUnreachableBlock: false
+          crowdsecAppsecFailureBlock: false
     security-headers:
       headers:
         stsSeconds: 31536000

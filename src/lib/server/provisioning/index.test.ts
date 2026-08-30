@@ -678,6 +678,27 @@ describe('generateProvisioningScript', () => {
     expect(yml(script)).not.toContain('-oidc-tokens:');
   });
 
+  test('the WAF middleware does not refuse traffic when AppSec cannot answer', () => {
+    // The bouncer plugin defaults to blocking when the AppSec server is
+    // unreachable or erroring, and this middleware is first in every router's
+    // chain — so with the defaults, every application on the worker returned
+    // 403 to everyone for as long as CrowdSec was not answering. Applying a
+    // rule exclusion restarts CrowdSec, so that window was reached by using
+    // Rudder as intended, and nothing in Rudder could show it: a bouncer-side
+    // 403 is not a decision and appears in no `cscli` output.
+    const crowdsecYml = Buffer.from(
+      script.match(/echo "([^"]*)" \| base64 -d > \/etc\/traefik\/dynamic\/crowdsec\.yml/)![1],
+      'base64',
+    ).toString();
+
+    expect(crowdsecYml).toContain('crowdsecAppsecUnreachableBlock: false');
+    expect(crowdsecYml).toContain('crowdsecAppsecFailureBlock: false');
+    // And only the head of a body is inspected. The default is 10 MB, buffered
+    // in Traefik and run through CRS under a 10-second timeout, which turned
+    // file uploads into 403s for the uploader.
+    expect(crowdsecYml).toContain('crowdsecAppsecBodyLimit: 65536');
+  });
+
   test('preserves Go template syntax used by podman commands', () => {
     // The substitution regex must not eat `{{.Names}}` / `{{.Status}}`.
     expect(script).toContain('{{.Names}}');

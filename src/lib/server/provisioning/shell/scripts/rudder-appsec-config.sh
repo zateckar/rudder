@@ -93,6 +93,14 @@ echo "AppSec exclusions updated"
 # A few seconds with no WAF on this worker is the cost, and it is only paid when
 # the document actually changed — which is why the `cmp` above is not an
 # optimisation.
+#
+# "No WAF" and not "no worker", but only because the Traefik middleware sets
+# crowdsecAppsecUnreachableBlock and crowdsecAppsecFailureBlock to false. The
+# plugin defaults both to true, and with those defaults this restart returned
+# 403 from every application on the worker until CrowdSec came back — an outage
+# caused by a rule exclusion, and invisible in Rudder, since a bouncer-side 403
+# creates no alert and no decision. Anything that changes those two settings
+# changes what this restart costs.
 if systemctl is-active --quiet crowdsec-container.service; then
   if systemctl restart crowdsec-container.service; then
     echo "CrowdSec restarted"
