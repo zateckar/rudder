@@ -32,6 +32,9 @@
     count: number;
     /** The hostnames this rule fired against, for this source. */
     hosts?: string[];
+    /** ISO, or '' — when this rule last and first matched. */
+    lastSeen?: string;
+    firstSeen?: string;
   }
   interface SourceGroup {
     sourceIp: string;
@@ -51,9 +54,7 @@
     host = undefined,
     /** Whether the viewer may change this application's excluded rules. */
     canExclude = false,
-    onExclude,
     onExcludeMany,
-    busyRule = null,
     busyBulk = null,
     /** Rules already disabled for this application, as stored. */
     disabledRules = [],
@@ -69,17 +70,18 @@
     sources: SourceGroup[];
     host?: string;
     canExclude?: boolean;
-    /** `source` narrows the exclusion to one address; omitted means all traffic. */
-    onExclude?: (host: string, rule: string, source?: string) => void;
     /**
-     * The same action for a selection, as one request.
+     * Disable the ticked rules. `source` narrows them to one address; omitted
+     * means all traffic.
      *
-     * Not a loop over `onExclude` at the call site: each write restarts CrowdSec
-     * on the worker, so twenty rules one at a time is twenty restarts, and every
-     * one of them is a window where the whole worker refuses traffic.
+     * The only way to disable anything from this table, including one rule —
+     * a selection of one is a selection. There used to be a pair of buttons on
+     * every row as well, which meant two ways to do the same thing, twenty-five
+     * pairs of buttons on a real table, and no room for anything else. It also
+     * made the expensive path the easy one: each write restarts CrowdSec on the
+     * worker, so clicking down the rows was one restart per rule.
      */
     onExcludeMany?: (host: string, rules: string[], source?: string) => void;
-    busyRule?: string | null;
     /** `host|source` while a bulk request is in flight. */
     busyBulk?: string | null;
     disabledRules?: string[];
@@ -123,6 +125,22 @@
     // A range that covers this address is stored as its own entry; without
     // parsing CIDR in the browser, an exact match is all this can claim.
     return null;
+  }
+
+  /**
+   * How old a rule's matches are, and over what span.
+   *
+   * The age is the thing that decides whether a rule is worth acting on. These
+   * alerts are history — a source group routinely covers a day — so a rule that
+   * fired ninety times an hour ago and one that fired ninety times last Tuesday
+   * are indistinguishable without it, and only the first is breaking anything
+   * now. The span goes in the title because a burst and a steady trickle mean
+   * different things and both read as one number.
+   */
+  function ageTitle(rule: RuleCount): string {
+    if (!rule.lastSeen) return '';
+    if (!rule.firstSeen || rule.firstSeen === rule.lastSeen) return rule.lastSeen;
+    return `First ${rule.firstSeen}\nLast ${rule.lastSeen}`;
   }
 
   /**
@@ -280,7 +298,7 @@
       <table class="rules">
         <thead>
           <tr>
-            {#if pickable.length > 1}
+            {#if pickable.length > 0}
               <th class="pick">
                 <!-- Select-all covers only the rules that can be switched off.
                      The meta rules and the already-disabled ones are in the
@@ -295,16 +313,16 @@
                 />
               </th>
             {/if}
-            <th>Rule</th><th>What it matched</th><th class="num">Fired</th><th></th>
+            <th>Rule</th><th>What it matched</th><th class="num">Fired</th>
+            <th class="when">Last seen</th><th></th>
           </tr>
         </thead>
         <tbody>
           {#each group.rules as rule}
             {@const note = metaRuleNote(rule.id)}
-            {@const hostsFor = targets(rule)}
             {@const scope = disabledScope(rule, group.sourceIp)}
             <tr class:is-meta={note} class:is-off={scope}>
-              {#if pickable.length > 1}
+              {#if pickable.length > 0}
                 <td class="pick">
                   {#if selectable(rule, group.sourceIp)}
                     <input
@@ -334,37 +352,17 @@
                 {/if}
               </td>
               <td class="num"><strong>{rule.count}</strong></td>
+              <td class="when" title={ageTitle(rule)}>
+                {rule.lastSeen ? timeAgo(rule.lastSeen) : '—'}
+              </td>
               <td class="action">
                 {#if scope}
                   <span class="cannot">{scope === 'all' ? 'disabled' : 'disabled for this IP'}</span>
                 {:else if note}
-                  <!-- Not offered. Excluding the anomaly gate switches CRS off
-                       for the application rather than narrowing it, and the
-                       setup and reporting rules stop nothing. -->
+                  <!-- Why this row has no checkbox. Excluding the anomaly gate
+                       switches CRS off for the application rather than narrowing
+                       it, and the setup and reporting rules stop nothing. -->
                   <span class="cannot">cannot be disabled</span>
-                {:else if canExclude && onExclude}
-                  {#each hostsFor as target}
-                    {@const label = hostsFor.length > 1 ? `${target.split('.')[0]}: ` : ''}
-                    <!-- Two scopes, because they are genuinely different
-                         decisions. "All traffic" gives up the rule for everyone;
-                         "This IP" keeps it protecting the application against
-                         every other source, which is what you want when one
-                         partner or office address is the only thing tripping it. -->
-                    <button
-                      class="btn-disable"
-                      disabled={busyRule === `${target}|${rule.id}`}
-                      onclick={() => onExclude(target, String(rule.id))}
-                      title={`Stop rule ${rule.id} firing for ${target}, whoever sends the request`}
-                    >{busyRule === `${target}|${rule.id}` ? 'Disabling…' : `${label}all traffic`}</button>
-                    <button
-                      class="btn-disable btn-disable--scoped"
-                      disabled={busyRule === `${target}|${rule.id}@${group.sourceIp}`}
-                      onclick={() => onExclude(target, String(rule.id), group.sourceIp)}
-                      title={`Stop rule ${rule.id} firing for ${target}, but only for requests from ${group.sourceIp}`}
-                    >{busyRule === `${target}|${rule.id}@${group.sourceIp}`
-                      ? 'Disabling…'
-                      : `${label}this IP`}</button>
-                  {/each}
                 {/if}
               </td>
             </tr>
@@ -524,12 +522,16 @@
   }
   .bulk-clear:hover { color: var(--text-secondary); text-decoration: underline; }
   .num { text-align: right; width: 60px; }
+  /* Right-aligned against the count, so the pair reads as "how much, how
+     recently" rather than as two unrelated columns. */
+  .when { width: 110px; text-align: right; font-size: 11px; color: var(--text-muted); }
   /* The count is the point of the table, so it reads before the prose. */
   .num strong { font-size: 14px; color: var(--text-primary); }
   .rule-id { font-size: 12px; }
-  /* Wider than one button needs: on the worker page a rule that fired against
-     several applications gets one button each, labelled by application. */
-  .action { width: 250px; text-align: right; }
+  /* Only ever holds a short status now that the per-row buttons are gone — the
+     action moved to the bar under the table, where it is taken once for a
+     selection rather than once per row. */
+  .action { width: 130px; text-align: right; }
 
   /* Styled here rather than borrowing the host page's `btn-tiny`. Svelte scopes
      styles to the component that declares them, so a class defined in the page

@@ -393,7 +393,6 @@
   // legitimate traffic — could not see any of it, and could not act on it.
   let appsec = $state<any>(null);
   let appsecLoading = $state(false);
-  let excludingRule = $state<string | null>(null);
   /** `host|source` while a selection is being written. */
   let excludingBulk = $state<string | null>(null);
   let appsecMessage = $state('');
@@ -411,54 +410,14 @@
     }
   }
 
-  async function excludeAppsecRule(host: string, rule: string, source?: string) {
-    const scope = source
-      ? `only for requests from ${source}. The rule keeps protecting this application ` +
-        `against every other address.`
-      : `for all traffic. It stops protecting this application against everyone, on every ` +
-        `port it serves.`;
-    if (!confirm(`Stop rule ${rule} firing for ${host}?\n\nDisabled ${scope}\n\n` +
-      `The change takes effect within a minute.`)) return;
-
-    appsecMessage = '';
-    appsecError = false;
-    excludingRule = `${host}|${rule}${source ? `@${source}` : ''}`;
-    try {
-      const res = await fetch('/api/applications/appsec-rules', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ host, rule, source }),
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok || !body.ok) {
-        appsecError = true;
-        appsecMessage = body.error || `Could not disable rule ${rule}.`;
-      } else if (body.added === false) {
-        appsecMessage = `Rule ${rule} was already disabled for this application.`;
-      } else {
-        appsecMessage =
-          `Rule ${rule} disabled${source ? ` for ${source}` : ''}. ` +
-          `The worker applies it within a minute.`;
-        // Re-read so the row marks itself disabled. Otherwise it still offers
-        // "Disable", which reads as the click having failed.
-        await loadAppsec();
-      }
-    } catch (e: any) {
-      appsecError = true;
-      appsecMessage = e.message;
-    } finally {
-      excludingRule = null;
-    }
-  }
-
   /**
-   * The same thing for a selection, in one request.
+   * Disable the rules ticked in the matches table, in one request.
    *
-   * Not a loop over `excludeAppsecRule`: the worker restarts CrowdSec when its
-   * exclusions change, so twenty rules one at a time is twenty restarts, and
-   * every restart is a window where the whole worker refuses traffic. A chunked
-   * upload trips twenty-odd signatures on the same file, so this is the normal
-   * case rather than a bulk-edit convenience.
+   * One call for the whole selection, including a selection of one. The worker
+   * restarts CrowdSec when its exclusions change, so twenty rules written one at
+   * a time is twenty restarts, and every restart is a window where nothing on
+   * that worker answers. A chunked upload trips twenty-odd signatures on the
+   * same file, so a large selection is the normal case here.
    */
   async function excludeAppsecRules(host: string, rules: string[], source?: string) {
     const scope = source
@@ -2178,9 +2137,7 @@
           sources={appsec.sources}
           host={data.application.domain ?? undefined}
           canExclude={true}
-          onExclude={excludeAppsecRule}
           onExcludeMany={excludeAppsecRules}
-          busyRule={excludingRule}
           busyBulk={excludingBulk}
           disabledRules={appsec.disabledRules ?? []}
           decisions={appsec.decisions ?? []}

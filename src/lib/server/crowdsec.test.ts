@@ -532,6 +532,49 @@ describe('parseAppsecAlerts', () => {
       ]);
     });
 
+    test('dates each rule, because a count with no age is not a judgement', () => {
+      // These alerts are history and a group routinely spans a day. A rule that
+      // fired five times this morning and one that fired five times last week
+      // are the same row without a date, and only one of them is worth giving
+      // up protection for.
+      const at = (created_at: string, event: unknown) => ({
+        ...SCORED_ALERT,
+        created_at,
+        events: [event],
+      });
+      const traversal = SCORED_ALERT.events[1]; // 930100
+      const gate = SCORED_ALERT.events[2]; // 949110
+
+      const [g] = groupAppsecBySource(
+        parseAppsecAlerts(
+          JSON.stringify([
+            at('2026-08-30T06:37:19Z', traversal),
+            at('2026-08-30T09:12:44Z', traversal),
+            at('2026-08-24T01:02:03Z', gate),
+          ]),
+          0,
+        )!,
+      );
+
+      const seen = (id: number) => {
+        const rule = g.rules.find((r) => r.id === id)!;
+        return [rule.firstSeen, rule.lastSeen];
+      };
+      // The span, not just the latest: a burst and a steady trickle are
+      // different problems and both read as one number.
+      expect(seen(930100)).toEqual(['2026-08-30T06:37:19Z', '2026-08-30T09:12:44Z']);
+      // One match is its own first and last, not a range of nothing.
+      expect(seen(949110)).toEqual(['2026-08-24T01:02:03Z', '2026-08-24T01:02:03Z']);
+    });
+
+    test('an alert with no timestamp leaves the rule undated rather than ancient', () => {
+      // Defaulting to the epoch would make every dated rule beside it look
+      // recent, which is worse than admitting CrowdSec did not say.
+      const [g] = groupAppsecBySource(repeated(1));
+      expect(g.rules.find((r) => r.id === 930100)?.lastSeen).toBe('');
+      expect(g.rules.find((r) => r.id === 930100)?.firstSeen).toBe('');
+    });
+
     test('keeps what each rule matched, so a number becomes a judgement', () => {
       const [g] = groupAppsecBySource(repeated(2));
       expect(g.rules.find((r) => r.id === 930100)?.message).toBe(

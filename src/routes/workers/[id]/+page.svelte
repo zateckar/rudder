@@ -73,8 +73,6 @@
   let crowdsecLoading = $state(false);
   let removingDecision = $state<number | null>(null);
   let decisionError = $state('');
-  /** `host|rule` while that chip's request is in flight. */
-  let excludingRule = $state<string | null>(null);
   /** `host|source` while a selection is being written. */
   let excludingBulk = $state<string | null>(null);
   let ruleMessage = $state('');
@@ -417,61 +415,19 @@
   }
 
   /**
-   * Stop one rule firing for the application on `host`.
+   * Stop the rules ticked in the matches table firing for the application on
+   * `host`.
    *
    * Offered here because this is where the evidence is. Making someone find the
    * application, open its edit form and retype a six-digit number is where the
    * mistakes come from — and the number they would most likely retype is the
    * wrong one, since the rule a decision names is the first in the chain rather
    * than the one that scored.
-   */
-  async function excludeRule(host: string, rule: string, source?: string) {
-    if (!host) return;
-
-    // Anomaly-gate and setup rules are not rendered as buttons at all, so this
-    // is unreachable from the UI — the endpoint refuses them regardless.
-    const scope = source
-      ? `only for requests from ${source}. The rule keeps protecting that application ` +
-        `against every other address.`
-      : `for all traffic. It stops protecting that application against everyone, on every ` +
-        `port it serves.`;
-    if (!confirm(`Stop rule ${rule} firing for ${host}?\n\nDisabled ${scope}\n\n` +
-      `CrowdSec restarts on this worker within a minute.`)) return;
-
-    ruleMessage = '';
-    ruleError = false;
-    excludingRule = `${host}|${rule}${source ? `@${source}` : ''}`;
-    try {
-      const res = await fetch('/api/applications/appsec-rules', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ host, rule, source }),
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok || !body.ok) {
-        ruleError = true;
-        ruleMessage = body.error || `Could not exclude rule ${rule}.`;
-      } else if (body.added === false) {
-        ruleMessage = `${body.application} already excluded rule ${rule}.`;
-      } else {
-        ruleMessage =
-          `Rule ${rule} excluded for ${body.application}. ` +
-          `The worker applies it within a minute.`;
-      }
-    } catch (e: any) {
-      ruleError = true;
-      ruleMessage = e.message;
-    } finally {
-      excludingRule = null;
-    }
-  }
-
-  /**
-   * The same action for a selection, as one write.
    *
-   * Each write restarts CrowdSec on this worker, so twenty rules one at a time
-   * is twenty restarts — twenty windows where every application here refuses
-   * traffic. That makes batching a correctness matter rather than a convenience.
+   * One request for the whole selection, including a selection of one. Each
+   * write restarts CrowdSec on this worker, so twenty rules one at a time is
+   * twenty restarts — twenty windows where every application here is
+   * uninspected. That makes batching a correctness matter, not a convenience.
    */
   async function excludeRules(host: string, rules: string[], source?: string) {
     if (!host || rules.length === 0) return;
@@ -2164,9 +2120,7 @@
           <AppsecMatches
             sources={crowdsec.appsecAlerts}
             canExclude={true}
-            onExclude={excludeRule}
             onExcludeMany={excludeRules}
-            busyRule={excludingRule}
             busyBulk={excludingBulk}
             decisions={crowdsec.decisionsAvailable ? crowdsec.decisions : []}
             canLiftDecisions={true}

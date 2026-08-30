@@ -237,6 +237,18 @@ export interface AppsecRuleCount {
   /** Requests from this source that this rule matched. */
   count: number;
   /**
+   * When this rule last matched, ISO, or '' when CrowdSec did not say.
+   *
+   * Per rule and not just per source, because the age is what says whether a
+   * rule is still a problem. A source group carries hours of history: the rule
+   * that fired ninety times this morning and the one that fired once last week
+   * are the same two lines without it, and only one of them is worth giving up
+   * protection for.
+   */
+  lastSeen: string;
+  /** When it first matched, ISO. With `lastSeen` this gives the span. */
+  firstSeen: string;
+  /**
    * The hostnames this rule matched against, for this source.
    *
    * An exclusion has to name a host. One source commonly hits several
@@ -483,7 +495,10 @@ export function groupAppsecBySource(
   // aside so the public shape stays an array sorted by what matters.
   const counts = new Map<
     string,
-    Map<string, { count: number; message: string; hosts: string[] }>
+    Map<
+      string,
+      { count: number; message: string; hosts: string[]; firstSeen: string; lastSeen: string }
+    >
   >();
   const wanted = hosts?.length ? new Set(hosts) : null;
 
@@ -505,7 +520,11 @@ export function groupAppsecBySource(
       lastSeen: '',
     };
     const tally =
-      counts.get(ip) ?? new Map<string, { count: number; message: string; hosts: string[] }>();
+      counts.get(ip) ??
+      new Map<
+        string,
+        { count: number; message: string; hosts: string[]; firstSeen: string; lastSeen: string }
+      >();
 
     group.requests += 1;
     if (row.at > group.lastSeen) group.lastSeen = row.at;
@@ -521,9 +540,22 @@ export function groupAppsecBySource(
     const ids: Array<number | string> = [...row.ruleIds, ...row.ruleNames];
     for (const id of ids) {
       const key = String(id);
-      const existing = tally.get(key) ?? { count: 0, message: '', hosts: [] };
+      const existing = tally.get(key) ?? {
+        count: 0,
+        message: '',
+        hosts: [],
+        firstSeen: '',
+        lastSeen: '',
+      };
       existing.count += 1;
       if (!existing.message && row.ruleMessages[key]) existing.message = row.ruleMessages[key];
+      // ISO-8601 UTC compares correctly as a string, which is what CrowdSec
+      // emits. An alert with no timestamp is skipped rather than treated as the
+      // epoch, which would make every rule beside it look recent by comparison.
+      if (row.at) {
+        if (!existing.firstSeen || row.at < existing.firstSeen) existing.firstSeen = row.at;
+        if (row.at > existing.lastSeen) existing.lastSeen = row.at;
+      }
       // Bare, because that is what an exclusion names: the same rule firing on
       // :443 and :1443 of one application is one application, not two.
       if (!existing.hosts.includes(bare)) existing.hosts.push(bare);
@@ -537,11 +569,13 @@ export function groupAppsecBySource(
   for (const [ip, tally] of counts) {
     const group = groups.get(ip)!;
     group.rules = [...tally.entries()]
-      .map(([key, { count, message, hosts: firedOn }]) => ({
+      .map(([key, { count, message, hosts: firedOn, firstSeen, lastSeen }]) => ({
         id: /^\d+$/.test(key) ? Number(key) : key,
         message,
         count,
         hosts: firedOn,
+        firstSeen,
+        lastSeen,
       }))
       // Loudest first — that is the one to look at. Ties break on the id so the
       // order is stable between polls rather than shuffling under the cursor.
