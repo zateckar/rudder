@@ -394,6 +394,8 @@
   let appsec = $state<any>(null);
   let appsecLoading = $state(false);
   let excludingRule = $state<string | null>(null);
+  /** `host|source` while a selection is being written. */
+  let excludingBulk = $state<string | null>(null);
   let appsecMessage = $state('');
   let appsecError = $state(false);
 
@@ -446,6 +448,58 @@
       appsecMessage = e.message;
     } finally {
       excludingRule = null;
+    }
+  }
+
+  /**
+   * The same thing for a selection, in one request.
+   *
+   * Not a loop over `excludeAppsecRule`: the worker restarts CrowdSec when its
+   * exclusions change, so twenty rules one at a time is twenty restarts, and
+   * every restart is a window where the whole worker refuses traffic. A chunked
+   * upload trips twenty-odd signatures on the same file, so this is the normal
+   * case rather than a bulk-edit convenience.
+   */
+  async function excludeAppsecRules(host: string, rules: string[], source?: string) {
+    const scope = source
+      ? `only for requests from ${source}. They keep protecting this application ` +
+        `against every other address.`
+      : `for all traffic. They stop protecting this application against everyone, on every ` +
+        `port it serves.`;
+    if (!confirm(`Stop ${rules.length} rule${rules.length === 1 ? '' : 's'} firing for ${host}?\n\n` +
+      `${rules.join(', ')}\n\nDisabled ${scope}\n\n` +
+      `The change takes effect within a minute.`)) return;
+
+    appsecMessage = '';
+    appsecError = false;
+    excludingBulk = `${host}|${source ?? ''}`;
+    try {
+      const res = await fetch('/api/applications/appsec-rules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host, rules, source }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || !body.ok) {
+        appsecError = true;
+        appsecMessage = body.error || 'Could not disable those rules.';
+      } else {
+        // What changed, not what was asked for. Selecting a rule a colleague
+        // disabled a minute ago is a success that changed nothing, and saying
+        // "25 disabled" when 3 were would be a report nobody could reconcile
+        // against the list.
+        const added: string[] = body.addedRules ?? [];
+        appsecMessage = added.length === 0
+          ? 'Those rules were already disabled for this application.'
+          : `${added.length} rule${added.length === 1 ? '' : 's'} disabled` +
+            `${source ? ` for ${source}` : ''}. The worker applies the change within a minute.`;
+        await loadAppsec();
+      }
+    } catch (e: any) {
+      appsecError = true;
+      appsecMessage = e.message;
+    } finally {
+      excludingBulk = null;
     }
   }
 
@@ -2125,7 +2179,9 @@
           host={data.application.domain ?? undefined}
           canExclude={true}
           onExclude={excludeAppsecRule}
+          onExcludeMany={excludeAppsecRules}
           busyRule={excludingRule}
+          busyBulk={excludingBulk}
           disabledRules={appsec.disabledRules ?? []}
           decisions={appsec.decisions ?? []}
           banHistory={appsec.banHistory ?? {}}

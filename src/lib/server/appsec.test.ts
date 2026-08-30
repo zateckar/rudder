@@ -59,6 +59,30 @@ describe('parseRuleList', () => {
     expect(parseRuleList('tag:attack-lfi@10.0.0.0/8')).toEqual(['tag:attack-lfi@10.0.0.0/8']);
   });
 
+  test('reads the whole selection the bulk endpoint composes', () => {
+    // POST /api/applications/appsec-rules joins a selection with commas and
+    // scopes every entry to the same address before parsing, so a selection of
+    // twenty rules goes through exactly the validation a hand-typed list does.
+    // It is one call rather than twenty because each write restarts CrowdSec on
+    // the worker, and each restart is a window where nothing there answers.
+    const selection = ['942100', '932130', '933180'];
+    const composed = selection.map((r) => `${r}@178.209.129.231`).join(',');
+
+    expect(parseRuleList(composed)).toEqual([
+      '942100@178.209.129.231',
+      '932130@178.209.129.231',
+      '933180@178.209.129.231',
+    ]);
+
+    // A rule ticked twice is one exclusion, not two entries that would both be
+    // written into the generated config.
+    expect(parseRuleList('942100@10.0.0.1,942100@10.0.0.1')).toEqual(['942100@10.0.0.1']);
+
+    // And one bad entry still rejects the whole list. Accepting the rest would
+    // report a success for a selection that was only partly applied.
+    expect(parseRuleList('942100@10.0.0.1,rule 933180@10.0.0.1')).toBeNull();
+  });
+
   test('refuses a source that is not an address or range', () => {
     // Anything else would be interpolated into an expr filter.
     for (const bad of ['930100@nope', '930100@1.2.3', '930100@999.1.1.1', "930100@' or '", '930100@1.2.3.4/33', '930100@']) {

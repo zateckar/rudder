@@ -75,6 +75,8 @@
   let decisionError = $state('');
   /** `host|rule` while that chip's request is in flight. */
   let excludingRule = $state<string | null>(null);
+  /** `host|source` while a selection is being written. */
+  let excludingBulk = $state<string | null>(null);
   let ruleMessage = $state('');
   let ruleError = $state(false);
 
@@ -461,6 +463,53 @@
       ruleMessage = e.message;
     } finally {
       excludingRule = null;
+    }
+  }
+
+  /**
+   * The same action for a selection, as one write.
+   *
+   * Each write restarts CrowdSec on this worker, so twenty rules one at a time
+   * is twenty restarts — twenty windows where every application here refuses
+   * traffic. That makes batching a correctness matter rather than a convenience.
+   */
+  async function excludeRules(host: string, rules: string[], source?: string) {
+    if (!host || rules.length === 0) return;
+
+    const scope = source
+      ? `only for requests from ${source}. They keep protecting that application ` +
+        `against every other address.`
+      : `for all traffic. They stop protecting that application against everyone, on every ` +
+        `port it serves.`;
+    if (!confirm(`Stop ${rules.length} rule${rules.length === 1 ? '' : 's'} firing for ${host}?\n\n` +
+      `${rules.join(', ')}\n\nDisabled ${scope}\n\n` +
+      `CrowdSec restarts on this worker within a minute.`)) return;
+
+    ruleMessage = '';
+    ruleError = false;
+    excludingBulk = `${host}|${source ?? ''}`;
+    try {
+      const res = await fetch('/api/applications/appsec-rules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host, rules, source }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || !body.ok) {
+        ruleError = true;
+        ruleMessage = body.error || 'Could not exclude those rules.';
+      } else {
+        const added: string[] = body.addedRules ?? [];
+        ruleMessage = added.length === 0
+          ? `${body.application} already excluded those rules.`
+          : `${added.length} rule${added.length === 1 ? '' : 's'} excluded for ${body.application}. ` +
+            `The worker applies the change within a minute.`;
+      }
+    } catch (e: any) {
+      ruleError = true;
+      ruleMessage = e.message;
+    } finally {
+      excludingBulk = null;
     }
   }
 
@@ -2116,7 +2165,9 @@
             sources={crowdsec.appsecAlerts}
             canExclude={true}
             onExclude={excludeRule}
+            onExcludeMany={excludeRules}
             busyRule={excludingRule}
+            busyBulk={excludingBulk}
             decisions={crowdsec.decisionsAvailable ? crowdsec.decisions : []}
             canLiftDecisions={true}
             onLiftDecision={removeDecision}

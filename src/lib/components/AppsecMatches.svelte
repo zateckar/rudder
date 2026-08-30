@@ -52,7 +52,9 @@
     /** Whether the viewer may change this application's excluded rules. */
     canExclude = false,
     onExclude,
+    onExcludeMany,
     busyRule = null,
+    busyBulk = null,
     /** Rules already disabled for this application, as stored. */
     disabledRules = [],
     /** Active CrowdSec bans on the worker, which apply to every application. */
@@ -69,7 +71,17 @@
     canExclude?: boolean;
     /** `source` narrows the exclusion to one address; omitted means all traffic. */
     onExclude?: (host: string, rule: string, source?: string) => void;
+    /**
+     * The same action for a selection, as one request.
+     *
+     * Not a loop over `onExclude` at the call site: each write restarts CrowdSec
+     * on the worker, so twenty rules one at a time is twenty restarts, and every
+     * one of them is a window where the whole worker refuses traffic.
+     */
+    onExcludeMany?: (host: string, rules: string[], source?: string) => void;
     busyRule?: string | null;
+    /** `host|source` while a bulk request is in flight. */
+    busyBulk?: string | null;
     disabledRules?: string[];
     decisions?: Decision[];
     banHistory?: Record<string, { at: string; scenario: string; expired: boolean }>;
@@ -133,6 +145,71 @@
     }
     return seen;
   }
+
+  /**
+   * Ticked rules, keyed `address|rule`.
+   *
+   * Keyed by address as well as rule because the same rule appears under every
+   * source that tripped it, and those are separate decisions: excluding 942100
+   * for the office address says nothing about excluding it for a scanner.
+   *
+   * Never read directly — `chosen` filters it against what is still selectable,
+   * so a rule that was disabled between ticking it and clicking cannot be sent
+   * twice, and a stale tick left behind by a refresh cannot resurrect itself.
+   */
+  let selected = $state<Record<string, boolean>>({});
+
+  function key(sourceIp: string, rule: RuleCount): string {
+    return `${sourceIp}|${rule.id}`;
+  }
+
+  /** Whether this row is a rule somebody could actually switch off. */
+  function selectable(rule: RuleCount, sourceIp: string): boolean {
+    return (
+      canExclude &&
+      !!onExcludeMany &&
+      !metaRuleNote(rule.id) &&
+      disabledScope(rule, sourceIp) === null
+    );
+  }
+
+  /** The rules ticked for this address that are still worth sending. */
+  function chosen(group: SourceGroup): RuleCount[] {
+    return group.rules.filter(
+      (rule) => selected[key(group.sourceIp, rule)] && selectable(rule, group.sourceIp),
+    );
+  }
+
+  function selectableRules(group: SourceGroup): RuleCount[] {
+    return group.rules.filter((rule) => selectable(rule, group.sourceIp));
+  }
+
+  function setAll(group: SourceGroup, on: boolean): void {
+    for (const rule of selectableRules(group)) selected[key(group.sourceIp, rule)] = on;
+  }
+
+  function clear(group: SourceGroup): void {
+    for (const rule of group.rules) delete selected[key(group.sourceIp, rule)];
+  }
+
+  /**
+   * The hostnames a bulk exclusion would be written against, and what to send
+   * to each.
+   *
+   * Per host rather than one list for all of them: on the worker page a source
+   * commonly hits several applications, and sending every ticked rule to every
+   * host would disable rules on applications they never fired against. Each
+   * host gets only the rules that actually matched it.
+   */
+  function bulkGroups(group: SourceGroup): Array<{ target: string; rules: RuleCount[] }> {
+    const byTarget = new Map<string, RuleCount[]>();
+    for (const rule of chosen(group)) {
+      for (const target of targets(rule)) {
+        byTarget.set(target, [...(byTarget.get(target) ?? []), rule]);
+      }
+    }
+    return [...byTarget.entries()].map(([target, rules]) => ({ target, rules }));
+  }
 </script>
 
 {#if sources.length === 0 && unmatchedBans.length === 0}
@@ -140,6 +217,8 @@
 {:else}
   {#each sources as group}
     {@const ban = banFor(group.sourceIp)}
+    {@const pickable = selectableRules(group)}
+    {@const picked = chosen(group)}
     <div class="source" class:is-banned={ban}>
       <div class="source-head">
         <span class="mono addr">{group.sourceIp}</span>
@@ -199,13 +278,45 @@
       {/if}
 
       <table class="rules">
-        <thead><tr><th>Rule</th><th>What it matched</th><th class="num">Fired</th><th></th></tr></thead>
+        <thead>
+          <tr>
+            {#if pickable.length > 1}
+              <th class="pick">
+                <!-- Select-all covers only the rules that can be switched off.
+                     The meta rules and the already-disabled ones are in the
+                     table for context, and a tick that silently skipped them
+                     would report a count nobody could reconcile. -->
+                <input
+                  type="checkbox"
+                  aria-label={`Select every disableable rule for ${group.sourceIp}`}
+                  checked={picked.length === pickable.length}
+                  indeterminate={picked.length > 0 && picked.length < pickable.length}
+                  onchange={(e) => setAll(group, e.currentTarget.checked)}
+                />
+              </th>
+            {/if}
+            <th>Rule</th><th>What it matched</th><th class="num">Fired</th><th></th>
+          </tr>
+        </thead>
         <tbody>
           {#each group.rules as rule}
             {@const note = metaRuleNote(rule.id)}
             {@const hostsFor = targets(rule)}
             {@const scope = disabledScope(rule, group.sourceIp)}
             <tr class:is-meta={note} class:is-off={scope}>
+              {#if pickable.length > 1}
+                <td class="pick">
+                  {#if selectable(rule, group.sourceIp)}
+                    <input
+                      type="checkbox"
+                      aria-label={`Select rule ${rule.id}`}
+                      checked={!!selected[key(group.sourceIp, rule)]}
+                      onchange={(e) =>
+                        (selected[key(group.sourceIp, rule)] = e.currentTarget.checked)}
+                    />
+                  {/if}
+                </td>
+              {/if}
               <td><span class="mono rule-id">{rule.id}</span></td>
               <td>
                 {rule.message || (note ? '' : '—')}
@@ -260,6 +371,31 @@
           {/each}
         </tbody>
       </table>
+
+      {#if picked.length > 0 && onExcludeMany}
+        <div class="bulk">
+          <span class="bulk-count">
+            {picked.length} rule{picked.length === 1 ? '' : 's'} selected
+          </span>
+          {#each bulkGroups(group) as { target, rules }}
+            {@const label = host ? '' : `${target.split('.')[0]}: `}
+            {@const ids = rules.map((r) => String(r.id))}
+            <button
+              class="btn-disable"
+              disabled={busyBulk === `${target}|`}
+              onclick={() => onExcludeMany(target, ids)}
+              title={`Stop these ${ids.length} rules firing for ${target}, whoever sends the request`}
+            >{busyBulk === `${target}|` ? 'Disabling…' : `${label}all traffic`}</button>
+            <button
+              class="btn-disable btn-disable--scoped"
+              disabled={busyBulk === `${target}|${group.sourceIp}`}
+              onclick={() => onExcludeMany(target, ids, group.sourceIp)}
+              title={`Stop these ${ids.length} rules firing for ${target}, but only for requests from ${group.sourceIp}`}
+            >{busyBulk === `${target}|${group.sourceIp}` ? 'Disabling…' : `${label}this IP`}</button>
+          {/each}
+          <button class="bulk-clear" onclick={() => clear(group)}>Clear</button>
+        </div>
+      {/if}
 
       {#if group.paths.length}
         <details class="paths">
@@ -371,6 +507,22 @@
     padding: 6px 12px; border-top: 1px solid var(--border-subtle);
     color: var(--text-secondary); font-size: 12px; vertical-align: top;
   }
+  .pick { width: 28px; padding-right: 0; }
+  .pick input { cursor: pointer; margin: 0; }
+  /* Sits directly under the table it acts on, so the count and the buttons read
+     as one sentence about the rows above rather than a floating toolbar. */
+  .bulk {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    padding: 8px 12px;
+    border-top: 1px solid var(--border-subtle);
+    background: var(--bg-overlay);
+  }
+  .bulk-count { font-size: 11px; color: var(--text-primary); font-weight: 600; margin-right: auto; }
+  .bulk-clear {
+    padding: 3px 8px; font-size: 11px; font-family: inherit;
+    border: none; background: none; color: var(--text-muted); cursor: pointer;
+  }
+  .bulk-clear:hover { color: var(--text-secondary); text-decoration: underline; }
   .num { text-align: right; width: 60px; }
   /* The count is the point of the table, so it reads before the prose. */
   .num strong { font-size: 14px; color: var(--text-primary); }

@@ -32,21 +32,39 @@ import { joinRuleSource } from '$lib/appsec-rules';
 export const POST: RequestHandler = route(async (event) => {
   const body = await event.request.json().catch(() => null);
   const host = typeof body?.host === 'string' ? body.host.trim() : '';
-  const rule = typeof body?.rule === 'string' ? body.rule.trim() : String(body?.rule ?? '').trim();
   // Optional. Present when the exclusion should apply only to requests from one
   // address, which keeps the rule protecting the application against everyone
   // else — the narrower of the two scopes the matches table offers.
   const source = typeof body?.source === 'string' ? body.source.trim() : '';
 
+  // One rule or many. A chunked upload trips twenty-odd signatures on the same
+  // binary content — the table showed 25 rules against one address — and
+  // disabling them one confirmation at a time is both tedious and worse: each
+  // write is applied separately, so it restarts CrowdSec on that worker once per
+  // rule. A list is one write and one restart.
+  const many = Array.isArray(body?.rules) ? body.rules : null;
+  const requested = (many ?? [body?.rule])
+    .map((r: unknown) => (typeof r === 'string' ? r.trim() : String(r ?? '').trim()))
+    .filter((r: string) => r !== '');
+
   if (!host) return json({ error: 'A host is required.' }, { status: 400 });
+  if (requested.length === 0) {
+    return json({ error: 'At least one rule id or name is required.' }, { status: 400 });
+  }
 
   // Through the same parser the form uses, so a rule id that would be refused
   // on the application page cannot get in through this door instead.
   // Composed before parsing, so `930100@203.0.113.4` goes through exactly the
   // same validation as a hand-typed entry rather than a looser path of its own.
-  const parsed = parseRuleList(joinRuleSource(rule, source || null));
-  if (parsed === null || parsed.length !== 1) {
-    return json({ error: 'Exactly one valid rule id or name is required.' }, { status: 400 });
+  //
+  // Parsed as one list rather than in a loop: `parseRuleList` is what the form
+  // uses, and it is also what drops duplicates, so a selection holding the same
+  // rule twice cannot become two entries.
+  const parsed = parseRuleList(
+    requested.map((r: string) => joinRuleSource(r, source || null)).join(','),
+  );
+  if (parsed === null || parsed.length === 0) {
+    return json({ error: 'A valid rule id or name is required.' }, { status: 400 });
   }
 
   // The anomaly gate is refused here as well as hidden in the UI. The button not
@@ -72,16 +90,33 @@ export const POST: RequestHandler = route(async (event) => {
   const { application: app } = await requireApplication(event, applicationId);
 
   const existing = parseAppsecRules(app.appsecDisabledRules);
-  const [addition] = parsed;
-  if (existing.includes(addition)) {
-    return json({ ok: true, application: app.name, rules: existing, added: false });
+  const additions = parsed.filter((entry) => !existing.includes(entry));
+
+  // `added` stays a boolean for the single-rule callers that read it, and
+  // `addedRules` carries what a multiple selection actually changed. Nothing new
+  // is a success, not an error: selecting a rule that a colleague disabled a
+  // minute ago should report that, not fail.
+  if (additions.length === 0) {
+    return json({
+      ok: true,
+      application: app.name,
+      rules: existing,
+      added: false,
+      addedRules: [],
+    });
   }
 
-  const next = [...existing, addition];
+  const next = [...existing, ...additions];
   await db
     .update(applications)
     .set({ appsecDisabledRules: serializeAppsecRules(next), updatedAt: new Date() })
     .where(eq(applications.id, app.id));
 
-  return json({ ok: true, application: app.name, rules: next, added: true });
+  return json({
+    ok: true,
+    application: app.name,
+    rules: next,
+    added: true,
+    addedRules: additions.map(String),
+  });
 });
