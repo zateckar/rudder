@@ -4,6 +4,7 @@ import { db, safeWorkerColumns } from '$lib/db';
 import { workers, applications, containers, volumes, workerMetrics, workerPings } from '$lib/db/schema';
 import { eq, count } from 'drizzle-orm';
 import { requireWorker, route } from '$lib/server/auth';
+import { evictPodmanClient } from '$lib/server/podman-client';
 
 /**
  * A worker as the browser may see it.
@@ -79,6 +80,11 @@ export const DELETE: RequestHandler = route(async (event) => {
   await db.delete(workerPings).where(eq(workerPings.workerId, workerId));
 
   await db.delete(workers).where(eq(workers.id, workerId));
+
+  // The pooled client keeps TLS sockets open to a machine Rudder no longer
+  // manages. Nothing else will ever notice: the cache is keyed on the worker id
+  // and the row that would refresh it is gone.
+  evictPodmanClient(workerId);
 
   return json({ success: true, message: 'Worker deleted' });
 });

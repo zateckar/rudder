@@ -24,6 +24,21 @@ process.env.NODE_ENV = 'production';
 delete process.env.ADMIN_PASSWORD;
 
 /**
+ * Let a test stand up a plain-HTTP Podman stub.
+ *
+ * `getRestPodmanClient` fails closed without mTLS credentials, which is right in
+ * production and makes a local stub server unusable — the alternative is a full
+ * CA, server and client certificate per test. It has to be here rather than in
+ * the test file that wants it, because `$lib/server/env` parses the environment
+ * once at import time and the suite shares a module registry, so whichever file
+ * imports it first decides the value for all of them.
+ *
+ * Nothing asserts the fail-closed path today. A test that wants to should build
+ * its own client rather than expect this to be unset.
+ */
+process.env.ALLOW_INSECURE_PODMAN = 'true';
+
+/**
  * `src/lib/server/provisioning/index.ts` inlines its shell assets with Vite's
  * `?raw` suffix, which only Vite understands. Without this, importing that
  * module under `bun test` fails to resolve before a single test runs — and it

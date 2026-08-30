@@ -491,6 +491,12 @@ export class PodmanClient {
   private httpsAgent: https.Agent | null = null;
   private httpAgent: http.Agent | null = null;
 
+  /**
+   * Whether this client's agent belongs to the per-worker cache rather than to
+   * whoever is holding it. Set only by `getRestPodmanClient`; see `destroy`.
+   */
+  private pooled = false;
+
   constructor(config: PodmanConfig) {
     this.baseUrl = config.apiUrl.replace(/\/$/, '');
     
@@ -1843,9 +1849,37 @@ export class PodmanClient {
     return this.request<ImageHistoryEntry[]>(`/images/${encodeURIComponent(name)}/history`);
   }
 
+  /**
+   * Release this caller's interest in the client.
+   *
+   * For a client built directly — tests, and anything constructing one for a
+   * single purpose — this tears the agent down, which is what it has always
+   * meant.
+   *
+   * For one handed out by `getRestPodmanClient` it does nothing, because the
+   * agent is shared with every other caller working against that worker and the
+   * cache owns its lifetime. Roughly thirty call sites destroy in a `finally`,
+   * as they should have while each of them owned an agent of its own; making
+   * that a release rather than a teardown is what let the pool exist without
+   * rewriting all of them, and without the first request to finish closing the
+   * sockets the others are mid-flight on.
+   *
+   * `evictPodmanClient` is the real teardown, and the cache is its only caller.
+   */
   destroy(): void {
+    if (this.pooled) return;
+    this.destroyAgents();
+  }
+
+  /** Tear the agent down regardless of ownership. For the cache only. */
+  destroyAgents(): void {
     this.httpsAgent?.destroy();
     this.httpAgent?.destroy();
+  }
+
+  /** Hand ownership of the agent to the per-worker cache. For the cache only. */
+  markPooled(): void {
+    this.pooled = true;
   }
 }
 
