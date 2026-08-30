@@ -203,6 +203,33 @@ export function demultiplexExecStream(raw: Buffer): { stdout: string; stderr: st
 /** Prevents a hung request from blocking the metrics scheduler. */
 const REQUEST_TIMEOUT_MS = 30_000;
 
+/**
+ * Whether this failure is the connection dying rather than the worker refusing.
+ *
+ * Node reports a socket the peer closed while a request was on it as
+ * `Error: aborted` — no status, no body, and a message that reaches the browser
+ * as "Could not reach the worker: aborted", which reads like the worker is down
+ * when it is answering perfectly well.
+ *
+ * The reason it happens here is `/exec/{id}/start`: Podman hijacks that
+ * connection and closes it when the command ends, and the keep-alive agent can
+ * hand the same socket to the next request in the microseconds before the FIN
+ * is processed. Anything that runs two commands in one visit is exposed — the
+ * application firewall panel runs `cscli alerts list` and then `cscli decisions
+ * list`, and it was the second one's exec that landed on the dead socket.
+ *
+ * Deliberately narrow. A `PodmanApiError` is an answer and must never be
+ * retried, and neither must a timeout, which means the worker is struggling and
+ * would only be asked to struggle twice.
+ */
+function isConnectionRace(err: unknown): boolean {
+  if (err instanceof PodmanApiError) return false;
+  const code = (err as { code?: string } | null)?.code;
+  if (code === 'ECONNRESET' || code === 'EPIPE') return true;
+  const message = err instanceof Error ? err.message : '';
+  return message === 'aborted' || message === 'socket hang up';
+}
+
 export interface PodmanConfig {
   apiUrl: string;
   caCert?: string;
@@ -1657,26 +1684,63 @@ export class PodmanClient {
     // unconditionally while the caller had a branch for colouring it red.
     const tty = options.tty ?? false;
 
-    // Step 1: Create exec instance
-    const createResult = await this.request<{ Id: string }>(`/containers/${id}/exec`, {
-      method: 'POST',
-      body: JSON.stringify({
-        AttachStdout: options.attachStdout ?? true,
-        AttachStderr: options.attachStderr ?? true,
-        AttachStdin: options.attachStdin ?? false,
-        Tty: tty,
-        Cmd: cmd,
-      }),
-    });
+    // Step 1: Create exec instance.
+    //
+    // Retried on a dead socket, and only on a dead socket. The previous command
+    // in this same visit hijacked its connection and Podman closed it, so this
+    // is the request most likely to be dispatched onto a socket that is already
+    // gone — the same race step 3 below has always had to absorb, arriving one
+    // step earlier and, until now, fatally: the whole firewall panel reported
+    // "Could not reach the worker: aborted" while the worker was fine.
+    //
+    // Safe to repeat because creating an exec instance does nothing to the
+    // container. It allocates an id, and an id that is never started is
+    // reaped with the container. Starting one is not repeatable and is not
+    // retried.
+    let createResult: { Id: string } | null = null;
+    let createError: unknown = null;
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        createResult = await this.request<{ Id: string }>(`/containers/${id}/exec`, {
+          method: 'POST',
+          body: JSON.stringify({
+            AttachStdout: options.attachStdout ?? true,
+            AttachStderr: options.attachStderr ?? true,
+            AttachStdin: options.attachStdin ?? false,
+            Tty: tty,
+            Cmd: cmd,
+          }),
+        });
+        break;
+      } catch (err) {
+        if (!isConnectionRace(err)) throw err;
+        createError = err;
+        // Long enough for the peer's FIN to be processed and the socket taken
+        // out of the pool, so the next attempt opens a fresh one.
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    }
+
+    if (!createResult) throw createError;
 
     const execId = createResult.Id;
 
     // Step 2: Start exec and capture output. No timeout — the command decides
     // how long it takes, and the caller decides whether to wait.
+    //
+    // `Connection: close` because Podman hijacks this connection and closes it
+    // when the command ends: there is no keeping it alive, and letting the
+    // agent believe otherwise is what puts a dead socket back in the pool for
+    // the next request to trip over. This is the cause; the retry above is the
+    // cure for the window that remains.
     const { module: reqModule, options: reqOptions } = this.plan(
       `/exec/${execId}/start`,
       'POST',
-      { headers: { 'Content-Type': 'application/json' }, timeoutMs: null },
+      {
+        headers: { 'Content-Type': 'application/json', Connection: 'close' },
+        timeoutMs: null,
+      },
     );
 
     const chunks: Buffer[] = [];
