@@ -8,27 +8,30 @@ import { executeApplicationDeploy } from '$lib/server/deploy';
 /**
  * POST — unauthenticated webhook trigger endpoint for CI/CD.
  *
- * Auth via:
- *   - Authorization: Bearer <token>
- *   - ?token=<token> query parameter
+ * Auth via `Authorization: Bearer <token>`, and only that.
+ *
+ * `?token=<token>` used to be accepted as well. A URL is the one part of a
+ * request that everything logs by default — the reverse proxy's access log,
+ * anything with `X-Forwarded-*` in front of it, and this panel's own audit
+ * trail, which records `url.search` — so that put a credential that triggers a
+ * production deploy into files with a wider audience and a different retention
+ * policy than the token itself has. The terminal WebSocket was moved off the
+ * query string for the same reason; see `$lib/terminal-protocol`.
+ *
+ * Nothing Rudder generates used the query form: the URL handed out at creation
+ * time has always been the bare path, with the token shown separately.
  */
-export async function POST({ params, request, url }: { params: { id: string }; request: Request; url: URL }) {
+export async function POST({ params, request }: { params: { id: string }; request: Request }) {
   const applicationId = params.id;
 
-  // Extract token from Authorization header or query param
-  let rawToken: string | null = null;
-
   const authHeader = request.headers.get('authorization');
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    rawToken = authHeader.slice(7).trim();
-  }
+  const rawToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
 
   if (!rawToken) {
-    rawToken = url.searchParams.get('token');
-  }
-
-  if (!rawToken) {
-    return json({ error: 'Missing authentication token' }, { status: 401 });
+    return json(
+      { error: 'Missing authentication token — send it as `Authorization: Bearer <token>`' },
+      { status: 401 },
+    );
   }
 
   // Hash the provided token and look up matching webhook
