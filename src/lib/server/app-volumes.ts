@@ -28,7 +28,7 @@ import { AuthorizationError } from './auth';
 import type { MountIntent } from './mounts';
 import type { PodmanVolume } from './podman';
 import { withPodman } from './podman-client';
-import { desiredState, type DesiredApp } from './reconcile';
+import { desiredState, podmanName, type DesiredApp } from './reconcile';
 import { ManifestError } from './deploy/plan';
 import {
   COPY_SOURCE_LABEL,
@@ -512,12 +512,19 @@ export async function requireAppVolume(
 }
 
 /**
- * The application's containers that are running, by name.
+ * The application's containers that are running, by name, according to the
+ * database.
  *
  * Restoring a volume overwrites files under whatever has them open. On a
  * database that is how a restore produces a corrupt store rather than the state
  * that was backed up, so it is refused while anything is running — and the
  * refusal names what to stop.
+ *
+ * `containers.status` is written by the fleet sweep, so it is up to one
+ * collection interval old — which the operator can set as high as an hour.
+ * That is fine for the *advisory* uses of this (showing the operator what they
+ * will have to stop) and not fine for the guard in front of a restore, which
+ * gets `runningContainerNamesLive` instead.
  */
 export async function runningContainerNames(appId: string): Promise<string[]> {
   const rows = await db
@@ -526,6 +533,49 @@ export async function runningContainerNames(appId: string): Promise<string[]> {
     .where(eq(containers.applicationId, appId))
     .all();
   return rows.filter((r) => r.status === 'running').map((r) => r.name);
+}
+
+/**
+ * The same question, asked of the worker rather than of the database.
+ *
+ * The guard in front of a volume restore cannot be answered from
+ * `containers.status`: that column is a snapshot from the last fleet sweep, so
+ * a container started thirty seconds ago — by an operator, by a restart policy
+ * after a crash, by anything that is not a Rudder deploy — still reads
+ * `exited`. The restore then went ahead and extracted an archive over files a
+ * live database had open, which is the exact corruption the guard exists to
+ * prevent, and the audit trail recorded that the check had passed.
+ *
+ * Fails closed. If the worker cannot be reached, this throws rather than
+ * returning an empty list: "I could not ask" and "nothing is running" must not
+ * produce the same answer in front of a destructive, unrecoverable operation.
+ */
+export async function runningContainerNamesLive(
+  worker: typeof workers.$inferSelect,
+  appId: string,
+): Promise<string[]> {
+  const rows = await db
+    .select({ containerId: containers.containerId, name: containers.name })
+    .from(containers)
+    .where(eq(containers.applicationId, appId))
+    .all();
+  if (rows.length === 0) return [];
+
+  const live = await withPodman(worker, (client) => client.listContainers(true));
+  const runningIds = new Set<string>();
+  const runningNames = new Set<string>();
+  for (const c of live) {
+    if (c.State !== 'running') continue;
+    runningIds.add(c.Id);
+    runningNames.add(podmanName(c.Names?.[0]));
+  }
+
+  // Matched on either, because the two can disagree: a row whose container was
+  // recreated out of band holds a stale id under a name that is still this
+  // application's, and a name match is enough to refuse.
+  return rows
+    .filter((r) => runningIds.has(r.containerId) || runningNames.has(podmanName(r.name)))
+    .map((r) => r.name);
 }
 
 /**

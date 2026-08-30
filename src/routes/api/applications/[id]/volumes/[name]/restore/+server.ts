@@ -1,10 +1,38 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { requireApplication, route } from '$lib/server/auth';
-import { requireAppVolume, runningContainerNames } from '$lib/server/app-volumes';
+import { requireAppVolume, runningContainerNamesLive } from '$lib/server/app-volumes';
 import { restoreVolume, type RestoreMode } from '$lib/server/volume-ops';
 import { PodmanApiError } from '$lib/server/podman';
 import { LockError, VOLUME_OP_TTL_MS, withLock, workerDeployLock } from '$lib/server/locks';
+
+/**
+ * Carries the refusal out through `withLock`, whose callback can only signal by
+ * throwing. Distinct from every other error the block can produce, so the 409
+ * below cannot swallow a genuine failure and report it as "stop the app".
+ */
+class ContainersRunning extends Error {
+  constructor(readonly running: string[]) {
+    super(`${running.length} container(s) still running`);
+    this.name = 'ContainersRunning';
+  }
+}
+
+/**
+ * A failure of the pre-flight check itself, before the volume has been touched.
+ *
+ * Needed because the catch below reports a `replace` failure as "the volume has
+ * been emptied and your archive was not applied" — true of anything that fails
+ * inside `restoreVolume`, and a false alarm about data loss if the thing that
+ * failed was asking the worker what is running. Same reason the check fails
+ * closed: an unreachable worker is not evidence that nothing is running.
+ */
+class PreflightFailed extends Error {
+  constructor(readonly cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = 'PreflightFailed';
+  }
+}
 
 /**
  * Write a tar archive back into a volume.
@@ -16,12 +44,13 @@ import { LockError, VOLUME_OP_TTL_MS, withLock, workerDeployLock } from '$lib/se
  *   recreates it, so on a shared name this would destroy a second application's
  *   data, and the running-container check below cannot see *their* containers.
  *
- * - **Nothing of the application may be running.** A restore overwrites files
- *   under whatever has them open; on a database that produces a corrupt store
- *   rather than the state that was backed up. The refusal names the containers
- *   to stop, because that is the next thing the user has to do.
  * - **The worker's deploy lock is held for the duration**, so a deploy cannot
  *   recreate containers onto the volume halfway through the extraction.
+ * - **Nothing of the application may be running** — asked of the worker, inside
+ *   that lock. A restore overwrites files under whatever has them open; on a
+ *   database that produces a corrupt store rather than the state that was
+ *   backed up. The refusal names the containers to stop, because that is the
+ *   next thing the user has to do.
  *
  * `?mode=replace` (the default) recreates the volume first, so the result is
  * exactly the archive. `?mode=merge` extracts over what is there — occasionally
@@ -41,21 +70,6 @@ export const POST: RequestHandler = route(async (event) => {
   }
   const mode = requested as RestoreMode;
 
-  const running = await runningContainerNames(application.id);
-  if (running.length > 0) {
-    return json(
-      {
-        error:
-          `Stop "${application.name}" before restoring. Writing over ` +
-          `"${volume.name}" while ${running.map((n) => `"${n}"`).join(', ')} ` +
-          `${running.length === 1 ? 'is' : 'are'} running can leave the data in a state that ` +
-          `never existed.`,
-        running,
-      },
-      { status: 409 },
-    );
-  }
-
   const body = event.request.body;
   if (!body) {
     return json({ error: 'No archive was uploaded.' }, { status: 400 });
@@ -72,9 +86,42 @@ export const POST: RequestHandler = route(async (event) => {
         // expires under a large restore and lets a deploy run beside it.
         ttlMs: VOLUME_OP_TTL_MS,
       },
-      () => restoreVolume(worker, application.id, volume.name, body, mode),
+      async () => {
+        // Inside the lock, and asked of the worker rather than of the database.
+        //
+        // Outside it, this was two races at once. The check read
+        // `containers.status`, which the fleet sweep writes once a collection
+        // interval, so a container started in the last minute — or the last
+        // hour, at the interval an operator is allowed to set — still read
+        // `exited` and the restore proceeded over a live database. And even a
+        // live check made before acquiring the lock could be overtaken by a
+        // deploy starting containers in the gap. Holding the lock first means
+        // nothing can start them between the answer and the extraction.
+        let running: string[];
+        try {
+          running = await runningContainerNamesLive(worker, application.id);
+        } catch (e) {
+          throw new PreflightFailed(e);
+        }
+        if (running.length > 0) throw new ContainersRunning(running);
+
+        return restoreVolume(worker, application.id, volume.name, body, mode);
+      },
     );
   } catch (e) {
+    if (e instanceof ContainersRunning) {
+      return json(
+        {
+          error:
+            `Stop "${application.name}" before restoring. Writing over ` +
+            `"${volume.name}" while ${e.running.map((n) => `"${n}"`).join(', ')} ` +
+            `${e.running.length === 1 ? 'is' : 'are'} running can leave the data in a state that ` +
+            `never existed.`,
+          running: e.running,
+        },
+        { status: 409 },
+      );
+    }
     if (e instanceof LockError) {
       return json(
         {
@@ -84,6 +131,18 @@ export const POST: RequestHandler = route(async (event) => {
             `it finishes.`,
         },
         { status: 409 },
+      );
+    }
+    if (e instanceof PreflightFailed) {
+      return json(
+        {
+          error:
+            `Could not check whether "${application.name}" is still running on worker ` +
+            `"${worker.name}", so the restore was not attempted — "${volume.name}" is untouched ` +
+            `and your archive was not applied. Restoring over running containers can corrupt the ` +
+            `data, so this refuses rather than guesses. The failure was: ${e.message}`,
+        },
+        { status: 502 },
       );
     }
     if (e instanceof PodmanApiError) throw e;
