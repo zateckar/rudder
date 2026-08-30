@@ -215,7 +215,3 @@ if (!(globalThis as any).__backupStarted) {
     .then(({ startBackupScheduler }) => startBackupScheduler())
     .catch((e) => console.error('[backup] Failed to start scheduler:', e));
 }
-
-export const handleFetch = async ({ request, fetch }: { request: Request; fetch: typeof global.fetch }) => {
-  return fetch(request);
-};

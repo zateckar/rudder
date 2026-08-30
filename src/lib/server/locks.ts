@@ -137,10 +137,15 @@ export function isLocked(key: string): boolean {
   return !isStale(entry, Date.now());
 }
 
-export function releaseLock(key: string, holder?: string): boolean {
-  const entry = locks.get(key);
-  if (!entry) return false;
-  if (holder && entry.holder !== holder) return false;
-  locks.delete(key);
-  return true;
-}
+/**
+ * There is deliberately no `releaseLock`.
+ *
+ * There was one, taking an optional `holder`; called without it — which is how
+ * an optional argument gets called — it deleted whoever's lock was there, which
+ * is the one thing no caller is entitled to do. Nothing used it, so it was a
+ * loaded gun with no purpose rather than a bug.
+ *
+ * `withLock`'s `finally` is the only release path, and it checks the holder
+ * before deleting. If something ever genuinely needs to break a lock from
+ * outside, it should say so in its name and log who it took it from.
+ */

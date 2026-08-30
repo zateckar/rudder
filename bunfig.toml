@@ -2,3 +2,10 @@
 # Teaches `bun test` the Vite-only `?raw` import suffix used by the provisioning
 # templates, so those modules can be imported outside a Vite build.
 preload = ["./test/preload.ts"]
+
+# The `src` argument in package.json's test script is load-bearing, not tidiness:
+# bun's default discovery walks the whole working tree and does not consult
+# .gitignore, so a bare `bun test` also scans .claude/worktrees/ — a full second
+# checkout, which turned 50 test files into 8,857 scanned files and ran every
+# suite twice, once against code that is not this branch's. bunfig has no ignore
+# list to express that, so the path is given on the command line instead.
