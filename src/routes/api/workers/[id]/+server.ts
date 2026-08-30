@@ -5,6 +5,7 @@ import { workers, applications, containers, volumes, workerMetrics, workerPings 
 import { eq, count } from 'drizzle-orm';
 import { requireWorker, route } from '$lib/server/auth';
 import { evictPodmanClient } from '$lib/server/podman-client';
+import { forgetWorkerInfo } from '$lib/server/worker-info-cache';
 
 /**
  * A worker as the browser may see it.
@@ -85,6 +86,7 @@ export const DELETE: RequestHandler = route(async (event) => {
   // manages. Nothing else will ever notice: the cache is keyed on the worker id
   // and the row that would refresh it is gone.
   evictPodmanClient(workerId);
+  forgetWorkerInfo(workerId);
 
   return json({ success: true, message: 'Worker deleted' });
 });

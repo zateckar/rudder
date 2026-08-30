@@ -23,6 +23,8 @@ import { containers, workers, containerMetrics, workerMetrics, workerPings } fro
 import { eq, lt, inArray } from 'drizzle-orm';
 import { getRestPodmanClient } from './podman-client';
 import { getHostStatsHttp } from './host-metrics-http';
+import type { HostStats } from './host-metrics';
+import { publishWorkerInfo } from './worker-info-cache';
 import { reconcileAllWorkers, toObserved, type ObservedContainer } from './reconcile';
 import { numericSetting } from './settings';
 import { mapWithConcurrency } from './concurrency';
@@ -291,7 +293,19 @@ async function persistSweep(sweep: WorkerSweep, now: Date): Promise<void> {
     }
   }
 
-  if (sweep.status !== 'online' || !sweep.sysInfo) return;
+  if (sweep.status !== 'online' || !sweep.sysInfo) {
+    // Published for an unreachable worker too, and that is the case that
+    // matters most: it is what lets the worker page say "offline" at once
+    // instead of discovering it again through five timeouts of its own.
+    publishWorkerInfo(worker.id, {
+      sysInfo: sweep.sysInfo,
+      systemDf: sweep.systemDf,
+      hostStats: null,
+      status: sweep.status,
+      latencyMs: sweep.latencyMs,
+    });
+    return;
+  }
 
   // Discovery used to run here: a recently provisioned worker had its
   // containers walked, reverse-engineered into application records and written
@@ -337,10 +351,14 @@ async function persistSweep(sweep: WorkerSweep, now: Date): Promise<void> {
   let updatesPending: number | null = null;
   let updatesSecurity: number | null = null;
   let rebootRequired: number | null = null;
+  // Kept whole as well as picked apart, for the worker info endpoint — which
+  // used to fetch this itself, per request, on top of everything else.
+  let hostStats: HostStats | null = null;
 
   if (worker.baseDomain && worker.podmanCaCert) {
     try {
       const httpStats = await getHostStatsHttp(worker as any);
+      hostStats = httpStats ?? null;
       if (httpStats) {
         if (httpStats.cpuPercent != null) hostCpu = httpStats.cpuPercent;
         if (httpStats.diskTotal != null) hostDiskLimit = httpStats.diskTotal;
@@ -377,6 +395,14 @@ async function persistSweep(sweep: WorkerSweep, now: Date): Promise<void> {
       console.warn(`[metrics] HTTP host stats failed for ${worker.name}:`, (e as any).message || e);
     }
   }
+
+  publishWorkerInfo(worker.id, {
+    sysInfo: sweep.sysInfo,
+    systemDf: sweep.systemDf,
+    hostStats,
+    status: sweep.status,
+    latencyMs: sweep.latencyMs,
+  });
 
   await db.insert(workerMetrics).values({
     id: crypto.randomUUID(),

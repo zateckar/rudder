@@ -3,82 +3,46 @@
 
   let { data } = $props();
 
-  let metricsInterval = $state(0);
-  let savingInterval = $state(false);
-  let intervalSaved = $state(false);
-  let metricsRetentionDays = $state(30);
-  let savingRetention = $state(false);
-  let retentionSaved = $state(false);
-  let alertInterval = $state(60);
-  let savingAlertInterval = $state(false);
-  let alertIntervalSaved = $state(false);
+  /**
+   * Every setting on this page, by the key it is stored under.
+   *
+   * One record rather than three `$state` variables per row. There were three
+   * rows and three near-identical save functions differing by one key and one
+   * error message, and this page is going to keep growing — the fourth and
+   * fifth are below.
+   */
+  let values = $state<Record<string, number>>({});
+  let saving = $state<Record<string, boolean>>({});
+  let saved = $state<Record<string, boolean>>({});
 
   $effect(() => {
-    metricsInterval = data.metricsInterval;
-    metricsRetentionDays = data.metricsRetentionDays;
-    alertInterval = data.alertInterval;
+    values = {
+      metrics_interval_seconds: data.metricsInterval,
+      metrics_retention_days: data.metricsRetentionDays,
+      alert_interval_seconds: data.alertInterval,
+      audit_log_retention_days: data.auditLogRetentionDays,
+      alert_event_retention_days: data.alertEventRetentionDays,
+    };
   });
 
-  async function saveInterval() {
-    savingInterval = true;
-    intervalSaved = false;
+  async function save(key: string, label: string) {
+    saving[key] = true;
+    saved[key] = false;
     try {
       const res = await fetch('/api/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ metrics_interval_seconds: String(metricsInterval) }),
+        body: JSON.stringify({ [key]: String(values[key]) }),
       });
       if (res.ok) {
-        intervalSaved = true;
-        setTimeout(() => intervalSaved = false, 2000);
+        saved[key] = true;
+        setTimeout(() => (saved[key] = false), 2000);
       } else {
         const err = await res.json().catch(() => ({}));
-        showToast('error', err.error || 'Failed to save the collection interval');
+        showToast('error', err.error || `Failed to save the ${label}`);
       }
     } finally {
-      savingInterval = false;
-    }
-  }
-
-  async function saveRetention() {
-    savingRetention = true;
-    retentionSaved = false;
-    try {
-      const res = await fetch('/api/settings', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ metrics_retention_days: String(metricsRetentionDays) }),
-      });
-      if (res.ok) {
-        retentionSaved = true;
-        setTimeout(() => retentionSaved = false, 2000);
-      } else {
-        const err = await res.json().catch(() => ({}));
-        showToast('error', err.error || 'Failed to save the retention period');
-      }
-    } finally {
-      savingRetention = false;
-    }
-  }
-
-  async function saveAlertInterval() {
-    savingAlertInterval = true;
-    alertIntervalSaved = false;
-    try {
-      const res = await fetch('/api/settings', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ alert_interval_seconds: String(alertInterval) }),
-      });
-      if (res.ok) {
-        alertIntervalSaved = true;
-        setTimeout(() => alertIntervalSaved = false, 2000);
-      } else {
-        const err = await res.json().catch(() => ({}));
-        showToast('error', err.error || 'Failed to save the alert interval');
-      }
-    } finally {
-      savingAlertInterval = false;
+      saving[key] = false;
     }
   }
 </script>
@@ -96,7 +60,7 @@
       </span>
     </div>
     <div class="setting-control">
-      <select bind:value={metricsInterval}>
+      <select bind:value={values.metrics_interval_seconds}>
         <option value={30}>30 seconds</option>
         <option value={60}>1 minute</option>
         <option value={120}>2 minutes</option>
@@ -105,8 +69,13 @@
         <option value={900}>15 minutes</option>
         <option value={1800}>30 minutes</option>
       </select>
-      <button class="btn-tiny btn-save" disabled={savingInterval} onclick={saveInterval} title="Save the metrics collection interval">
-        {savingInterval ? '…' : intervalSaved ? '✓' : 'Save'}
+      <button
+        class="btn-tiny btn-save"
+        disabled={saving.metrics_interval_seconds}
+        onclick={() => save('metrics_interval_seconds', 'collection interval')}
+        title="Save the metrics collection interval"
+      >
+        {saving.metrics_interval_seconds ? '…' : saved.metrics_interval_seconds ? '✓' : 'Save'}
       </button>
     </div>
   </div>
@@ -116,15 +85,20 @@
       <span class="setting-hint">Metrics and pings older than this are automatically pruned. Data 7+ days old is down-sampled to 1 row/hour.</span>
     </div>
     <div class="setting-control">
-      <select bind:value={metricsRetentionDays}>
+      <select bind:value={values.metrics_retention_days}>
         <option value={7}>7 days</option>
         <option value={14}>14 days</option>
         <option value={30}>30 days</option>
         <option value={60}>60 days</option>
         <option value={90}>90 days</option>
       </select>
-      <button class="btn-tiny btn-save" disabled={savingRetention} onclick={saveRetention} title="Save the data retention period">
-        {savingRetention ? '…' : retentionSaved ? '✓' : 'Save'}
+      <button
+        class="btn-tiny btn-save"
+        disabled={saving.metrics_retention_days}
+        onclick={() => save('metrics_retention_days', 'retention period')}
+        title="Save the data retention period"
+      >
+        {saving.metrics_retention_days ? '…' : saved.metrics_retention_days ? '✓' : 'Save'}
       </button>
     </div>
   </div>
@@ -139,7 +113,7 @@
       </span>
     </div>
     <div class="setting-control">
-      <select bind:value={alertInterval}>
+      <select bind:value={values.alert_interval_seconds}>
         <option value={30}>30 seconds</option>
         <option value={60}>1 minute</option>
         <option value={120}>2 minutes</option>
@@ -147,8 +121,70 @@
         <option value={600}>10 minutes</option>
         <option value={1800}>30 minutes</option>
       </select>
-      <button class="btn-tiny btn-save" disabled={savingAlertInterval} onclick={saveAlertInterval} title="Save the alert evaluation interval">
-        {savingAlertInterval ? '…' : alertIntervalSaved ? '✓' : 'Save'}
+      <button
+        class="btn-tiny btn-save"
+        disabled={saving.alert_interval_seconds}
+        onclick={() => save('alert_interval_seconds', 'alert interval')}
+        title="Save the alert evaluation interval"
+      >
+        {saving.alert_interval_seconds ? '…' : saved.alert_interval_seconds ? '✓' : 'Save'}
+      </button>
+    </div>
+  </div>
+</div>
+
+<div class="settings-section">
+  <h2 class="section-title">History</h2>
+  <div class="setting-row">
+    <div class="setting-info">
+      <span class="setting-label">Audit log retention</span>
+      <span class="setting-hint">
+        How long the record of who did what is kept. Swept once a day, in batches. This is
+        the log anyone asks for after an incident, so it defaults to a year — shorten it
+        only if you have somewhere else to keep it.
+      </span>
+    </div>
+    <div class="setting-control">
+      <select bind:value={values.audit_log_retention_days}>
+        <option value={30}>30 days</option>
+        <option value={90}>90 days</option>
+        <option value={180}>180 days</option>
+        <option value={365}>1 year</option>
+        <option value={730}>2 years</option>
+      </select>
+      <button
+        class="btn-tiny btn-save"
+        disabled={saving.audit_log_retention_days}
+        onclick={() => save('audit_log_retention_days', 'audit log retention')}
+        title="Save the audit log retention period"
+      >
+        {saving.audit_log_retention_days ? '…' : saved.audit_log_retention_days ? '✓' : 'Save'}
+      </button>
+    </div>
+  </div>
+  <div class="setting-row">
+    <div class="setting-info">
+      <span class="setting-label">Alert history retention</span>
+      <span class="setting-hint">
+        How long fired alerts are kept. Whether one was acknowledged does not extend this:
+        an alert nobody acted on in three months is not waiting to be acted on.
+      </span>
+    </div>
+    <div class="setting-control">
+      <select bind:value={values.alert_event_retention_days}>
+        <option value={7}>7 days</option>
+        <option value={30}>30 days</option>
+        <option value={90}>90 days</option>
+        <option value={180}>180 days</option>
+        <option value={365}>1 year</option>
+      </select>
+      <button
+        class="btn-tiny btn-save"
+        disabled={saving.alert_event_retention_days}
+        onclick={() => save('alert_event_retention_days', 'alert history retention')}
+        title="Save the alert history retention period"
+      >
+        {saving.alert_event_retention_days ? '…' : saved.alert_event_retention_days ? '✓' : 'Save'}
       </button>
     </div>
   </div>

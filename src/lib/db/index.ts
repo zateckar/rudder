@@ -194,8 +194,12 @@ export { db, sqlite };
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [crypto.randomUUID(), 'admin', 'admin@localhost', hashed, 'Administrator', 'admin', now, now]
       );
-      if (isProduction) {
-        console.log('[db] Admin user "admin" created from ADMIN_PASSWORD.');
+      // Branches on where the password came from, not on the environment. It
+      // used to branch on `isProduction`, so a developer who had set
+      // ADMIN_PASSWORD was told the account's password was "admin" — the one
+      // thing on this line they might act on, and wrong.
+      if (process.env.ADMIN_PASSWORD) {
+        console.log('[db] Admin user "admin" created with the password from ADMIN_PASSWORD.');
       } else {
         console.warn('[db] Created default admin user (username: admin, password: admin). Set ADMIN_PASSWORD for production.');
       }

@@ -232,6 +232,16 @@ if (!(globalThis as any).__alertsStarted) {
     .catch((e) => console.error('[alerts] Failed to start evaluation:', e));
 }
 
+// ── Audit and alert retention ────────────────────────────────────────────────
+// The two tables that only ever grew. Daily, batched, and off the metrics loop
+// because nothing about it is per-cycle work. See retention.ts.
+if (!(globalThis as any).__retentionStarted) {
+  (globalThis as any).__retentionStarted = true;
+  import('$lib/server/retention')
+    .then(({ startRetentionSweep }) => startRetentionSweep())
+    .catch((e) => console.error('[retention] Failed to start sweep:', e));
+}
+
 // ── Backup scheduler ─────────────────────────────────────────────────────────
 if (!(globalThis as any).__backupStarted) {
   (globalThis as any).__backupStarted = true;
