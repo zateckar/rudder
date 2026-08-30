@@ -39,10 +39,15 @@ COPY --from=builder --chown=rudder:rudder /app/package.json ./
 # is that handler plus one `upgrade` listener.
 COPY --from=builder --chown=rudder:rudder /app/server.js ./
 
-# drizzle/ is deliberately not copied.  Nothing calls drizzle's migrate() at
-# runtime — src/lib/db/index.ts applies the schema itself on startup — and
-# drizzle-kit is a devDependency that the production install above prunes, so
-# the SQL files would be unusable inside the image.
+# The migrations, applied by src/lib/db/index.ts on startup. Required: without
+# them the container comes up against an empty database and refuses to serve.
+#
+# They used deliberately not to be copied, back when this file's schema was
+# built by CREATE/ALTER statements in src/lib/db/index.ts and drizzle/ was
+# unapplied reference output. Applying them needs only drizzle-orm's migrator,
+# which is a runtime dependency and survives the production prune above;
+# drizzle-kit, which generates them, is still dev-only and still absent.
+COPY --from=builder --chown=rudder:rudder /app/drizzle ./drizzle
 
 # Create data directory for SQLite database
 RUN mkdir -p /app/data && chown rudder:rudder /app/data

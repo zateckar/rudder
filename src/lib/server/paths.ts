@@ -16,6 +16,23 @@ export function resolveDbPath(fallbackDir: string): string {
 }
 
 /**
+ * Directory holding the generated SQL migrations, applied at startup.
+ *
+ * `process.cwd()` rather than a path relative to this module: the production
+ * bundle is rolled up into build/server/chunks with no stable relation to the
+ * repository layout, while the working directory is the application root in
+ * both places — the repository in development, /app in the image, which is
+ * where the Dockerfile puts drizzle/.
+ *
+ * MIGRATIONS_DIR overrides it for anything that arranges its files differently.
+ */
+export function resolveMigrationsDir(): string {
+  const raw = process.env.MIGRATIONS_DIR?.trim();
+  if (raw) return isAbsolute(raw) ? raw : join(process.cwd(), raw);
+  return join(process.cwd(), 'drizzle');
+}
+
+/**
  * Directory holding persistent state: the database, generated secrets and the
  * SSH known_hosts file.  Follows DATABASE_URL so everything stays on the same
  * volume.

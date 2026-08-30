@@ -1,9 +1,13 @@
 import { drizzle } from 'drizzle-orm/bun-sqlite';
+import { migrate } from 'drizzle-orm/bun-sqlite/migrator';
 import { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { resolveDbPath } from '../server/paths';
+import { getTableColumns, getTableName, is } from 'drizzle-orm';
+import { SQLiteTable } from 'drizzle-orm/sqlite-core';
+import { resolveDbPath, resolveMigrationsDir } from '../server/paths';
+import * as schema from './schema';
 
 // DATABASE_URL is now honoured; it was previously documented but ignored, so
 // the database always landed next to the bundle rather than where the operator
@@ -19,631 +23,152 @@ if (!existsSync(dbDir)) {
 
 const sqlite = new Database(dbPath);
 sqlite.run('PRAGMA journal_mode = WAL');
-sqlite.run('PRAGMA foreign_keys = ON');
 
-// ── Core tables (idempotent) ─────────────────────────────────────────────────
+// `PRAGMA foreign_keys` is deliberately not set yet. SQLite's default is off,
+// and off is the state its own documentation requires for the rebuild-and-
+// rename that a column change needs — a table cannot be dropped and recreated
+// while its children's references are being enforced. It has to be off *here*
+// rather than inside the migration because the pragma is a no-op within a
+// transaction, and drizzle wraps every migration in one. `defer_foreign_keys`
+// is not a substitute: dropping the parent counts every child row as a
+// violation, and renaming the replacement into place does not clear the
+// counter, so the commit fails.
 //
-// This block, together with the ALTER TABLE migrations further down, is the
-// authoritative schema at runtime: nothing calls drizzle's migrate(), so the
-// files in drizzle/ are reference output from `bun run db:generate` only.
+// It goes on immediately after migrating, and `PRAGMA foreign_key_check` runs
+// in between so nothing a migration broke passes unnoticed.
+const db = drizzle(sqlite, { schema });
+
+// ── Schema ───────────────────────────────────────────────────────────────────
 //
-// When you change src/lib/db/schema.ts you MUST mirror it here — the two
-// drifted before (applications.auth_type defaulted to 'none' here but 'global'
-// in schema.ts, so new rows were created less protected than intended).
-sqlite.run(`
-  CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY NOT NULL,
-    username TEXT NOT NULL,
-    email TEXT NOT NULL,
-    password_hash TEXT,
-    full_name TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'member',
-    last_seen_at INTEGER,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-  );
-  CREATE UNIQUE INDEX IF NOT EXISTS users_username_unique ON users (username);
-  CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique ON users (email);
-
-  CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY NOT NULL,
-    user_id TEXT NOT NULL REFERENCES users(id),
-    expires_at INTEGER NOT NULL,
-    created_at INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS teams (
-    id TEXT PRIMARY KEY NOT NULL,
-    name TEXT NOT NULL,
-    slug TEXT NOT NULL,
-    created_by TEXT REFERENCES users(id),
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-  );
-  CREATE UNIQUE INDEX IF NOT EXISTS teams_name_unique ON teams (name);
-  CREATE UNIQUE INDEX IF NOT EXISTS teams_slug_unique ON teams (slug);
-
-  CREATE TABLE IF NOT EXISTS team_members (
-    team_id TEXT NOT NULL REFERENCES teams(id),
-    user_id TEXT NOT NULL REFERENCES users(id),
-    joined_at INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS workers (
-    id TEXT PRIMARY KEY NOT NULL,
-    name TEXT NOT NULL,
-    hostname TEXT NOT NULL,
-    ssh_port INTEGER NOT NULL DEFAULT 22,
-    ssh_user TEXT NOT NULL,
-    podman_api_url TEXT NOT NULL,
-    podman_ca_cert TEXT,
-    podman_client_cert TEXT,
-    podman_client_key TEXT,
-    base_domain TEXT,
-    crowdsec_bouncer_key TEXT,
-    status TEXT NOT NULL DEFAULT 'provisioning',
-    labels TEXT,
-    created_at INTEGER NOT NULL,
-    provisioned_at INTEGER,
-    last_seen_at INTEGER
-  );
-
-  CREATE TABLE IF NOT EXISTS applications (
-    id TEXT PRIMARY KEY NOT NULL,
-    team_id TEXT REFERENCES teams(id),
-    worker_id TEXT REFERENCES workers(id),
-    name TEXT NOT NULL,
-    description TEXT,
-    domain TEXT,
-    type TEXT NOT NULL DEFAULT 'single',
-    deployment_format TEXT NOT NULL DEFAULT 'compose',
-    manifest TEXT,
-    environment TEXT,
-    volumes TEXT,
-    restart_policy TEXT NOT NULL DEFAULT 'always',
-    exposed_ports TEXT,
-    appsec_disabled_rules TEXT,
-    rate_limit_avg INTEGER,
-    rate_limit_burst INTEGER,
-    auth_type TEXT NOT NULL DEFAULT 'global',
-    auth_config TEXT,
-    oidc_id_token_header TEXT,
-    oidc_access_token_header TEXT,
-    replicas INTEGER NOT NULL DEFAULT 1,
-    git_repo TEXT,
-    git_branch TEXT,
-    git_dockerfile TEXT,
-    healthcheck TEXT,
-    health_timeout_seconds INTEGER,
-    retain_previous_minutes INTEGER NOT NULL DEFAULT 0,
-    created_by TEXT REFERENCES users(id),
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS containers (
-    id TEXT PRIMARY KEY NOT NULL,
-    application_id TEXT REFERENCES applications(id),
-    worker_id TEXT REFERENCES workers(id),
-    container_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    image TEXT NOT NULL,
-    status TEXT NOT NULL,
-    ports TEXT,
-    exposed_port INTEGER,
-    routes TEXT,
-    labels TEXT,
-    generation INTEGER NOT NULL DEFAULT 1,
-    state TEXT NOT NULL DEFAULT 'active',
-    deployment_id TEXT,
-    spec_hash TEXT,
-    reap_attempts INTEGER NOT NULL DEFAULT 0,
-    reap_error TEXT,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS volumes (
-    id TEXT PRIMARY KEY NOT NULL,
-    team_id TEXT REFERENCES teams(id),
-    worker_id TEXT REFERENCES workers(id),
-    name TEXT NOT NULL,
-    container_path TEXT NOT NULL,
-    size_limit INTEGER,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS api_keys (
-    id TEXT PRIMARY KEY NOT NULL,
-    name TEXT NOT NULL,
-    key_hash TEXT NOT NULL,
-    team_id TEXT REFERENCES teams(id),
-    expires_at INTEGER,
-    last_used_at INTEGER,
-    created_at INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS audit_logs (
-    id TEXT PRIMARY KEY NOT NULL,
-    user_id TEXT REFERENCES users(id),
-    team_id TEXT REFERENCES teams(id),
-    action TEXT NOT NULL,
-    resource_type TEXT NOT NULL,
-    resource_id TEXT,
-    details TEXT,
-    created_at INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS user_oidc (
-    id TEXT PRIMARY KEY NOT NULL,
-    user_id TEXT NOT NULL REFERENCES users(id),
-    provider TEXT NOT NULL,
-    provider_id TEXT NOT NULL,
-    last_synced_at INTEGER
-  );
-`);
-
-// ── Additional tables added over time (idempotent) ───────────────────────────
-sqlite.run(`
-  CREATE TABLE IF NOT EXISTS container_metrics (
-    id TEXT PRIMARY KEY NOT NULL,
-    container_id TEXT NOT NULL,
-    collected_at INTEGER NOT NULL,
-    cpu_percent REAL,
-    mem_usage_bytes INTEGER,
-    mem_limit_bytes INTEGER,
-    mem_percent REAL,
-    net_rx_bytes INTEGER,
-    net_tx_bytes INTEGER,
-    block_read_bytes INTEGER,
-    block_write_bytes INTEGER
-  );
-  CREATE INDEX IF NOT EXISTS container_metrics_container_collected_idx
-    ON container_metrics (container_id, collected_at);
-  DROP INDEX IF EXISTS container_metrics_container_id_idx;
-
-  CREATE TABLE IF NOT EXISTS oidc_config (
-    id TEXT PRIMARY KEY NOT NULL,
-    enabled INTEGER NOT NULL DEFAULT 0,
-    provider_name TEXT NOT NULL DEFAULT 'Generic OIDC',
-    issuer_url TEXT,
-    client_id TEXT,
-    client_secret TEXT,
-    authorization_endpoint TEXT,
-    token_endpoint TEXT,
-    userinfo_endpoint TEXT,
-    jwks_uri TEXT,
-    scopes TEXT DEFAULT 'openid email profile',
-    use_pkce INTEGER DEFAULT 1,
-    allow_registration INTEGER DEFAULT 1,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-  );
-`);
-
-// Enforce one membership per (team, user).  Duplicates were previously
-// possible, making role checks depend on which row happened to come back
-// first, so collapse any that exist before adding the constraint.
+// src/lib/db/schema.ts is the schema. `bun run db:generate` turns it into SQL
+// in drizzle/, and this applies that SQL. One definition, one generator, one
+// place it is applied.
+//
+// It used not to be. This file held twenty-seven CREATE TABLE blocks and
+// fifty-six `try { ALTER TABLE } catch {}` statements and *was* the runtime
+// schema; drizzle/ held twenty-eight hand-written files that nothing applied,
+// were not in the image, and could not be regenerated because db:generate had
+// been failing its own config validation for as long as it had existed. Adding
+// a column meant editing three places and the schema was whatever the union of
+// them happened to produce. They had already diverged where it mattered:
+// `applications.auth_type` defaulted to 'none' here and 'global' in schema.ts,
+// so every application created through the path that used the database default
+// was less protected than the one the schema promised.
+//
+// The failure this cannot prevent is a column that the baseline's IF NOT EXISTS
+// skipped on an existing database — see `verifySchema` below, which is why the
+// silence is over.
 try {
-  sqlite.run(`
-    DELETE FROM team_members
-    WHERE rowid NOT IN (
-      SELECT MIN(rowid) FROM team_members GROUP BY team_id, user_id
-    );
-  `);
-  sqlite.run(`
-    CREATE UNIQUE INDEX IF NOT EXISTS team_members_team_user_unique
-      ON team_members (team_id, user_id);
-  `);
+  migrate(db, { migrationsFolder: resolveMigrationsDir() });
 } catch (e) {
-  console.error('[db] Could not enforce unique team memberships:', e);
-}
-
-// Enforce one application per hostname.  Traefik routes by Host, so two
-// applications claiming the same domain produce two routers with an identical
-// rule and requests land on whichever Traefik happens to pick.  The index is
-// partial because `domain` is nullable (workers without a base domain).
-// It is best-effort: if pre-existing rows already collide the CREATE fails and
-// the application-level checks in $lib/server/domains still apply.
-try {
-  sqlite.run(`
-    CREATE UNIQUE INDEX IF NOT EXISTS applications_domain_unique
-      ON applications (domain) WHERE domain IS NOT NULL;
-  `);
-} catch (e) {
+  // Fatal, unlike most startup work here. Every query in the application is
+  // written against schema.ts; if the database could not be brought to it there
+  // is nothing to serve, and starting anyway would turn one legible error into
+  // a hundred illegible ones spread over the next hour.
   console.error(
-    '[db] Could not enforce unique application domains — resolve duplicate ' +
-    'applications.domain values and restart:', e
+    `[db] Could not apply migrations from ${resolveMigrationsDir()}. The control plane ` +
+      `cannot start against a schema it does not know the shape of.`,
+    e,
   );
+  throw e;
 }
 
-// Add description column to applications if it doesn't exist
-try {
-  sqlite.run(`ALTER TABLE applications ADD COLUMN description TEXT;`);
-} catch {
-  // Column already exists
-}
+/**
+ * Report rows whose foreign key points at something that is not there.
+ *
+ * Runs while enforcement is still off, which is the only moment it can see the
+ * whole database rather than only what is written from now on. Two things show
+ * up here: a migration that broke a reference — the reason this runs at all —
+ * and rows that were already orphaned before enforcement was ever switched on,
+ * which nothing has looked for until now.
+ *
+ * Reported, not deleted. Every one of these is a row somebody's application
+ * once depended on, and guessing which are safe to remove is not a startup
+ * decision.
+ */
+{
+  try {
+    const violations = sqlite.query('PRAGMA foreign_key_check').all() as Array<{
+      table: string;
+      rowid: number | null;
+      parent: string;
+      fkid: number;
+    }>;
 
-// Add crowdsec_bouncer_key column to workers if it doesn't exist
-try {
-  sqlite.run(`ALTER TABLE workers ADD COLUMN crowdsec_bouncer_key TEXT;`);
-} catch {
-  // Column already exists
-}
-
-// Add OIDC columns to workers if they don't exist
-for (const col of [
-  `ALTER TABLE workers ADD COLUMN oidc_enabled INTEGER NOT NULL DEFAULT 0;`,
-  `ALTER TABLE workers ADD COLUMN oidc_provider_url TEXT;`,
-  `ALTER TABLE workers ADD COLUMN oidc_client_id TEXT;`,
-  `ALTER TABLE workers ADD COLUMN oidc_client_secret TEXT;`,
-  `ALTER TABLE workers ADD COLUMN oidc_encryption_key TEXT;`,
-  `ALTER TABLE workers ADD COLUMN oidc_applied_at INTEGER;`,
-  `ALTER TABLE workers ADD COLUMN oidc_callback_path TEXT;`,
-  `ALTER TABLE workers ADD COLUMN routing_mode TEXT NOT NULL DEFAULT 'labels';`,
-  `ALTER TABLE workers ADD COLUMN config_token TEXT;`,
-  `ALTER TABLE workers ADD COLUMN config_fetched_at INTEGER;`,
-  `ALTER TABLE containers ADD COLUMN domain TEXT;`,
-  `ALTER TABLE containers ADD COLUMN router_name TEXT;`,
-  // Nullable with no default on purpose: NULL is "undeclared", which is what
-  // every existing application is, and it must stay distinguishable from an
-  // explicit empty list. See applications.exposedPorts in the schema.
-  `ALTER TABLE applications ADD COLUMN exposed_ports TEXT;`,
-  // Templates carry it too, or saving an application as a template and creating
-  // from it silently drops which of its ports were public — the same round-trip
-  // loss the kubectl annotation has to avoid.
-  `ALTER TABLE application_templates ADD COLUMN exposed_ports TEXT;`,
-  // Null on every container deployed before this: the routing generator reads
-  // that as "the domain/router_name/exposed_port columns are the whole story",
-  // which is the single route those containers have always had.
-  `ALTER TABLE containers ADD COLUMN routes TEXT;`,
-  // Null on every existing application, read as "excluded nothing" — the fully
-  // protected state. See applications.appsecDisabledRules.
-  `ALTER TABLE applications ADD COLUMN appsec_disabled_rules TEXT;`,
-  `ALTER TABLE application_templates ADD COLUMN appsec_disabled_rules TEXT;`,
-]) {
-  try { sqlite.run(col); } catch { /* Column already exists */ }
-}
-
-// Add team claim columns to oidc_config if they don't exist
-try {
-  sqlite.run(`ALTER TABLE oidc_config ADD COLUMN team_claim_name TEXT;`);
-} catch {
-  // Column already exists
-}
-try {
-  sqlite.run(`ALTER TABLE oidc_config ADD COLUMN team_claim_key TEXT;`);
-} catch {
-  // Column already exists
-}
-try {
-  sqlite.run(`ALTER TABLE oidc_config ADD COLUMN team_role_suffix TEXT;`);
-} catch {
-  // Column already exists
-}
-
-// Add per-application rate limiting and auth columns
-try {
-  sqlite.run(`ALTER TABLE applications ADD COLUMN rate_limit_avg INTEGER;`);
-} catch {
-  // Column already exists
-}
-try {
-  sqlite.run(`ALTER TABLE applications ADD COLUMN rate_limit_burst INTEGER;`);
-} catch {
-  // Column already exists
-}
-try {
-  sqlite.run(`ALTER TABLE applications ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'none';`);
-} catch {
-  // Column already exists
-}
-try {
-  sqlite.run(`ALTER TABLE applications ADD COLUMN auth_config TEXT;`);
-} catch {
-  // Column already exists
-}
-
-// Add replicas, git, and healthcheck columns to applications
-for (const col of [
-  `ALTER TABLE applications ADD COLUMN replicas INTEGER NOT NULL DEFAULT 1;`,
-  `ALTER TABLE applications ADD COLUMN git_repo TEXT;`,
-  `ALTER TABLE applications ADD COLUMN git_branch TEXT;`,
-  `ALTER TABLE applications ADD COLUMN git_dockerfile TEXT;`,
-  `ALTER TABLE applications ADD COLUMN healthcheck TEXT;`,
-]) {
-  try { sqlite.run(col); } catch { /* Column already exists */ }
-}
-
-// Create new feature tables
-sqlite.run(`
-  CREATE TABLE IF NOT EXISTS deployments (
-    id TEXT PRIMARY KEY NOT NULL,
-    application_id TEXT NOT NULL REFERENCES applications(id),
-    version INTEGER NOT NULL,
-    manifest TEXT, environment TEXT, volumes TEXT, image TEXT,
-    image_digest TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',
-    deployed_by TEXT REFERENCES users(id),
-    error_message TEXT,
-    notes TEXT,
-    created_at INTEGER NOT NULL, finished_at INTEGER
-  );
-`);
-
-sqlite.run(`
-  CREATE TABLE IF NOT EXISTS notification_channels (
-    id TEXT PRIMARY KEY NOT NULL,
-    name TEXT NOT NULL, type TEXT NOT NULL, config TEXT NOT NULL,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    team_id TEXT REFERENCES teams(id),
-    created_by TEXT REFERENCES users(id),
-    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-  );
-`);
-
-sqlite.run(`
-  CREATE TABLE IF NOT EXISTS alert_rules (
-    id TEXT PRIMARY KEY NOT NULL,
-    name TEXT NOT NULL, resource_type TEXT NOT NULL, resource_id TEXT,
-    metric TEXT NOT NULL, operator TEXT NOT NULL DEFAULT 'gt',
-    threshold REAL NOT NULL, duration INTEGER,
-    channel_id TEXT REFERENCES notification_channels(id),
-    enabled INTEGER NOT NULL DEFAULT 1,
-    team_id TEXT REFERENCES teams(id),
-    last_triggered_at INTEGER,
-    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-  );
-`);
-
-sqlite.run(`
-  CREATE TABLE IF NOT EXISTS alert_events (
-    id TEXT PRIMARY KEY NOT NULL,
-    rule_id TEXT REFERENCES alert_rules(id),
-    resource_type TEXT NOT NULL, resource_id TEXT,
-    metric TEXT NOT NULL, value REAL NOT NULL, threshold REAL NOT NULL,
-    message TEXT NOT NULL,
-    acknowledged INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL
-  );
-`);
-
-sqlite.run(`
-  CREATE TABLE IF NOT EXISTS reconcile_reports (
-    worker_id TEXT PRIMARY KEY NOT NULL REFERENCES workers(id),
-    ran_at INTEGER NOT NULL,
-    clean INTEGER NOT NULL DEFAULT 1,
-    findings TEXT NOT NULL,
-    errors TEXT,
-    fingerprint TEXT
-  );
-`);
-
-sqlite.run(`
-  CREATE TABLE IF NOT EXISTS deploy_webhooks (
-    id TEXT PRIMARY KEY NOT NULL,
-    application_id TEXT NOT NULL REFERENCES applications(id),
-    token TEXT NOT NULL,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    last_used_at INTEGER,
-    created_by TEXT REFERENCES users(id),
-    created_at INTEGER NOT NULL
-  );
-`);
-
-sqlite.run(`
-  CREATE TABLE IF NOT EXISTS team_quotas (
-    id TEXT PRIMARY KEY NOT NULL,
-    team_id TEXT NOT NULL REFERENCES teams(id),
-    max_cpu_cores REAL, max_memory_bytes INTEGER,
-    max_containers INTEGER, max_applications INTEGER,
-    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-  );
-`);
-
-sqlite.run(`
-  CREATE TABLE IF NOT EXISTS backup_config (
-    id TEXT PRIMARY KEY NOT NULL,
-    storage_account_name TEXT NOT NULL,
-    access_key TEXT NOT NULL,
-    container_name TEXT NOT NULL DEFAULT 'rudder-backups',
-    enabled INTEGER NOT NULL DEFAULT 1,
-    last_backup_at INTEGER, last_backup_status TEXT,
-    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-  );
-`);
-
-// Application templates table
-sqlite.run(`
-  CREATE TABLE IF NOT EXISTS application_templates (
-    id TEXT PRIMARY KEY NOT NULL,
-    name TEXT NOT NULL,
-    description TEXT,
-    source_app_id TEXT REFERENCES applications(id),
-    team_id TEXT NOT NULL REFERENCES teams(id),
-    shared INTEGER NOT NULL DEFAULT 0,
-    type TEXT NOT NULL DEFAULT 'single',
-    deployment_format TEXT NOT NULL DEFAULT 'compose',
-    manifest TEXT,
-    environment TEXT,
-    volumes TEXT,
-    restart_policy TEXT NOT NULL DEFAULT 'always',
-    exposed_ports TEXT,
-    appsec_disabled_rules TEXT,
-    created_by TEXT REFERENCES users(id),
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS worker_metrics (
-    id TEXT PRIMARY KEY NOT NULL,
-    worker_id TEXT NOT NULL REFERENCES workers(id),
-    collected_at INTEGER NOT NULL,
-    cpu_percent REAL,
-    mem_usage_bytes INTEGER,
-    mem_limit_bytes INTEGER,
-    mem_percent REAL,
-    disk_usage_bytes INTEGER,
-    disk_limit_bytes INTEGER,
-    disk_percent REAL,
-    net_rx_bytes INTEGER,
-    net_tx_bytes INTEGER,
-    containers_running INTEGER,
-    containers_total INTEGER,
-    images_count INTEGER,
-    volumes_count INTEGER,
-    updates_pending INTEGER,
-    updates_security INTEGER,
-    reboot_required INTEGER
-  );
-
-  CREATE INDEX IF NOT EXISTS worker_metrics_worker_collected_idx
-    ON worker_metrics (worker_id, collected_at);
-  DROP INDEX IF EXISTS worker_metrics_worker_id_idx;
-
-  CREATE TABLE IF NOT EXISTS worker_pings (
-    id TEXT PRIMARY KEY NOT NULL,
-    worker_id TEXT NOT NULL REFERENCES workers(id),
-    pinged_at INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    latency_ms INTEGER,
-    error TEXT
-  );
-
-  CREATE INDEX IF NOT EXISTS worker_pings_worker_pinged_idx
-    ON worker_pings (worker_id, pinged_at);
-  DROP INDEX IF EXISTS worker_pings_worker_id_idx;
-
-  CREATE TABLE IF NOT EXISTS system_settings (
-    key TEXT PRIMARY KEY NOT NULL,
-    value TEXT NOT NULL,
-    updated_at INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS secrets (
-    id TEXT PRIMARY KEY NOT NULL,
-    name TEXT NOT NULL,
-    value TEXT NOT NULL,
-    description TEXT,
-    scope TEXT NOT NULL DEFAULT 'team',
-    delivery_mode TEXT NOT NULL DEFAULT 'env',
-    team_id TEXT REFERENCES teams(id),
-    created_by TEXT NOT NULL REFERENCES users(id),
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-  );
-`);
-
-// Columns added to tables that already existed on deployed control planes.
-// These run *after* the CREATE TABLE block above — an ALTER against a table
-// that has not been created yet fails silently here and would then be missed
-// entirely, because CREATE TABLE IF NOT EXISTS makes the new column only on a
-// database that never had the table.
-for (const col of [
-  `ALTER TABLE deployments ADD COLUMN image_digest TEXT;`,
-  `ALTER TABLE deployments ADD COLUMN notes TEXT;`,
-  `ALTER TABLE worker_metrics ADD COLUMN updates_pending INTEGER;`,
-  `ALTER TABLE worker_metrics ADD COLUMN updates_security INTEGER;`,
-  `ALTER TABLE worker_metrics ADD COLUMN reboot_required INTEGER;`,
-  `ALTER TABLE secrets ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'env';`,
-  `ALTER TABLE containers ADD COLUMN generation INTEGER NOT NULL DEFAULT 1;`,
-  `ALTER TABLE containers ADD COLUMN state TEXT NOT NULL DEFAULT 'active';`,
-  `ALTER TABLE containers ADD COLUMN deployment_id TEXT;`,
-  `ALTER TABLE containers ADD COLUMN spec_hash TEXT;`,
-  `ALTER TABLE containers ADD COLUMN reap_attempts INTEGER NOT NULL DEFAULT 0;`,
-  `ALTER TABLE containers ADD COLUMN reap_error TEXT;`,
-  `ALTER TABLE applications ADD COLUMN health_timeout_seconds INTEGER;`,
-  `ALTER TABLE applications ADD COLUMN retain_previous_minutes INTEGER NOT NULL DEFAULT 0;`,
-  `ALTER TABLE workers ADD COLUMN config_fetch_status INTEGER;`,
-  `ALTER TABLE workers ADD COLUMN config_fetch_detail TEXT;`,
-  `ALTER TABLE workers ADD COLUMN config_fetch_attempt_at INTEGER;`,
-  `ALTER TABLE workers ADD COLUMN config_basic_user TEXT;`,
-  `ALTER TABLE workers ADD COLUMN config_basic_password TEXT;`,
-  `ALTER TABLE applications ADD COLUMN oidc_id_token_header TEXT;`,
-  `ALTER TABLE applications ADD COLUMN oidc_access_token_header TEXT;`,
-]) {
-  try { sqlite.run(col); } catch { /* Column already exists */ }
-}
-
-// ── Team owners, removed ─────────────────────────────────────────────────────
-//
-// `team_members.role` was `owner` or `member`: a second, weaker administrator
-// tier that could rename and delete its own team, manage its membership and mint
-// its API keys. An installation admin could already do all of that, so what the
-// role actually bought was a branch in every team-scoped handler and an exemption
-// in the OIDC claim sync. Teams are flat now — see the schema comment.
-//
-// Dropped rather than left in place: a column nothing reads is a column the next
-// person has to work out the status of.
-for (const stmt of [
-  `ALTER TABLE team_members DROP COLUMN role;`,
-  `ALTER TABLE users ADD COLUMN last_seen_at INTEGER;`,
-]) {
-  try { sqlite.run(stmt); } catch { /* Already applied */ }
-}
-
-// ── Stacks, removed ──────────────────────────────────────────────────────────
-//
-// A stack was a group of applications with bulk deploy/stop/restart over it.
-// An application is now the multi-container unit — a compose manifest with
-// several services is deployed, stopped and restarted as one thing from its own
-// page — so the grouping layer above it bought nothing and had its own team
-// scoping to get wrong.
-//
-// Ordered: the index has to go before the column it covers, or SQLite refuses
-// the drop. Each statement is guarded because a database created after this
-// landed never had any of it.
-for (const stmt of [
-  `DROP INDEX IF EXISTS applications_stack_idx;`,
-  `ALTER TABLE applications DROP COLUMN stack_id;`,
-  `DROP TABLE IF EXISTS stacks;`,
-]) {
-  try { sqlite.run(stmt); } catch { /* Already gone */ }
-}
-
-// ── Indexes on the operational tables ────────────────────────────────────────
-//
-// Last, because several of these cover columns the ALTER block above adds
-// (`containers.state`, `containers.spec_hash`); an index created before its
-// column exists fails, and CREATE INDEX IF NOT EXISTS would then never retry.
-//
-// Until this block existed the only indexes in the database were uniqueness
-// constraints and the three (resource, timestamp) pairs on the metrics tables,
-// so every query below was a full table scan — including the two hottest paths
-// in the system:
-//
-//   - `containers WHERE worker_id`, which every http-mode worker's routing
-//     config fetch runs, on a timer measured in seconds (see traefik-config.ts).
-//   - `containers WHERE application_id`, which runs several times per deploy
-//     and on every application page.
-//
-// A scan of a dozen rows costs nothing, which is why this went unnoticed; the
-// cost arrives all at once at a few hundred containers.
-for (const idx of [
-  `CREATE INDEX IF NOT EXISTS containers_worker_idx ON containers (worker_id);`,
-  `CREATE INDEX IF NOT EXISTS containers_application_idx ON containers (application_id);`,
-  // Covers buildWorkerDynamicConfig's exact predicate.
-  `CREATE INDEX IF NOT EXISTS containers_worker_state_idx ON containers (worker_id, state, status);`,
-  `CREATE INDEX IF NOT EXISTS applications_worker_idx ON applications (worker_id);`,
-  `CREATE INDEX IF NOT EXISTS applications_team_idx ON applications (team_id);`,
-  // DESC to match `ORDER BY version DESC LIMIT 1`, which is how the next
-  // deployment version is computed on every deploy.
-  `CREATE INDEX IF NOT EXISTS deployments_app_version_idx ON deployments (application_id, version DESC);`,
-  `CREATE INDEX IF NOT EXISTS audit_logs_created_idx ON audit_logs (created_at DESC);`,
-  `CREATE INDEX IF NOT EXISTS audit_logs_team_created_idx ON audit_logs (team_id, created_at DESC);`,
-  `CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions (user_id);`,
-  `CREATE INDEX IF NOT EXISTS alert_events_created_idx ON alert_events (created_at DESC);`,
-  `CREATE INDEX IF NOT EXISTS team_members_user_idx ON team_members (user_id);`,
-  `CREATE INDEX IF NOT EXISTS secrets_team_idx ON secrets (team_id);`,
-  `CREATE INDEX IF NOT EXISTS deploy_webhooks_app_idx ON deploy_webhooks (application_id);`,
-]) {
-  try { sqlite.run(idx); } catch (e) {
-    console.error('[db] Could not create index:', idx, e);
+    if (violations.length > 0) {
+      const byTable = new Map<string, number>();
+      for (const v of violations) {
+        const key = `${v.table} → ${v.parent}`;
+        byTable.set(key, (byTable.get(key) ?? 0) + 1);
+      }
+      console.error(
+        `[db] ${violations.length} row(s) reference something that does not exist:\n  ` +
+          [...byTable].map(([k, n]) => `${n} in ${k}`).join('\n  '),
+      );
+    }
+  } catch (e) {
+    console.error('[db] Could not check foreign keys:', e);
   }
 }
 
-const db = drizzle(sqlite);
+sqlite.run('PRAGMA foreign_keys = ON');
+
+/**
+ * Check that every column schema.ts declares actually exists.
+ *
+ * The baseline migration is deliberately idempotent so it can adopt the
+ * databases that were built by the old startup DDL rather than by it. The cost
+ * of that is exactly one blind spot: on a database that already had the tables,
+ * `CREATE TABLE IF NOT EXISTS` will not add a column that is missing from one
+ * of them, and nothing would say so — the queries would simply fail later, one
+ * feature at a time, with an error naming the column and not the cause.
+ *
+ * So it is checked, once, at startup. Reports rather than repairs: an automatic
+ * ALTER here would be the beginning of the second schema authority all of this
+ * exists to remove. The message carries the statement to run.
+ */
+function verifySchema(): void {
+  const missing: string[] = [];
+
+  for (const value of Object.values(schema)) {
+    // schema.ts exports relations and types alongside the tables.
+    if (!is(value, SQLiteTable)) continue;
+
+    const table = getTableName(value);
+    // Interpolated because PRAGMA takes no bound parameters. The name comes
+    // from this module's own table definitions, never from a request.
+    const present = new Set(
+      (sqlite.query(`PRAGMA table_info("${table}")`).all() as Array<{ name: string }>).map(
+        (r) => r.name,
+      ),
+    );
+
+    if (present.size === 0) {
+      missing.push(`table "${table}" does not exist`);
+      continue;
+    }
+
+    for (const column of Object.values(getTableColumns(value))) {
+      if (!present.has(column.name)) missing.push(`"${table}"."${column.name}"`);
+    }
+  }
+
+  if (missing.length > 0) {
+    console.error(
+      `[db] The database is missing ${missing.length} thing(s) that src/lib/db/schema.ts ` +
+        `declares:\n  ${missing.join('\n  ')}\n` +
+        `This database predates the migration baseline and was not brought fully up to date ` +
+        `before it. Add them by hand and restart; the baseline's IF NOT EXISTS cannot.`,
+    );
+  }
+}
+
+try {
+  verifySchema();
+} catch (e) {
+  // A check, not a dependency. It must never be the reason the panel is down.
+  console.error('[db] Could not verify the schema:', e);
+}
 
 export { db, sqlite };
 
@@ -722,7 +247,6 @@ export { db, sqlite };
 
 // ── Safe column subsets & runtime helpers (sensitive fields excluded) ────────
 // These must be used in every page load() that returns data to the browser.
-import { getTableColumns } from 'drizzle-orm';
 import {
   workers as _workersTable,
   users as _usersTable,

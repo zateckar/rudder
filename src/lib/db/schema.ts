@@ -1,5 +1,16 @@
-import { sqliteTable, text, integer, real } from 'drizzle-orm/sqlite-core';
-import { relations } from 'drizzle-orm';
+import { index, sqliteTable, text, integer, real, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { relations, sql } from 'drizzle-orm';
+
+/**
+ * Indexes are declared here, on the table they cover.
+ *
+ * They used to exist only as `CREATE INDEX IF NOT EXISTS` statements in
+ * src/lib/db/index.ts, which meant `bun run db:generate` could not see them and
+ * a database built from the generated migration had none of them — while the
+ * running control plane did. That is the same class of divergence that let
+ * `applications.auth_type` default to `none` in one place and `global` in the
+ * other. There is one schema now, and this file is it.
+ */
 
 export const users = sqliteTable('users', {
   id: text('id').primaryKey(),
@@ -42,11 +53,20 @@ export const teams = sqliteTable('teams', {
  * Team lifecycle and membership are now admin work; everything a team *owns* is
  * open to every member of it.
  */
-export const teamMembers = sqliteTable('team_members', {
-  teamId: text('team_id').notNull().references(() => teams.id),
-  userId: text('user_id').notNull().references(() => users.id),
-  joinedAt: integer('joined_at', { mode: 'timestamp' }).notNull(),
-});
+export const teamMembers = sqliteTable(
+  'team_members',
+  {
+    teamId: text('team_id').notNull().references(() => teams.id),
+    userId: text('user_id').notNull().references(() => users.id),
+    joinedAt: integer('joined_at', { mode: 'timestamp' }).notNull(),
+  },
+  (t) => [
+    // Duplicates were possible before this, which made a role check depend on
+    // which row happened to come back first.
+    uniqueIndex('team_members_team_user_unique').on(t.teamId, t.userId),
+    index('team_members_user_idx').on(t.userId),
+  ],
+);
 
 export const workers = sqliteTable('workers', {
   id: text('id').primaryKey(),
@@ -228,7 +248,14 @@ export const applications = sqliteTable('applications', {
   createdBy: text('created_by').references(() => users.id),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
-});
+}, (t) => [
+  // Traefik routes by Host, so two applications claiming one domain produce two
+  // routers with an identical rule and requests land on whichever it picks.
+  // Partial because `domain` is nullable — workers without a base domain.
+  uniqueIndex('applications_domain_unique').on(t.domain).where(sql`domain IS NOT NULL`),
+  index('applications_worker_idx').on(t.workerId),
+  index('applications_team_idx').on(t.teamId),
+]);
 
 export const applicationTemplates = sqliteTable('application_templates', {
   id: text('id').primaryKey(),
@@ -355,7 +382,15 @@ export const containers = sqliteTable('containers', {
   reapError: text('reap_error'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
-});
+}, (t) => [
+  // Every http-mode worker's routing config fetch runs `WHERE worker_id`, on a
+  // timer measured in seconds; `WHERE application_id` runs several times per
+  // deploy and on every application page. Both were full scans.
+  index('containers_worker_idx').on(t.workerId),
+  index('containers_application_idx').on(t.applicationId),
+  // buildWorkerDynamicConfig's exact predicate.
+  index('containers_worker_state_idx').on(t.workerId, t.state, t.status),
+]);
 
 export const auditLogs = sqliteTable('audit_logs', {
   id: text('id').primaryKey(),
@@ -366,7 +401,12 @@ export const auditLogs = sqliteTable('audit_logs', {
   resourceId: text('resource_id'),
   details: text('details'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-});
+}, (t) => [
+  // Both orderings the audit views ask for, and what the retention sweep in
+  // $lib/server/retention deletes by.
+  index('audit_logs_created_idx').on(sql`created_at DESC`),
+  index('audit_logs_team_created_idx').on(t.teamId, sql`created_at DESC`),
+]);
 
 export const volumes = sqliteTable('volumes', {
   id: text('id').primaryKey(),
@@ -412,14 +452,18 @@ export const secrets = sqliteTable('secrets', {
   createdBy: text('created_by').notNull().references(() => users.id),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
-});
+}, (t) => [
+  index('secrets_team_idx').on(t.teamId),
+]);
 
 export const sessions = sqliteTable('sessions', {
   id: text('id').primaryKey(),
   userId: text('user_id').notNull().references(() => users.id),
   expiresAt: integer('expires_at', { mode: 'timestamp' }).notNull(),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-});
+}, (t) => [
+  index('sessions_user_idx').on(t.userId),
+]);
 
 /** Time-series container performance metrics collected in the background */
 export const containerMetrics = sqliteTable('container_metrics', {
@@ -434,7 +478,9 @@ export const containerMetrics = sqliteTable('container_metrics', {
   netTxBytes: integer('net_tx_bytes'),
   blockReadBytes: integer('block_read_bytes'),
   blockWriteBytes: integer('block_write_bytes'),
-});
+}, (t) => [
+  index('container_metrics_container_collected_idx').on(t.containerId, t.collectedAt),
+]);
 
 /** Generic OIDC provider configuration (Auth Code + PKCE, stored in DB) */
 export const oidcConfig = sqliteTable('oidc_config', {
@@ -487,7 +533,9 @@ export const workerMetrics = sqliteTable('worker_metrics', {
   updatesPending: integer('updates_pending'),
   updatesSecurity: integer('updates_security'),
   rebootRequired: integer('reboot_required'),
-});
+}, (t) => [
+  index('worker_metrics_worker_collected_idx').on(t.workerId, t.collectedAt),
+]);
 
 /** Worker availability pings */
 export const workerPings = sqliteTable('worker_pings', {
@@ -497,7 +545,9 @@ export const workerPings = sqliteTable('worker_pings', {
   status: text('status', { enum: ['online', 'offline', 'error'] }).notNull(),
   latencyMs: integer('latency_ms'),
   error: text('error'),
-});
+}, (t) => [
+  index('worker_pings_worker_pinged_idx').on(t.workerId, t.pingedAt),
+]);
 
 /** Deployment history -- tracks every deploy action for rollback */
 export const deployments = sqliteTable('deployments', {
@@ -534,7 +584,11 @@ export const deployments = sqliteTable('deployments', {
   notes: text('notes'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   finishedAt: integer('finished_at', { mode: 'timestamp' }),
-});
+}, (t) => [
+  // DESC to match `ORDER BY version DESC LIMIT 1`, which is how the next
+  // deployment version is computed on every deploy.
+  index('deployments_app_version_idx').on(t.applicationId, sql`version DESC`),
+]);
 
 /** Notification channels (email, webhook, slack) */
 export const notificationChannels = sqliteTable('notification_channels', {
@@ -579,7 +633,9 @@ export const alertEvents = sqliteTable('alert_events', {
   message: text('message').notNull(),
   acknowledged: integer('acknowledged', { mode: 'boolean' }).notNull().default(false),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-});
+}, () => [
+  index('alert_events_created_idx').on(sql`created_at DESC`),
+]);
 
 /**
  * The most recent reconciliation pass for a worker.
@@ -615,7 +671,9 @@ export const deployWebhooks = sqliteTable('deploy_webhooks', {
   lastUsedAt: integer('last_used_at', { mode: 'timestamp' }),
   createdBy: text('created_by').references(() => users.id),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-});
+}, (t) => [
+  index('deploy_webhooks_app_idx').on(t.applicationId),
+]);
 
 /** Team resource quotas */
 export const teamQuotas = sqliteTable('team_quotas', {

@@ -12,9 +12,7 @@
 		"test:watch": "bun test --watch src",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-		"db:init": "bun run scripts/init-db.ts",
 		"db:generate": "bun --bun drizzle-kit generate",
-		"db:migrate": "bun --bun drizzle-kit migrate",
 		"start": "set PORT=7244&& bun run server.js"
 	},
 	"devDependencies": {

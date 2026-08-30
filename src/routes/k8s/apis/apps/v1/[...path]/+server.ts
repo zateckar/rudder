@@ -233,6 +233,12 @@ export async function POST({
       exposedPorts: serializeExposedPorts(parsed.exposedPorts),
       appsecDisabledRules: serializeAppsecRules(parsed.appsecDisabledRules),
       replicas: parsed.replicas,
+      // Same reasoning as the import route: a manifest applied with kubectl says
+      // nothing about authentication, and the safe reading of that silence is
+      // the worker's global OIDC rather than none. It was previously left to
+      // the column default, which the deployed databases had as 'none' — so
+      // every application created with `kubectl apply` was public.
+      authType: 'global',
       createdBy: null,
       createdAt: new Date(),
       updatedAt: new Date(),

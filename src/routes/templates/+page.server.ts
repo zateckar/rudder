@@ -260,6 +260,16 @@ export const actions = {
       volumes: template.volumes,
       restartPolicy: template.restartPolicy,
       exposedPorts: template.exposedPorts,
+      // Stated rather than left to the column default. A template carries no
+      // auth configuration — an OIDC client secret is not something to copy
+      // between applications — so this is the one decision the row has to make,
+      // and it was making it by omission: drizzle leaves an unsupplied column
+      // out of the INSERT, and the deployed databases defaulted it to 'none'
+      // rather than the 'global' the schema promised. Every application created
+      // from a template was therefore created unauthenticated. See
+      // drizzle/0001, which fixes the databases; this is the half that means it
+      // cannot happen again through this path.
+      authType: 'global',
       createdBy: userId || undefined,
       createdAt: new Date(),
       updatedAt: new Date(),

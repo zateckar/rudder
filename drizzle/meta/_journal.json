@@ -5,134 +5,15 @@
     {
       "idx": 0,
       "version": "6",
-      "when": 1772648773491,
-      "tag": "0000_light_terrax",
+      "when": 1788095939269,
+      "tag": "0000_baseline",
       "breakpoints": true
     },
     {
       "idx": 1,
       "version": "6",
-      "when": 1773613477127,
-      "tag": "0001_gifted_black_widow",
-      "breakpoints": true
-    },
-    {
-      "idx": 2,
-      "version": "6",
-      "when": 1773700000000,
-      "tag": "0002_add_secrets",
-      "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "6",
-      "when": 1773800000000,
-      "tag": "0003_add_crowdsec_bouncer_key",
-      "breakpoints": true
-    },
-    {
-      "idx": 4,
-      "version": "6",
-      "when": 1773900000000,
-      "tag": "0004_add_app_ratelimit_auth",
-      "breakpoints": true
-    },
-    {
-      "idx": 5,
-      "version": "6",
-      "when": 1774000000000,
-      "tag": "0005_features_batch",
-      "breakpoints": true
-    },
-    {
-      "idx": 6,
-      "version": "6",
-      "when": 1774100000000,
-      "tag": "0006_remove_ssh_keys",
-      "breakpoints": true
-    },
-    {
-      "idx": 7,
-      "version": "6",
-      "when": 1774300000000,
-      "tag": "0007_worker_oidc",
-      "breakpoints": true
-    },
-    {
-      "idx": 8,
-      "version": "6",
-      "when": 1774400000000,
-      "tag": "0008_oidc_applied_and_unique_domains",
-      "breakpoints": true
-    },
-    {
-      "idx": 9,
-      "version": "6",
-      "when": 1774500000000,
-      "tag": "0009_worker_routing_mode",
-      "breakpoints": true
-    },
-    {
-      "idx": 10,
-      "version": "6",
-      "when": 1774600000000,
-      "tag": "0010_deployment_digest",
-      "breakpoints": true
-    },
-    {
-      "idx": 11,
-      "version": "6",
-      "when": 1774700000000,
-      "tag": "0011_worker_patch_state",
-      "breakpoints": true
-    },
-    {
-      "idx": 12,
-      "version": "6",
-      "when": 1774800000000,
-      "tag": "0012_secret_delivery_mode",
-      "breakpoints": true
-    },
-    {
-      "idx": 13,
-      "version": "6",
-      "when": 1774900000000,
-      "tag": "0013_container_generation",
-      "breakpoints": true
-    },
-    {
-      "idx": 14,
-      "version": "6",
-      "when": 1774910000000,
-      "tag": "0014_deployment_notes",
-      "breakpoints": true
-    },
-    {
-      "idx": 15,
-      "version": "6",
-      "when": 1774920000000,
-      "tag": "0015_container_spec_hash",
-      "breakpoints": true
-    },
-    {
-      "idx": 16,
-      "version": "6",
-      "when": 1774930000000,
-      "tag": "0016_reconcile_reports",
-      "breakpoints": true
-    },
-    {
-      "idx": 17,
-      "version": "6",
-      "when": 1787084400000,
-      "tag": "0017_worker_oidc_callback_path",
-      "breakpoints": true
-    },
-    {
-      "idx": 18,
-      "version": "6",
-      "when": 1787170800000,
-      "tag": "0018_container_reap_attempts",
+      "when": 1788096199193,
+      "tag": "0001_auth_type_default_and_orphan_indexes",
       "breakpoints": true
     }
   ]
