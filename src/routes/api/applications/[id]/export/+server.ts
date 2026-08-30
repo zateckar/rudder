@@ -25,7 +25,17 @@ export async function GET({ params, cookies }: { params: { id: string }; cookies
         }))
       );
     } catch {
-      environment = app.environment;
+      // An environment block that does not parse cannot be redacted per
+      // variable, and falling back to the raw column — as this did — exported
+      // every value in cleartext, secrets included. One malformed edit was
+      // enough to defeat the redaction above entirely. The export is a
+      // configuration template, so dropping the block costs the operator the
+      // one field they must fill in by hand anyway.
+      environment = null;
+      console.warn(
+        `[export] Environment block of application ${app.id} is not valid JSON; ` +
+          `omitting it from the export rather than exporting it unredacted.`,
+      );
     }
   }
 

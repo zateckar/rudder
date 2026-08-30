@@ -7,6 +7,7 @@ import { withPodman } from '$lib/server/podman-client';
 import { isAbsent } from '$lib/server/deploy';
 import { requireContainer, route } from '$lib/server/auth';
 import { parseJsonBody, schemas } from '$lib/server/validation';
+import { redactContainerInspect } from '$lib/server/redact';
 
 export const GET: RequestHandler = route(async (event) => {
   const { container, worker } = await requireContainer(event, event.params.id!);
@@ -14,7 +15,13 @@ export const GET: RequestHandler = route(async (event) => {
   // destroyed the client after a successful inspect and not at all when the
   // inspect threw, so a misbehaving worker leaked a keep-alive TLS agent per
   // request — on exactly the requests most likely to be retried.
-  return json(await withPodman(worker, (c) => c.getContainer(container.containerId)));
+  //
+  // Redacted because the secrets store injects secrets as environment
+  // variables: this returned every secret bound to the container in plaintext,
+  // to anyone who could open its page, without the audited reveal the secrets
+  // UI requires. See `redactContainerInspect`.
+  const inspect = await withPodman(worker, (c) => c.getContainer(container.containerId));
+  return json(redactContainerInspect(inspect));
 });
 
 /**
