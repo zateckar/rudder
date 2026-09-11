@@ -675,3 +675,170 @@ export async function findCrowdsecContainer(client: {
     ) ?? null
   );
 }
+
+/**
+ * Whether this failure is CrowdSec being restarted rather than a fault.
+ *
+ * One event, four appearances, depending on where in the restart the request
+ * landed: the exec was running when the container went away (`aborted`), the
+ * container is stopped (`container state improper`), `podman rm -f` has removed
+ * it and `podman run` has not yet replaced it (`no such container`), or the
+ * socket died under the request (`ECONNRESET`).
+ *
+ * Narrow on purpose. Everything this returns true for is retried, and retrying
+ * a worker that is genuinely refusing would turn one clear error into a slow
+ * one.
+ */
+export function isRestartSymptom(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  const code = (err as { code?: string } | null)?.code ?? '';
+  if (code === 'ECONNRESET' || code === 'EPIPE') return true;
+  return (
+    /container state improper|exec sessions on running containers/i.test(message) ||
+    /no such container|container not found|no container with (name|id)/i.test(message) ||
+    /\baborted\b|socket hang up|ECONNRESET|EPIPE/i.test(message)
+  );
+}
+
+/**
+ * How long one request will sit out a restart before handing back to the page.
+ *
+ * A restart takes about twenty seconds on a live worker, so this does not cover
+ * all of one by itself and is not meant to: the page retries, and the two
+ * together close the window. The budget is what keeps a worker whose CrowdSec is
+ * crash-looping from holding a request open for the whole of it.
+ */
+export const RESTART_WAIT_MS = 15_000;
+
+/** Between attempts. Shorter than a restart by a lot, cheap either way. */
+const RESTART_POLL_MS = 1_000;
+
+/**
+ * How long "there is no CrowdSec container at all" is given to be a restart.
+ *
+ * Between `podman rm -f` and `podman run` the container does not exist, which
+ * lasts a second or two. Waiting the full budget for it would mean every read on
+ * a worker that never had CrowdSec provisioned hung for fifteen seconds before
+ * saying so.
+ */
+const MISSING_WAIT_MS = 3_000;
+
+/** What `cscli` returned. The shape `decisionsFromExec` reads. */
+export interface CscliResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  exitCodeKnown?: boolean;
+  exitCodeError?: string | null;
+}
+
+/** The part of the Podman client this module needs. */
+export interface CrowdsecExecClient {
+  listContainers: (all: boolean) => Promise<any[]>;
+  execContainerHttp: (
+    id: string,
+    cmd: string[],
+    options: { attachStdout?: boolean; attachStderr?: boolean; tty?: boolean },
+  ) => Promise<CscliResult>;
+}
+
+/** Waiting behaviour, injectable so tests do not sleep for real. */
+export interface CrowdsecWaitOptions {
+  waitMs?: number;
+  pollMs?: number;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** An open line to `cscli` on one worker. */
+export interface CrowdsecSession {
+  /** Why no command can be run, or null when they can. */
+  error: string | null;
+  /**
+   * True when `error` — or an error thrown by `exec` — is a restart in progress.
+   *
+   * The caller passes this to the page, which is the whole point: a restart is
+   * the operator's own change being applied and wants a "reloading…" notice,
+   * where everything else here wants red.
+   */
+  restarting: boolean;
+  container: any | null;
+  /** Run one `cscli` command, waiting out a restart rather than failing into it. */
+  exec: (cmd: string[]) => Promise<CscliResult>;
+}
+
+/**
+ * Open a `cscli` session on a worker, waiting out a restart in progress.
+ *
+ * Applying a rule exclusion restarts CrowdSec — AppSec configuration is only
+ * read at startup — and the restart lands up to a minute after the click, which
+ * is exactly when the operator is still reading the page. Every read in that
+ * window used to come back as a red error telling them to refresh: correct,
+ * unhelpful, and the reason this tab felt broken while being used as intended.
+ *
+ * So the wait moves to where it belongs. The container is re-found on every
+ * attempt because the restart *replaces* it — the unit runs `podman rm -f` then
+ * `podman run`, so the id the session opened with is gone for good and retrying
+ * against it would 404 until the budget ran out.
+ *
+ * The deadline is shared by the open and by every `exec` on the session, so a
+ * page running two commands waits out one restart, not two.
+ */
+export async function openCrowdsec(
+  client: CrowdsecExecClient,
+  options: CrowdsecWaitOptions = {},
+): Promise<CrowdsecSession> {
+  const waitMs = options.waitMs ?? RESTART_WAIT_MS;
+  const pollMs = options.pollMs ?? RESTART_POLL_MS;
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+
+  const started = now();
+  const deadline = started + waitMs;
+  const find = () => findCrowdsecContainer(client).catch(() => null);
+
+  let container = await find();
+  let unavailable = crowdsecUnavailable(container);
+
+  while (unavailable !== null) {
+    // A container that is not there at all is given a short window and no more.
+    // On a worker mid-restart it reappears within a second or two; on a worker
+    // that never had CrowdSec it never will, and that answer should be prompt.
+    const budget = container === null ? Math.min(deadline, started + MISSING_WAIT_MS) : deadline;
+    if (now() >= budget) break;
+    await sleep(pollMs);
+    container = await find();
+    unavailable = crowdsecUnavailable(container);
+  }
+
+  const exec = async (cmd: string[]): Promise<CscliResult> => {
+    if (!container?.Id) throw new Error(unavailable ?? 'CrowdSec is not running on this worker.');
+
+    for (;;) {
+      try {
+        return await client.execContainerHttp(container.Id, cmd, {
+          attachStdout: true,
+          attachStderr: true,
+          tty: false,
+        });
+      } catch (err) {
+        if (!isRestartSymptom(err) || now() >= deadline) throw err;
+        await sleep(pollMs);
+        const next = await find();
+        // Only adopt a container that can actually be exec'd into. Holding the
+        // old id through the stopped phase is harmless — the next attempt fails
+        // the same way and loops — where adopting a stopped one would not help.
+        if (next && crowdsecUnavailable(next) === null) container = next;
+      }
+    }
+  };
+
+  return {
+    error: unavailable,
+    // Being unable to find CrowdSec at all is not a restart: nothing is coming
+    // back, and telling someone to refresh shortly would be an invented promise.
+    restarting: unavailable !== null && container !== null,
+    container,
+    exec,
+  };
+}

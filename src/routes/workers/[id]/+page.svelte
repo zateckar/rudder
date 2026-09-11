@@ -1,7 +1,7 @@
 <script lang="ts">
   import { formatBytes, formatUptime, timeAgo } from '$lib/format';
   import { invalidateAll } from '$app/navigation';
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import SshKeyPrompt from '$lib/components/SshKeyPrompt.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import { showToast } from '$lib/client/toast.svelte';
@@ -370,17 +370,60 @@
     }
   }
 
+  // ── Waiting out a CrowdSec restart ────────────────────────────────────────
+  //
+  // Excluding a rule restarts CrowdSec, because AppSec configuration is only
+  // read at startup, and the worker applies the change up to a minute after the
+  // click — so the restart lands while this tab is still open. Reads in that
+  // window used to come back as a red "could not read decisions", which is the
+  // admin's own change being reported to them as a fault. It is a notice, and
+  // the page reloads itself out of it.
+  let crowdsecRestarting = $state(false);
+  let crowdsecRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let crowdsecRetryUntil = 0;
+  const CROWDSEC_RETRY_WINDOW_MS = 120_000;
+  const CROWDSEC_RETRY_EVERY_MS = 5_000;
+
   async function loadCrowdsec() {
     crowdsecLoading = true;
     try {
       const res = await fetch(`/api/workers/${workerId}/crowdsec?tail=200`);
-      crowdsec = await res.json();
+      const body = await res.json();
+      crowdsecRestarting = !!body.restarting;
+      // Status and logs are read even mid-restart and are the most useful thing
+      // on this tab while CrowdSec is down, so the payload always replaces the
+      // old one here — unlike the application page, which is showing matches
+      // that a restart has nothing better to offer than.
+      crowdsec = body;
     } catch (e: any) {
+      crowdsecRestarting = false;
       crowdsec = { error: e.message };
     } finally {
       crowdsecLoading = false;
+      scheduleCrowdsecReload();
     }
   }
+
+  /** Reload while CrowdSec is still coming back, for a bounded while. */
+  function scheduleCrowdsecReload() {
+    if (crowdsecRetryTimer) clearTimeout(crowdsecRetryTimer);
+    crowdsecRetryTimer = null;
+
+    if (!crowdsecRestarting) {
+      crowdsecRetryUntil = 0;
+      return;
+    }
+    if (crowdsecRetryUntil === 0) crowdsecRetryUntil = Date.now() + CROWDSEC_RETRY_WINDOW_MS;
+    if (Date.now() >= crowdsecRetryUntil) return;
+
+    crowdsecRetryTimer = setTimeout(() => {
+      if (activeTab === 'crowdsec') loadCrowdsec();
+    }, CROWDSEC_RETRY_EVERY_MS);
+  }
+
+  onDestroy(() => {
+    if (crowdsecRetryTimer) clearTimeout(crowdsecRetryTimer);
+  });
 
   /**
    * Lift one CrowdSec decision.
@@ -2021,7 +2064,17 @@
           <button class="btn-tiny" onclick={loadCrowdsec} title="Re-read decisions from CrowdSec">Refresh</button>
         </div>
 
-        {#if !crowdsec.decisionsAvailable}
+        {#if crowdsec.restarting}
+          <!-- Still "not an answer", so no list is shown — but not red either.
+               A restart is what excluding a rule does to CrowdSec, and reporting
+               the admin's own change back to them as a failure they should look
+               into is what made this tab feel unreliable. -->
+          <p class="help-text">
+            <strong>CrowdSec is restarting on this worker</strong>, so its decisions cannot be
+            read for a few seconds — this is what applying a rule exclusion looks like. Bans
+            already in force survive the restart. Reloading automatically…
+          </p>
+        {:else if !crowdsec.decisionsAvailable}
           <!-- Never "all clear" on the strength of an unanswered question: this
                panel used to say exactly that while three bans were live.
                `decisionsError` says which failure it was, because this one is

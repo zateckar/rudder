@@ -16,6 +16,8 @@ import {
   crowdsecUnavailable,
   decisionsFromExec,
   groupAppsecBySource,
+  isRestartSymptom,
+  openCrowdsec,
   parseAppsecAlerts,
   parseBanHistory,
   parseDecisions,
@@ -103,6 +105,155 @@ describe('reading CrowdSec while it restarts', () => {
     expect(crowdsecReadError(new Error('certificate has expired'))).toBe(
       'Could not reach the worker: certificate has expired',
     );
+  });
+});
+
+/**
+ * Waiting the restart out instead of reporting it.
+ *
+ * Naming the restart was an improvement on passing Podman's words through, but
+ * it is still an error message for something nobody needs to act on: the
+ * operator pressed a button, the worker applied it up to a minute later, and
+ * every read in the twenty seconds that follows came back red telling them to
+ * refresh. So the wait moved to the server, which knows how long it is for.
+ */
+describe('openCrowdsec', () => {
+  /** A clock that only moves when something sleeps, so tests do not. */
+  function clock() {
+    let t = 0;
+    return {
+      now: () => t,
+      sleep: async (ms: number) => {
+        t += ms;
+      },
+    };
+  }
+
+  const running = (id: string) => ({ Id: id, Names: ['/crowdsec'], State: 'running' });
+  const exited = (id: string) => ({ Id: id, Names: ['/crowdsec'], State: 'exited' });
+
+  /** Records which container each command was run against. */
+  function fakeClient(
+    states: Array<any[]>,
+    exec: (id: string, cmd: string[]) => Promise<any>,
+  ) {
+    const listed: Array<any[]> = [...states];
+    return {
+      execCalls: [] as string[],
+      listContainers: async () => (listed.length > 1 ? listed.shift()! : listed[0]),
+      execContainerHttp: async function (this: any, id: string, cmd: string[]) {
+        this.execCalls.push(id);
+        return exec(id, cmd);
+      },
+    };
+  }
+
+  test('the four shapes of a restart are one thing', () => {
+    // Where in the restart the request landed decides which of these comes back,
+    // and all four mean "ask again in a moment".
+    expect(isRestartSymptom(new Error('aborted'))).toBe(true);
+    expect(isRestartSymptom(new Error('can only create exec sessions on running containers'))).toBe(
+      true,
+    );
+    expect(isRestartSymptom(new Error('no such container'))).toBe(true);
+    expect(isRestartSymptom(Object.assign(new Error('read'), { code: 'ECONNRESET' }))).toBe(true);
+
+    // Everything this returns true for is retried, so a worker that is genuinely
+    // refusing must not be in here: one clear error beats a slow one.
+    expect(isRestartSymptom(new Error('certificate has expired'))).toBe(false);
+    expect(isRestartSymptom(new Error('401 Unauthorized'))).toBe(false);
+  });
+
+  test('waits for the container the restart produced, and uses that one', async () => {
+    const { now, sleep } = clock();
+    // Stopped, gone entirely while `podman rm -f` runs, then a *new* container:
+    // the unit replaces it, so the id the session opened with is dead for good.
+    const client = fakeClient(
+      [[exited('old')], [], [running('new')]],
+      async () => ({ stdout: 'null', stderr: '', exitCode: 0, exitCodeKnown: true }),
+    );
+
+    const session = await openCrowdsec(client as any, { now, sleep, pollMs: 1_000 });
+    expect(session.error).toBeNull();
+
+    await session.exec(['cscli', 'decisions', 'list', '-o', 'json']);
+    expect(client.execCalls).toEqual(['new']);
+  });
+
+  test('a command cut mid-restart is retried against the new container', async () => {
+    const { now, sleep } = clock();
+    let attempt = 0;
+    const client = fakeClient([[running('old')], [running('new')]], async () => {
+      // The exec was already running when the container went away. Node calls
+      // that `aborted`, and it used to end the read.
+      if (attempt++ === 0) throw new Error('aborted');
+      return { stdout: '[]', stderr: '', exitCode: 0, exitCodeKnown: true };
+    });
+
+    const session = await openCrowdsec(client as any, { now, sleep, pollMs: 1_000 });
+    const result = await session.exec(['cscli', 'alerts', 'list']);
+
+    expect(result.stdout).toBe('[]');
+    expect(client.execCalls).toEqual(['old', 'new']);
+  });
+
+  test('gives up at the deadline with the failure it actually had', async () => {
+    const { now, sleep } = clock();
+    const client = fakeClient([[running('one')]], async () => {
+      throw new Error('aborted');
+    });
+
+    const session = await openCrowdsec(client as any, {
+      now,
+      sleep,
+      pollMs: 1_000,
+      waitMs: 3_000,
+    });
+
+    // Rethrown rather than translated here: `crowdsecReadError` is what turns it
+    // into a sentence, and swallowing it would leave the page reassured.
+    await expect(session.exec(['cscli', 'decisions', 'list'])).rejects.toThrow('aborted');
+    expect(now()).toBe(3_000);
+  });
+
+  test('a worker without CrowdSec answers promptly rather than waiting it out', async () => {
+    const { now, sleep } = clock();
+    const client = fakeClient([[]], async () => ({
+      stdout: '',
+      stderr: '',
+      exitCode: 0,
+      exitCodeKnown: true,
+    }));
+
+    const session = await openCrowdsec(client as any, { now, sleep, pollMs: 1_000 });
+
+    // No container is given the length of a `podman rm -f`, not the length of a
+    // restart: on a worker that never had CrowdSec it is never coming back, and
+    // every page load would have hung for the full budget first.
+    expect(session.error).toBe('CrowdSec is not running on this worker.');
+    expect(session.restarting).toBe(false);
+    expect(now()).toBeLessThanOrEqual(3_000);
+  });
+
+  test('a container that stays down is a restart, not a missing worker', async () => {
+    const { now, sleep } = clock();
+    const client = fakeClient([[exited('one')]], async () => ({
+      stdout: '',
+      stderr: '',
+      exitCode: 0,
+      exitCodeKnown: true,
+    }));
+
+    const session = await openCrowdsec(client as any, {
+      now,
+      sleep,
+      pollMs: 1_000,
+      waitMs: 3_000,
+    });
+
+    expect(session.error).toContain('restarting');
+    // Which is what the page reloads itself on, rather than showing red.
+    expect(session.restarting).toBe(true);
   });
 });
 

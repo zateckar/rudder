@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import Modal from '$lib/components/Modal.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import { formatBytes, formatTime } from '$lib/format';
@@ -398,17 +399,73 @@
   let appsecMessage = $state('');
   let appsecError = $state(false);
 
+  // ── Waiting out a CrowdSec restart ────────────────────────────────────────
+  //
+  // Excluding a rule restarts CrowdSec on the worker, because AppSec
+  // configuration is only read at startup — and the worker applies the change up
+  // to a minute after the click, so the restart lands while the operator is
+  // still reading this page. Every read in that window came back as a red error
+  // telling them to refresh: accurate, useless, and the reason this tab felt
+  // broken while being used exactly as intended.
+  //
+  // The server already waits out part of the restart. This covers the rest: a
+  // restart is a notice, not a failure, and the page reloads itself rather than
+  // asking somebody to keep pressing Refresh until it works.
+  let appsecRestarting = $state(false);
+  let appsecRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** When to stop waiting and let the message stand. 0 while nothing is pending. */
+  let appsecRetryUntil = 0;
+
+  /** Long enough for a slow restart, short enough not to poll a broken one forever. */
+  const APPSEC_RETRY_WINDOW_MS = 120_000;
+  const APPSEC_RETRY_EVERY_MS = 5_000;
+
   async function loadAppsec() {
     appsecLoading = true;
     try {
       const res = await fetch(`/api/applications/${data.application.id}/appsec`);
-      appsec = await res.json();
+      const body = await res.json();
+      appsecRestarting = !!body.restarting;
+
+      // A restart blanks nothing. The matches on screen were read seconds ago
+      // and are still the best answer anyone has; replacing them with "could not
+      // be read" would throw away the evidence the operator is working from, in
+      // a window their own click created.
+      if (!appsecRestarting || appsec === null) appsec = body;
     } catch (e: any) {
+      appsecRestarting = false;
       appsec = { sources: [], available: false, error: e.message };
     } finally {
       appsecLoading = false;
+      scheduleAppsecReload();
     }
   }
+
+  /** Reload once more while CrowdSec is still coming back, then stop. */
+  function scheduleAppsecReload() {
+    if (appsecRetryTimer) clearTimeout(appsecRetryTimer);
+    appsecRetryTimer = null;
+
+    if (!appsecRestarting) {
+      appsecRetryUntil = 0;
+      return;
+    }
+    // The window starts at the first restarting answer, not at every one, so a
+    // CrowdSec that is genuinely crash-looping is polled for two minutes rather
+    // than for ever.
+    if (appsecRetryUntil === 0) appsecRetryUntil = Date.now() + APPSEC_RETRY_WINDOW_MS;
+    if (Date.now() >= appsecRetryUntil) return;
+
+    appsecRetryTimer = setTimeout(() => {
+      // Only while the tab is still the one being looked at. Polling a worker on
+      // behalf of a page nobody is reading is what the timer is for avoiding.
+      if (activeTab === 'firewall') loadAppsec();
+    }, APPSEC_RETRY_EVERY_MS);
+  }
+
+  onDestroy(() => {
+    if (appsecRetryTimer) clearTimeout(appsecRetryTimer);
+  });
 
   /**
    * Disable the rules ticked in the matches table, in one request.
@@ -2125,10 +2182,26 @@
 
       {#if appsec === null}
         <p class="empty">{appsecLoading ? 'Reading the firewall…' : 'Not loaded.'}</p>
-      {:else if appsec.error}
-        <p class="error">{appsec.error}</p>
       {:else}
-        {#if appsec.decisionsError}
+        {#if appsecRestarting}
+          <!-- Not an error, and deliberately not red. CrowdSec only reads AppSec
+               configuration at startup, so a rule exclusion restarts it: this is
+               the change being applied, and the page waits for it rather than
+               reporting it and asking somebody to press Refresh. -->
+          <p class="help-text">
+            <strong>CrowdSec is restarting on this worker</strong> to pick up a rule change — this
+            is what applying an exclusion looks like.{#if !appsec.error} The matches below were
+            read just before it started.{#if appsec.decisionsError} Which addresses are currently
+            blocked could not be read, so none of them is shown as blocked — the bans themselves
+            survive the restart.{/if}{/if} Reloading automatically…
+          </p>
+        {:else if appsec.error}
+          <p class="error">{appsec.error}</p>
+        {/if}
+      {/if}
+
+      {#if appsec !== null && !appsec.error}
+        {#if appsec.decisionsError && !appsecRestarting}
           <!-- Kept separate from the matches error: two reads, and one failing
                must not make the other look answered. -->
           <p class="error">Active blocks could not be read: {appsec.decisionsError}</p>

@@ -4,12 +4,13 @@ import { withPodman } from '$lib/server/podman-client';
 import { requireWorker, route } from '$lib/server/auth';
 import {
   crowdsecReadError,
-  crowdsecUnavailable,
   decisionsFromExec,
-  findCrowdsecContainer,
   groupAppsecBySource,
+  isRestartSymptom,
+  openCrowdsec,
   parseAppsecAlerts,
   type AppsecSourceGroup,
+  type CscliResult,
   type DecisionsRead,
 } from '$lib/server/crowdsec';
 
@@ -26,13 +27,13 @@ import {
  * finding rule numbers, and a missing one costs an SSH session, not a bad
  * security decision.
  */
-async function readAppsecAlerts(client: any, containerId: string): Promise<AppsecSourceGroup[]> {
+async function readAppsecAlerts(
+  exec: (cmd: string[]) => Promise<CscliResult>,
+): Promise<AppsecSourceGroup[]> {
   try {
-    const { stdout, exitCode } = await client.execContainerHttp(
-      containerId,
-      ['cscli', 'alerts', 'list', '-a', '--limit', '200', '-o', 'json'],
-      { attachStdout: true, attachStderr: true, tty: false },
-    );
+    const { stdout, exitCode } = await exec([
+      'cscli', 'alerts', 'list', '-a', '--limit', '200', '-o', 'json',
+    ]);
     return groupAppsecBySource(parseAppsecAlerts(stdout, exitCode) ?? []);
   } catch {
     return [];
@@ -45,14 +46,14 @@ async function readAppsecAlerts(client: any, containerId: string): Promise<Appse
  * An `error` means the answer could not be obtained, which the caller must keep
  * distinct from an empty list. They look the same and mean opposite things.
  */
-async function readDecisions(client: any, containerId: string): Promise<DecisionsRead> {
+async function readDecisions(
+  exec: (cmd: string[]) => Promise<CscliResult>,
+): Promise<DecisionsRead & { restarting: boolean }> {
   try {
-    const result = await client.execContainerHttp(
-      containerId,
-      ['cscli', 'decisions', 'list', '-o', 'json'],
-      { attachStdout: true, attachStderr: true, tty: false },
-    );
-    return decisionsFromExec(result);
+    return {
+      ...decisionsFromExec(await exec(['cscli', 'decisions', 'list', '-o', 'json'])),
+      restarting: false,
+    };
   } catch (err) {
     // The reason is the whole value here. This used to be a bare `catch {}`
     // returning null, so a worker that was unreachable, a CrowdSec that was
@@ -60,7 +61,11 @@ async function readDecisions(client: any, containerId: string): Promise<Decision
     // the same red sentence with nothing to go on. A restarting CrowdSec is
     // named as such rather than passed through as Podman's `container state
     // improper`, which is true and tells nobody what to do about it.
-    return { decisions: [], error: crowdsecReadError(err) };
+    //
+    // `restarting` is read from the error itself and not from the sentence:
+    // `crowdsecReadError` has already turned Podman's words into the operator's,
+    // and pattern-matching the result would be reading our own prose back.
+    return { decisions: [], error: crowdsecReadError(err), restarting: isRestartSymptom(err) };
   }
 }
 
@@ -76,11 +81,19 @@ export const GET: RequestHandler = route(async (event) => {
     error: 'CrowdSec is not running on this worker, so no decisions could be read.',
   };
   let appsecAlerts: AppsecSourceGroup[] = [];
+  /** Set when the only thing wrong is that CrowdSec is coming back up. */
+  let restarting = false;
 
   if (worker.podmanApiUrl) {
     await withPodman(worker, async (client) => {
       try {
-        const csC = await findCrowdsecContainer(client);
+        // Opened before the status is read, and that order is deliberate: the
+        // session waits out a restart, so what this tab reports afterwards is
+        // the container that came back rather than the corpse of the one that
+        // went away. Excluding a rule restarts CrowdSec, so an admin lands here
+        // mid-restart by using the feature as intended.
+        const session = await openCrowdsec(client);
+        const csC = session.container;
         if (!csC) return;
 
         crowdsecStatus = csC.State || 'unknown';
@@ -98,18 +111,21 @@ export const GET: RequestHandler = route(async (event) => {
         // first and unconditionally. `cscli` is not: exec needs it running, and
         // asking anyway returns Podman's `container state improper` in place of
         // the fact that it is restarting.
-        const unavailable = crowdsecUnavailable(csC);
-        if (unavailable) {
-          decisions = { decisions: [], error: unavailable };
+        if (session.error) {
+          decisions = { decisions: [], error: session.error };
+          restarting = session.restarting;
           return;
         }
 
-        decisions = await readDecisions(client, csC.Id);
-        appsecAlerts = await readAppsecAlerts(client, csC.Id);
+        const read = await readDecisions(session.exec);
+        decisions = read;
+        restarting = read.restarting;
+        appsecAlerts = await readAppsecAlerts(session.exec);
       } catch (err) {
         // An unreachable worker leaves `not_found`, which is what the tab shows.
         const message = err instanceof Error ? err.message : String(err);
         decisions = { decisions: [], error: `Could not reach the worker: ${message}` };
+        restarting = isRestartSymptom(err);
       }
     });
   }
@@ -139,6 +155,10 @@ export const GET: RequestHandler = route(async (event) => {
     decisions: decisions.decisions,
     decisionsAvailable: decisions.error === null,
     decisionsError: decisions.error,
+    // Whether the read failed because CrowdSec is coming back up — which is what
+    // excluding a rule does to it. The tab reloads itself on this instead of
+    // reporting a fault the admin caused on purpose and cannot act on.
+    restarting,
     appsecAlerts,
     appsecStatus: '',
   });
@@ -172,14 +192,21 @@ export const DELETE: RequestHandler = route(async (event) => {
   };
 
   await withPodman(worker, async (client) => {
-    const csC = await findCrowdsecContainer(client);
-    if (!csC) return;
+    // Through the same restart-aware session as the reads. Safe for a write
+    // because `cscli decisions delete --id` is idempotent — the id either still
+    // exists or it does not — and because the decisions live in
+    // /var/lib/crowdsec/data, which survives the restart along with the ban.
+    // Without this, unblocking somebody in the minute after a rule exclusion
+    // failed with `aborted` and left the ban in place.
+    const session = await openCrowdsec(client);
+    if (session.error) {
+      result = { ok: false, message: session.error };
+      return;
+    }
 
-    const { stdout, stderr, exitCode, exitCodeKnown } = await client.execContainerHttp(
-      csC.Id,
-      ['cscli', 'decisions', 'delete', '--id', raw],
-      { attachStdout: true, attachStderr: true, tty: false },
-    );
+    const { stdout, stderr, exitCode, exitCodeKnown } = await session.exec([
+      'cscli', 'decisions', 'delete', '--id', raw,
+    ]);
 
     // An unread exit code reports 0, which for a *read* is worth trusting
     // alongside the output. Here it is not: claiming a ban was lifted when the

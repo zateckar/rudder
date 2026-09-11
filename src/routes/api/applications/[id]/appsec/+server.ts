@@ -8,10 +8,10 @@ import { applicationHostnames, parseAppsecRules } from '$lib/server/appsec';
 import { withPodman } from '$lib/server/podman-client';
 import {
   crowdsecReadError,
-  crowdsecUnavailable,
   decisionsFromExec,
-  findCrowdsecContainer,
   groupAppsecBySource,
+  isRestartSymptom,
+  openCrowdsec,
   parseAppsecAlerts,
   parseBanHistory,
   type AppsecSourceGroup,
@@ -68,21 +68,22 @@ export const GET: RequestHandler = route(async (event) => {
   let banHistory: Record<string, SourceBanHistory> = {};
   let decisionsError = '';
   let error = '';
+  /** Set when the only thing wrong is that CrowdSec is coming back up. */
+  let restarting = false;
 
   try {
     await withPodman(worker, async (client) => {
-      const container = await findCrowdsecContainer(client);
-
-      // Checked before either command rather than letting the exec fail. The
-      // container is looked up in any state, so a restarting CrowdSec is found,
-      // and execing into it put Podman's own words on an application page:
-      // `can only create exec sessions on running containers: container state
-      // improper`. Applying a rule exclusion restarts CrowdSec, so this is
-      // reached by using the feature as intended.
-      const unavailable = crowdsecUnavailable(container);
-      if (unavailable) {
-        error = unavailable;
-        decisionsError = unavailable;
+      // Opened rather than looked up, because a restart is a state to sit out
+      // rather than a state to report. Applying a rule exclusion restarts
+      // CrowdSec, the worker applies it up to a minute after the click, and
+      // whoever is still reading this page lands in that window — where every
+      // read used to come back red. `openCrowdsec` waits for the container the
+      // restart produces and runs the commands against that one.
+      const session = await openCrowdsec(client);
+      if (session.error) {
+        error = session.error;
+        decisionsError = session.error;
+        restarting = session.restarting;
         return;
       }
 
@@ -92,11 +93,9 @@ export const GET: RequestHandler = route(async (event) => {
       // blanked both, which is exactly what happened when a restart cut the
       // second command: the matches had already been read and were discarded.
       try {
-        const { stdout, exitCode } = await client.execContainerHttp(
-          container.Id,
-          ['cscli', 'alerts', 'list', '-a', '--limit', '200', '-o', 'json'],
-          { attachStdout: true, attachStderr: true, tty: false },
-        );
+        const { stdout, exitCode } = await session.exec([
+          'cscli', 'alerts', 'list', '-a', '--limit', '200', '-o', 'json',
+        ]);
 
         const rows = parseAppsecAlerts(stdout, exitCode);
         if (rows === null) {
@@ -114,6 +113,7 @@ export const GET: RequestHandler = route(async (event) => {
         banHistory = parseBanHistory(stdout, exitCode) ?? {};
       } catch (err) {
         error = crowdsecReadError(err);
+        restarting ||= isRestartSymptom(err);
       }
 
       // Active bans, on the same connection.
@@ -126,16 +126,13 @@ export const GET: RequestHandler = route(async (event) => {
       // us" needs the second, not the first.
       try {
         const read = decisionsFromExec(
-          await client.execContainerHttp(
-            container.Id,
-            ['cscli', 'decisions', 'list', '-o', 'json'],
-            { attachStdout: true, attachStderr: true, tty: false },
-          ),
+          await session.exec(['cscli', 'decisions', 'list', '-o', 'json']),
         );
         decisions = read.decisions;
         decisionsError = read.error ?? '';
       } catch (err) {
         decisionsError = crowdsecReadError(err);
+        restarting ||= isRestartSymptom(err);
       }
     });
   } catch (err) {
@@ -144,6 +141,7 @@ export const GET: RequestHandler = route(async (event) => {
     // class of problem from one cut a line lower down.
     error = crowdsecReadError(err);
     decisionsError = error;
+    restarting = isRestartSymptom(err);
   }
 
   // What is already off, so the page can say so. Alerts are historical: a rule
@@ -160,6 +158,11 @@ export const GET: RequestHandler = route(async (event) => {
     // the *alerts* query failed would be reassuring and wrong.
     decisionsAvailable: decisionsError === '',
     decisionsError,
+    // Whether what went wrong is a restart still finishing. The page renders
+    // this as a notice and reloads itself rather than as a failure, because it
+    // is the change the operator asked for taking effect — telling them to
+    // refresh was making them do by hand what the page can do for them.
+    restarting,
     // Lifting a ban is worker-wide, so it stays an admin action. The page needs
     // to know in order to offer it, rather than showing a button that 403s.
     canLiftDecisions: event.locals.auth?.user.role === 'admin',
