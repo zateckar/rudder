@@ -96,7 +96,13 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
 
       const result = await executeApplicationDeploy(applicationId, deployUserId, { pinnedDigests });
       if (!result.success) {
-        return json({ error: result.message }, { status: result.statusCode || 500 });
+        // `deploymentId` names the history row this attempt wrote, when it got
+        // that far. It is where the failed containers' output was captured
+        // before they were removed, so the page can open the right one.
+        return json(
+          { error: result.message, deploymentId: result.deploymentId },
+          { status: result.statusCode || 500 },
+        );
       }
       return json({ success: true, message: result.message });
 
@@ -199,7 +205,9 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
     }
   } catch (error: any) {
     console.error('Deployment error:', error);
-    return json({ error: error.message }, { status: 500 });
+    // A deploy that threw still recorded a history row, and carries its id —
+    // see `DeployFailure`. That row holds what the containers printed.
+    return json({ error: error.message, deploymentId: error?.deploymentId }, { status: 500 });
   } finally {
     podmanClient?.destroy();
   }

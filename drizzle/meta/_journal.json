@@ -15,6 +15,13 @@
       "when": 1788096199193,
       "tag": "0001_auth_type_default_and_orphan_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1789322715574,
+      "tag": "0002_deployment_failure_logs",
+      "breakpoints": true
     }
   ]
 }

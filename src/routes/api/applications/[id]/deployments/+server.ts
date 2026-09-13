@@ -3,6 +3,7 @@ import { db } from '$lib/db';
 import { applications, deployments, users } from '$lib/db/schema';
 import { eq, desc } from 'drizzle-orm';
 import { executeFastRollback, fastRollbackTargets } from '$lib/server/deploy';
+import { parseCapturedOutput } from '$lib/server/deploy/failure-logs';
 import { canAccessApplication } from '$lib/server/auth';
 
 /** Read the notes column, tolerating rows written before it existed. */
@@ -31,6 +32,9 @@ export async function GET({ params, cookies }: { params: { id: string }; cookies
     deployedBy: deployments.deployedBy,
     errorMessage: deployments.errorMessage,
     notes: deployments.notes,
+    // The containers a failed deploy printed before it removed them. Same team
+    // scope as the rest of this response, which is the check above.
+    failureLogs: deployments.failureLogs,
     createdAt: deployments.createdAt,
     finishedAt: deployments.finishedAt,
   })
@@ -61,6 +65,7 @@ export async function GET({ params, cookies }: { params: { id: string }; cookies
     ...r,
     // Stored as a JSON array; sent as one so the page does not have to parse it.
     notes: parseNotes(r.notes),
+    failureLogs: parseCapturedOutput(r.failureLogs),
     fastRollback: fast.has(r.id),
     deployedByName: r.deployedBy ? (userMap.get(r.deployedBy) ?? 'Unknown') : null,
     createdAt: r.createdAt instanceof Date ? r.createdAt.toISOString() : r.createdAt,

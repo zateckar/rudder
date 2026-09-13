@@ -11,17 +11,35 @@
   import { lifecycleControls, lifecycleLabel } from '$lib/client/lifecycle-controls';
   import AppsecMatches from '$lib/components/AppsecMatches.svelte';
 
+  /** One failed container's output, as the deployment recorded it. */
+  interface ContainerOutput {
+    container: string;
+    log: string;
+    /** Why it could not be read, when it could not. Distinct from no output. */
+    unavailable?: string;
+  }
+
   /**
    * Deploy errors and deployment notes, shown properly.
    *
    * These were handed to `alert()`, which renders multi-paragraph prose as one
    * unwrapped wall of text and is suppressed entirely in some browsers — so the
    * notes explaining why a manifest was reinterpreted could not be read at all.
+   *
+   * `logs` is the other half of a deploy failure: the container output the
+   * error message tells the reader to go and check, which — on the blue/green
+   * path — no longer exists anywhere by the time they read it, because the
+   * failed generation was removed. The deployment row keeps a snapshot; this is
+   * where it is shown.
    */
-  let detail = $state<{ title: string; paragraphs: string[] } | null>(null);
+  let detail = $state<{
+    title: string;
+    paragraphs: string[];
+    logs?: ContainerOutput[];
+  } | null>(null);
 
-  function showDetail(title: string, paragraphs: string[]) {
-    detail = { title, paragraphs };
+  function showDetail(title: string, paragraphs: string[], logs?: ContainerOutput[]) {
+    detail = { title, paragraphs, logs };
   }
 
   let { data } = $props();
@@ -288,6 +306,12 @@
      * field Rudder ignores. Not errors; the deploy succeeded.
      */
     notes: string[];
+    /**
+     * What this deployment's containers printed before it failed, captured at
+     * the moment of the failure. Empty for a deploy that succeeded, and for one
+     * that failed before it created anything.
+     */
+    failureLogs: ContainerOutput[];
     createdAt: string;
     finishedAt: string | null;
   }
@@ -870,12 +894,38 @@
         }
       } else {
         showToast('error', body.error || 'Action failed');
+        // A toast is one line, and a deploy that failed because a container
+        // would not stay up is explained by what that container printed — which
+        // the deploy recorded on its way out, because it then removed the
+        // container. Open it rather than leaving the reader to discover on their
+        // own that the history has it.
+        if (body.deploymentId) await revealDeployFailure(body.deploymentId);
       }
     } catch (e: any) {
       showToast('error', e.message);
     } finally {
       deploying = false;
     }
+  }
+
+  /**
+   * Show the failure this deploy just recorded, output and all.
+   *
+   * Read back from the history rather than from the deploy response: the output
+   * is captured server-side while the failure is being recorded, and the history
+   * row is where it lands. The row is named by the response, so this cannot open
+   * an older failure by mistake — and it stays silent when that row has nothing
+   * the toast did not already say.
+   */
+  async function revealDeployFailure(deploymentId: string) {
+    await fetchDeployments();
+    const failed = deploymentsList.find((d) => d.id === deploymentId);
+    if (!failed?.failureLogs?.length) return;
+    showDetail(
+      `Version ${failed.version} failed`,
+      failed.errorMessage ? [failed.errorMessage] : [],
+      failed.failureLogs,
+    );
   }
 
   // ── Export config ────────────────────────────────────────────────────────
@@ -1207,6 +1257,23 @@
     {#each detail.paragraphs as paragraph}
       <p class="detail-text">{paragraph}</p>
     {/each}
+    {#if detail.logs?.length}
+      <p class="detail-log-intro">
+        What the containers printed, captured at the moment the deploy failed. A
+        generation that fails verification is removed, so this snapshot is
+        usually the only copy left of it.
+      </p>
+      {#each detail.logs as output}
+        <p class="detail-log-name">{output.container}</p>
+        {#if output.unavailable}
+          <p class="detail-log-missing">Output could not be read: {output.unavailable}</p>
+        {:else if output.log}
+          <pre class="detail-log">{output.log}</pre>
+        {:else}
+          <p class="detail-log-missing">It printed nothing before it was stopped.</p>
+        {/if}
+      {/each}
+    {/if}
     <div class="detail-actions">
       <button class="btn-act" onclick={() => (detail = null)}>Close</button>
     </div>
@@ -1933,12 +2000,21 @@
                       {isBusy ? 'Rolling back...' : dep.fastRollback ? 'Rollback (instant)' : 'Rollback'}
                     </button>
                   {/if}
-                  {#if dep.errorMessage}
+                  <!-- Shown when there is output but no message too: a deploy
+                       that failed without one still has containers that said
+                       something, and that is the half worth reading. -->
+                  {#if dep.errorMessage || dep.failureLogs?.length}
                     <button
                       class="btn-act btn-error-detail"
-                      onclick={() => showDetail(`Version ${dep.version} failed`, [dep.errorMessage!])}
-                      title="View error details"
-                    >Error</button>
+                      onclick={() => showDetail(
+                        `Version ${dep.version} failed`,
+                        dep.errorMessage ? [dep.errorMessage] : [],
+                        dep.failureLogs,
+                      )}
+                      title={dep.failureLogs?.length
+                        ? 'View the error and what the containers printed'
+                        : 'View error details'}
+                    >{dep.failureLogs?.length ? 'Error + output' : 'Error'}</button>
                   {/if}
                   {#if dep.notes?.length}
                     <button
@@ -2563,6 +2639,24 @@
     margin: 0 0 12px; font-size: 13px; line-height: 1.6; color: var(--text-secondary);
     white-space: pre-wrap; word-break: break-word;
   }
+  .detail-log-intro {
+    margin: 16px 0 8px; font-size: 12px; line-height: 1.5; color: var(--text-muted);
+    border-top: 1px solid var(--border-subtle); padding-top: 14px;
+  }
+  .detail-log-name {
+    margin: 12px 0 4px; font-family: var(--font-mono); font-size: 12px;
+    color: var(--text-primary);
+  }
+  .detail-log {
+    margin: 0 0 8px; padding: 10px 12px; max-height: 320px; overflow: auto;
+    background: var(--bg-root); border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md); font-family: var(--font-mono); font-size: 11.5px;
+    line-height: 1.5; color: var(--text-secondary);
+    /* Log lines are long and must not be reflowed into something that no longer
+       matches what the container actually printed. */
+    white-space: pre; overflow-wrap: normal;
+  }
+  .detail-log-missing { margin: 0 0 8px; font-size: 12px; color: var(--text-muted); }
   .detail-actions { display: flex; justify-content: flex-end; }
 
   /* ── Header ────────────────────────────────────────────────────────── */

@@ -36,6 +36,12 @@ import {
   serializeDigestRecord,
 } from '$lib/server/image-digests';
 import { buildTar, MAX_TAR_NAME } from '$lib/server/tar';
+// A failed deploy removes the containers whose logs explain the failure, so the
+// logs are taken before that happens and kept on the deployment row.
+import {
+  captureContainerOutput,
+  serializeCapturedOutput,
+} from '$lib/server/deploy/failure-logs';
 import { pickFreePort } from '$lib/server/ports';
 // Traefik needs the OIDC client secret in the container's labels; Rudder's own
 // database does not, and used to keep a plaintext copy of it there.
@@ -740,6 +746,20 @@ export interface DeployResult {
   message: string;
   error?: string;
   statusCode?: number;
+  /**
+   * The history row this attempt wrote, when it got as far as writing one.
+   *
+   * Returned so a caller can point the user straight at it. A failed deploy
+   * records the output of the containers it then removed, and that row is the
+   * only place it exists — naming it beats asking the reader to work out which
+   * entry in the history was theirs.
+   */
+  deploymentId?: string;
+}
+
+/** A deploy failure that throws still names the row that recorded it. */
+export interface DeployFailure extends Error {
+  deploymentId?: string;
 }
 
 /**
@@ -993,6 +1013,15 @@ async function deployApplication(
   const initialState = blueGreen ? 'pending' : 'active';
   /** Everything created by this deploy, so a failure can undo exactly it. */
   const createdContainers: CreatedContainer[] = [];
+  /**
+   * Plaintext of the secrets this deploy injects.
+   *
+   * Held only so the failure path can mask them out of captured container
+   * output: an application that prints its configuration at startup is exactly
+   * the kind that then fails to start. Filled once the secrets are resolved
+   * below, and read nowhere else.
+   */
+  let injectedSecretValues: string[] = [];
 
   let team: typeof teams.$inferSelect | undefined;
   if (app.teamId) {
@@ -1148,6 +1177,10 @@ async function deployApplication(
     // happens here and only here.
     const networkName = await ensureAppNetwork(podmanClient, app.id);
     const appSecrets = await resolveSecrets(app.teamId);
+    injectedSecretValues = [
+      ...appSecrets.env.map((entry) => entry.slice(entry.indexOf('=') + 1)),
+      ...appSecrets.files.map((f) => f.value),
+    ];
     const middlewareOpts = buildMiddlewareOpts(app);
 
     for (const planned of plan.containers) {
@@ -1336,6 +1369,7 @@ async function deployApplication(
               `containers were never reachable and have been removed. The previous version is still serving. ` +
               `Fix the worker's routing fetch — its Settings tab shows the last attempt — then deploy again.`,
             statusCode: 409,
+            deploymentId,
           };
         } else {
           // Traffic is on the new generation. The old containers are still
@@ -1391,6 +1425,29 @@ async function deployApplication(
   } catch (error: any) {
     console.error('Deployment error:', error);
 
+    // What the containers printed, read *before* anything is discarded below.
+    //
+    // This is the only window in which it can be read at all on the blue/green
+    // path: `discardGeneration` removes the containers and their rows, and the
+    // logs endpoint needs both. Every failure message that ends "check its logs"
+    // used to be pointing at something that no longer existed by the time anyone
+    // read it.
+    //
+    // Best-effort, and never allowed to throw — the error above is the one worth
+    // reporting, not whatever the worker says about reading a log.
+    let capturedOutput: string | null = null;
+    if (podmanClient && createdContainers.length > 0) {
+      try {
+        capturedOutput = serializeCapturedOutput(
+          await captureContainerOutput(podmanClient, createdContainers, {
+            mask: injectedSecretValues,
+          }),
+        );
+      } catch (e: any) {
+        console.warn('[deploy] Could not capture container output:', e?.message ?? e);
+      }
+    }
+
     // Undo exactly what this deploy created. Only on the blue/green path: the
     // legacy path has already removed the previous generation, so tearing the
     // new one down would leave the application with nothing running at all,
@@ -1407,19 +1464,28 @@ async function deployApplication(
       }
     }
 
-    // Mark deployment as failed
+    // Mark deployment as failed, with the output that explains why.
     try {
       await db.update(deployments)
-        .set({ status: 'failed', errorMessage: error.message, finishedAt: new Date() })
+        .set({
+          status: 'failed',
+          errorMessage: error.message,
+          failureLogs: capturedOutput,
+          finishedAt: new Date(),
+        })
         .where(eq(deployments.id, deploymentId));
     } catch { /* best-effort */ }
 
     // A rejected mount is a manifest problem, not a server fault — report it
     // as a 400 with the policy message so the user can fix the definition.
     if (error instanceof MountPolicyError) {
-      return { success: false, message: error.message, statusCode: 400 };
+      return { success: false, message: error.message, statusCode: 400, deploymentId };
     }
 
+    // Carried on the error rather than returned, because this path rethrows:
+    // the endpoint turns it into a 500, and the row named here is where the
+    // container output captured above is stored.
+    (error as DeployFailure).deploymentId = deploymentId;
     throw error;
   } finally {
     podmanClient?.destroy();

@@ -1,0 +1,1 @@
+ALTER TABLE `deployments` ADD `failure_logs` text;

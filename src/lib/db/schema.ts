@@ -582,6 +582,16 @@ export const deployments = sqliteTable('deployments', {
    * describe, where the person who wrote the manifest will see them.
    */
   notes: text('notes'),
+  /**
+   * What this deployment's containers printed before it failed. JSON array of
+   * `{ container, log, unavailable? }` — see deploy/failure-logs.ts.
+   *
+   * Captured because a failed blue/green deploy removes its own containers, so
+   * by the time anyone reads the error the logs it tells them to check no longer
+   * exist on the worker or in Rudder. Null for a deploy that succeeded, and for
+   * every row written before this column did.
+   */
+  failureLogs: text('failure_logs'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   finishedAt: integer('finished_at', { mode: 'timestamp' }),
 }, (t) => [
