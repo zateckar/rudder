@@ -13,6 +13,15 @@ import {
   type CscliResult,
   type DecisionsRead,
 } from '$lib/server/crowdsec';
+import {
+  decisionsLifted,
+  exemptionCommands,
+  exemptionRefusal,
+  exemptionsFromExec,
+  listAlreadyExists,
+  normaliseComment,
+  type ExemptionsRead,
+} from '$lib/server/crowdsec-exemptions';
 
 /**
  * Recent AppSec alerts, for the panel that names which rules actually fired.
@@ -69,6 +78,26 @@ async function readDecisions(
   }
 }
 
+/**
+ * The worker's CrowdSec exemptions.
+ *
+ * Read like the decisions and not like the AppSec alerts — an `error` rather
+ * than a quiet empty list. The two are opposite facts here in a way that
+ * matters: "nothing is exempt" is a statement about the worker's security
+ * posture, and one produced by a failed read would send someone to add an
+ * exemption that already exists, or to conclude a caller is still exposed when
+ * it is not.
+ */
+async function readExemptions(
+  exec: (cmd: string[]) => Promise<CscliResult>,
+): Promise<ExemptionsRead> {
+  try {
+    return exemptionsFromExec(await exec(exemptionCommands.read()));
+  } catch (err) {
+    return { exemptions: [], error: crowdsecReadError(err) };
+  }
+}
+
 export const GET: RequestHandler = route(async (event) => {
   const { worker } = await requireWorker(event, event.params.id!);
   const tailLines = parseInt(event.url.searchParams.get('tail') || '100');
@@ -81,6 +110,10 @@ export const GET: RequestHandler = route(async (event) => {
     error: 'CrowdSec is not running on this worker, so no decisions could be read.',
   };
   let appsecAlerts: AppsecSourceGroup[] = [];
+  let exemptions: ExemptionsRead = {
+    exemptions: [],
+    error: 'CrowdSec is not running on this worker, so no exemptions could be read.',
+  };
   /** Set when the only thing wrong is that CrowdSec is coming back up. */
   let restarting = false;
 
@@ -113,6 +146,7 @@ export const GET: RequestHandler = route(async (event) => {
         // the fact that it is restarting.
         if (session.error) {
           decisions = { decisions: [], error: session.error };
+          exemptions = { exemptions: [], error: session.error };
           restarting = session.restarting;
           return;
         }
@@ -121,10 +155,12 @@ export const GET: RequestHandler = route(async (event) => {
         decisions = read;
         restarting = read.restarting;
         appsecAlerts = await readAppsecAlerts(session.exec);
+        exemptions = await readExemptions(session.exec);
       } catch (err) {
         // An unreachable worker leaves `not_found`, which is what the tab shows.
         const message = err instanceof Error ? err.message : String(err);
         decisions = { decisions: [], error: `Could not reach the worker: ${message}` };
+        exemptions = { exemptions: [], error: `Could not reach the worker: ${message}` };
         restarting = isRestartSymptom(err);
       }
     });
@@ -161,25 +197,189 @@ export const GET: RequestHandler = route(async (event) => {
     restarting,
     appsecAlerts,
     appsecStatus: '',
+    // Same three-field shape as the decisions above, and for the same reason:
+    // an empty list and an unanswered question must not both render as "nothing
+    // is exempt here".
+    exemptions: exemptions.exemptions,
+    exemptionsAvailable: exemptions.error === null,
+    exemptionsError: exemptions.error,
   });
 });
 
 /**
- * Lift one decision — the WAF equivalent of unbanning an address.
+ * Exempt an address from every CrowdSec decision on this worker.
+ *
+ * The blunter of the two controls on this tab, and the only one that works
+ * against the scenarios that cause most bans. A rule exclusion answers "this CRS
+ * rule misfires on my application"; nothing answers `http-probing` or
+ * `http-generic-403-bf`, which read Traefik's access log, name no rule and
+ * attribute to no Host. Worse, `http-generic-403-bf` is self-sustaining: the ban
+ * makes every request 403, and those 403s are what it counts. On a live worker
+ * one address held 32 simultaneous decisions from it, regenerating faster than
+ * they could be lifted.
  *
  * Admin-only through `requireWorker`, and audited by the hook that classifies
- * every mutating `/api/` request, because this removes a security control on a
- * production host and "who lifted that ban" is the question afterwards.
+ * every mutating `/api/` request — this exempts an address from a security
+ * control on a production host, for every application on it.
+ */
+export const POST: RequestHandler = route(async (event) => {
+  const { worker } = await requireWorker(event, event.params.id!);
+
+  const body = await event.request.json().catch(() => ({}) as any);
+  const value = String(body?.value ?? '').trim();
+  const comment = normaliseComment(body?.comment);
+
+  // Refused here as well as in the browser. This is the endpoint that changes
+  // the worker, and `0.0.0.0/0` reaching it would switch CrowdSec off for every
+  // application while looking like an ordinary row in a table.
+  const refusal = exemptionRefusal(value);
+  if (refusal) return json({ error: refusal }, { status: 400 });
+
+  if (!worker.podmanApiUrl) {
+    return json({ error: 'Worker has no Podman API configured.' }, { status: 409 });
+  }
+
+  let result: { ok: boolean; message: string; lifted?: number | null } = {
+    ok: false,
+    message: 'CrowdSec is not running on this worker.',
+  };
+
+  await withPodman(worker, async (client) => {
+    const session = await openCrowdsec(client);
+    if (session.error) {
+      result = { ok: false, message: session.error };
+      return;
+    }
+
+    // Created on every add rather than once at provisioning time. The list is
+    // CrowdSec's, not Rudder's — an operator can delete it with `cscli`, and a
+    // worker rebuilt from scratch has never had one — so "it exists because we
+    // made it earlier" is an assumption this cannot hold. Failing because it is
+    // already there is the normal path, not an error.
+    const created = await session.exec(exemptionCommands.create());
+    if (created.exitCode !== 0 && !listAlreadyExists(created)) {
+      result = {
+        ok: false,
+        message:
+          (created.stderr.trim() || created.stdout.trim() || 'Could not create the exemption list.')
+            .slice(0, 500),
+      };
+      return;
+    }
+
+    const { stdout, stderr, exitCode, exitCodeKnown } = await session.exec(
+      exemptionCommands.add(value, comment),
+    );
+
+    // An unread exit code reports 0. Claiming an address is exempt when the
+    // worker never confirmed it sends someone away believing a caller is
+    // unblocked, which they will only discover is false the next time it breaks.
+    if (exitCodeKnown === false) {
+      result = {
+        ok: false,
+        message:
+          'Rudder could not confirm the outcome on the worker. Refresh the exemptions ' +
+          'list to see whether the address was added.',
+      };
+      return;
+    }
+
+    const said = `${stdout} ${stderr}`;
+    result = {
+      ok: exitCode === 0,
+      message: (stdout.trim() || stderr.trim() || '').slice(0, 500),
+      // Allowlisting deletes the decisions that already match, so this number is
+      // how many bans the click just lifted. It is the evidence that the thing
+      // the operator was fighting has actually stopped.
+      lifted: exitCode === 0 ? decisionsLifted(said) : null,
+    };
+  });
+
+  return json(result, { status: result.ok ? 200 : 502 });
+});
+
+/**
+ * Withdraw one exemption, putting the address back under CrowdSec's scenarios.
+ *
+ * The only write on this tab that *restores* protection rather than removing it,
+ * which is why it is not guarded by a refusal list the way adding one is: there
+ * is no value of `value` that makes a worker less safe here. An address that is
+ * not on the list is reported as such by `cscli` and passed through verbatim.
+ */
+async function removeExemption(worker: any, value: string) {
+  if (!worker.podmanApiUrl) {
+    return json({ error: 'Worker has no Podman API configured.' }, { status: 409 });
+  }
+
+  let result: { ok: boolean; message: string } = {
+    ok: false,
+    message: 'CrowdSec is not running on this worker.',
+  };
+
+  await withPodman(worker, async (client) => {
+    const session = await openCrowdsec(client);
+    if (session.error) {
+      result = { ok: false, message: session.error };
+      return;
+    }
+
+    const { stdout, stderr, exitCode, exitCodeKnown } = await session.exec(
+      exemptionCommands.remove(value),
+    );
+
+    // Unconfirmed is not success. Reporting a withdrawal that did not happen
+    // leaves an address exempt that everyone believes is protected again —
+    // which is the failure nobody goes looking for.
+    if (exitCodeKnown === false) {
+      result = {
+        ok: false,
+        message:
+          'Rudder could not confirm the outcome on the worker. Refresh the exemptions ' +
+          'list to see whether the address was removed.',
+      };
+      return;
+    }
+
+    result = {
+      ok: exitCode === 0,
+      message: (stdout.trim() || stderr.trim() || '').slice(0, 500),
+    };
+  });
+
+  return json(result, { status: result.ok ? 200 : 502 });
+}
+
+/**
+ * Lift one decision, or withdraw one exemption.
+ *
+ * Admin-only through `requireWorker`, and audited by the hook that classifies
+ * every mutating `/api/` request, because one of these removes a security
+ * control on a production host and "who lifted that ban" is the question
+ * afterwards.
  */
 export const DELETE: RequestHandler = route(async (event) => {
   const { worker } = await requireWorker(event, event.params.id!);
 
   const raw = event.url.searchParams.get('decision') ?? '';
+  const exemption = (event.url.searchParams.get('exemption') ?? '').trim();
+
+  // Two different removals on one verb, told apart by which parameter is
+  // present and never by falling back from one to the other. Lifting a ban and
+  // withdrawing an exemption are opposite acts — one restores traffic, the other
+  // restores protection — and a request that meant one and performed the other
+  // would be silent.
+  if (exemption) {
+    return removeExemption(worker, exemption);
+  }
+
   // Numeric ids only. `execContainerHttp` takes an argv array, so there is no
   // shell to inject into — but an id is a number, and refusing anything else
   // means a malformed one is a 400 here rather than a confusing `cscli` error.
   if (!/^\d+$/.test(raw)) {
-    return json({ error: 'A numeric decision id is required.' }, { status: 400 });
+    return json(
+      { error: 'A numeric decision id, or an exemption address, is required.' },
+      { status: 400 },
+    );
   }
 
   if (!worker.podmanApiUrl) {

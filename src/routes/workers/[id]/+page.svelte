@@ -78,6 +78,21 @@
   let ruleMessage = $state('');
   let ruleError = $state(false);
 
+  // ── Exemptions ────────────────────────────────────────────────────────────
+  //
+  // Addresses no scenario on this worker may ban. Separate from rule exclusions
+  // and deliberately so: an exclusion answers "this CRS rule misfires on my
+  // application", and most bans on a busy worker come from scenarios that read
+  // Traefik's access log — http-probing, http-generic-403-bf — which name no
+  // rule and no application, so no exclusion can reach them.
+  let exemptionValue = $state('');
+  let exemptionComment = $state('');
+  let addingExemption = $state(false);
+  /** The address being withdrawn, so only its own button shows busy. */
+  let removingExemption = $state<string | null>(null);
+  let exemptionMessage = $state('');
+  let exemptionError = $state(false);
+
   let terminalReady = $state(false);
 
   // ── OIDC Settings state ──────────────────────────────────────────
@@ -453,6 +468,98 @@
       removingDecision = null;
       // Re-read rather than splice the row out: the list is the worker's answer,
       // not ours, and a delete that half-worked should show as still there.
+      await loadCrowdsec();
+    }
+  }
+
+  /**
+   * Exempt an address from every CrowdSec decision on this worker.
+   *
+   * Confirmed, and the prompt says what it costs rather than what it does. The
+   * cost is the point: an exemption is worker-wide, so it is every application
+   * here that stops being protected against that address, not just the one the
+   * operator has in mind.
+   *
+   * @param value Address or range. Defaults to the form field, so the decisions
+   *   table can pass the address of a row straight in — which is the workflow
+   *   this came from: see who is banned, decide they are yours, exempt them.
+   */
+  async function addExemption(value?: string, comment?: string) {
+    const address = (value ?? exemptionValue).trim();
+    if (!address) return;
+    const why = (comment ?? exemptionComment).trim();
+
+    if (!confirm(`Exempt ${address} from CrowdSec on this worker?\n\n` +
+      `No scenario will ban it again — including http-probing and the 403 ` +
+      `brute-force scenarios, which rule exclusions cannot reach.\n\n` +
+      `This applies to every application on this worker, and lifts any ban ` +
+      `already in force on that address.`)) return;
+
+    exemptionMessage = '';
+    exemptionError = false;
+    addingExemption = true;
+    try {
+      const res = await fetch(`/api/workers/${workerId}/crowdsec`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: address, comment: why }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || !body.ok) {
+        exemptionError = true;
+        exemptionMessage = body.error || body.message || `Could not exempt ${address}.`;
+      } else {
+        // The number of bans this lifted is the evidence the operator came for.
+        // Allowlisting deletes the decisions that already match, and on the
+        // worker this feature came from one click cleared 32 of them — a loop
+        // that had been re-banning the address faster than anyone could lift it.
+        const lifted = body.lifted;
+        exemptionMessage =
+          `${address} is exempt on this worker.` +
+          (lifted ? ` ${lifted} ban${lifted === 1 ? '' : 's'} on it were lifted.` : '') +
+          ` The bouncer picks this up within about a minute.`;
+        exemptionValue = '';
+        exemptionComment = '';
+      }
+    } catch (e: any) {
+      exemptionError = true;
+      exemptionMessage = e.message;
+    } finally {
+      addingExemption = false;
+      await loadCrowdsec();
+    }
+  }
+
+  /**
+   * Put an exempted address back under CrowdSec's scenarios.
+   *
+   * Confirmed like the others, even though this one *restores* protection.
+   * Withdrawing an exemption is how the traffic that prompted it starts being
+   * banned again, which is a surprise worth one click to avoid.
+   */
+  async function removeExemption(value: string) {
+    if (!confirm(`Remove the exemption on ${value}?\n\nCrowdSec will be able to ban it again.`)) {
+      return;
+    }
+    exemptionMessage = '';
+    exemptionError = false;
+    removingExemption = value;
+    try {
+      const res = await fetch(
+        `/api/workers/${workerId}/crowdsec?exemption=${encodeURIComponent(value)}`,
+        { method: 'DELETE' },
+      );
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || !body.ok) {
+        exemptionError = true;
+        exemptionMessage = body.error || body.message || `Could not remove the exemption on ${value}.`;
+      }
+    } catch (e: any) {
+      exemptionError = true;
+      exemptionMessage = e.message;
+    } finally {
+      removingExemption = null;
+      // Re-read rather than splice: the list is the worker's answer, not ours.
       await loadCrowdsec();
     }
   }
@@ -2123,6 +2230,23 @@
                     >
                       {removingDecision === d.id ? 'Removing…' : 'Remove'}
                     </button>
+                    <!-- Offered beside Remove because lifting a ban on an
+                         address that keeps earning one is a treadmill. The
+                         scenarios that produce most bans here re-ban within
+                         minutes, and http-generic-403-bf re-bans on the 403s
+                         the ban itself causes — so "this caller is ours" is
+                         usually the decision actually being made, and it
+                         belongs on the row where the evidence is. -->
+                    {#if d.scope === 'Ip' && d.value}
+                      <button
+                        class="btn-tiny"
+                        disabled={addingExemption}
+                        onclick={() => addExemption(d.value, `exempted from the ${d.reason || 'CrowdSec'} ban`)}
+                        title="Never ban this address on this worker"
+                      >
+                        Exempt
+                      </button>
+                    {/if}
                   </td>
                 </tr>
               {/each}
@@ -2132,6 +2256,107 @@
 
         {#if decisionError}
           <p class="error">{decisionError}</p>
+        {/if}
+      </div>
+
+      <!-- Exemptions -->
+      <div class="section">
+        <div class="section-head">
+          <h3>
+            Exemptions{crowdsec.exemptionsAvailable && crowdsec.exemptions?.length
+              ? ` (${crowdsec.exemptions.length})`
+              : ''}
+          </h3>
+          <button class="btn-tiny" onclick={loadCrowdsec} title="Re-read exemptions from CrowdSec">Refresh</button>
+        </div>
+
+        <p class="help-text">
+          Addresses CrowdSec may never ban on this worker. <strong>This is the control for
+          bans that no rule exclusion can reach</strong> — <span class="mono small">http-probing</span>
+          and <span class="mono small">http-generic-403-bf</span> read Traefik's access log
+          rather than the WAF, so they name no rule and no application. The second is
+          self-sustaining: once an address is banned every request it makes returns 403, and
+          those 403s are exactly what that scenario counts.
+        </p>
+        <p class="help-text">
+          An exemption covers <strong>every application on this worker</strong>, so use it for
+          callers you control — another worker's egress address, an office range, a monitoring
+          probe — and not to quieten traffic you have not identified. Adding one also lifts any
+          ban already in force on that address.
+        </p>
+
+        {#if crowdsec.restarting}
+          <p class="help-text">
+            <strong>CrowdSec is restarting on this worker</strong>, so its exemptions cannot be
+            read for a few seconds. Reloading automatically…
+          </p>
+        {:else if !crowdsec.exemptionsAvailable}
+          <!-- Never "nothing is exempt" on the strength of an unanswered
+               question. That reads as a statement about the worker's security
+               posture, and would send someone to add an exemption that is
+               already there — or to conclude a caller is exposed when it is not. -->
+          <p class="error">
+            Could not read exemptions from CrowdSec on this worker. Addresses may be exempt
+            and are not shown here.
+          </p>
+          {#if crowdsec.exemptionsError}
+            <p class="help-text mono small">{crowdsec.exemptionsError}</p>
+          {/if}
+        {:else if !crowdsec.exemptions?.length}
+          <p class="empty">No exemptions — every address is subject to CrowdSec here</p>
+        {:else}
+          <table class="mini-table">
+            <thead><tr><th>Address</th><th>Reason</th><th>Added</th><th>Expires</th><th></th></tr></thead>
+            <tbody>
+              {#each crowdsec.exemptions as x}
+                <tr>
+                  <td><span class="mono small">{x.value}</span></td>
+                  <td>{x.comment || '—'}</td>
+                  <td>{x.createdAt ? new Date(x.createdAt).toLocaleString() : '—'}</td>
+                  <td>{x.expiresAt ? new Date(x.expiresAt).toLocaleString() : 'never'}</td>
+                  <td>
+                    <button
+                      class="btn-tiny btn-danger"
+                      disabled={removingExemption === x.value}
+                      onclick={() => removeExemption(x.value)}
+                      title="Let CrowdSec ban this address again"
+                    >
+                      {removingExemption === x.value ? 'Removing…' : 'Remove'}
+                    </button>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+
+        <div class="exemption-add">
+          <input
+            type="text"
+            bind:value={exemptionValue}
+            placeholder="203.0.113.4 or 203.0.113.0/24"
+            aria-label="Address or range to exempt"
+            disabled={addingExemption}
+          />
+          <input
+            type="text"
+            bind:value={exemptionComment}
+            placeholder="Why — e.g. alpha worker egress"
+            aria-label="Reason for the exemption"
+            disabled={addingExemption}
+          />
+          <button
+            class="btn-tiny btn-accent"
+            disabled={addingExemption || !exemptionValue.trim()}
+            onclick={() => addExemption()}
+            title="Exempt this address from every CrowdSec decision on this worker"
+          >
+            {addingExemption ? 'Adding…' : 'Add exemption'}
+          </button>
+        </div>
+
+        {#if exemptionMessage}
+          <p class={exemptionError ? 'error' : 'help-text'}>{exemptionMessage}</p>
         {/if}
       </div>
 
@@ -2886,6 +3111,18 @@
   .decision-origin {
     display: block; font-size: 10px; color: var(--text-muted); margin-top: 2px;
   }
+  /* Adding an exemption. Wraps rather than scrolls, because the reason field is
+     the one that makes the list readable in six months and squeezing it to a
+     sliver is how it ends up empty. */
+  .exemption-add {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 10px;
+  }
+  .exemption-add input {
+    flex: 1 1 200px; min-width: 0; padding: 4px 8px;
+    font-size: 12px; color: var(--text-primary); background: var(--bg-overlay);
+    border: 1px solid var(--border-default); border-radius: 3px;
+  }
+  .exemption-add input:first-child { font-family: var(--font-mono); }
   /* One clickable rule id. Deliberately quiet: the common case is reading these,
      not clicking them, and a row of buttons that look like actions invites
      switching rules off before anyone has read the path they fired on. */
