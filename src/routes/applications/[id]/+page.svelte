@@ -984,34 +984,6 @@
     }
   }
 
-  async function updateContainer(containerId: string) {
-    const ok = await confirmAction({
-      title: 'Pull the latest image and recreate this container?',
-      body: 'The container is replaced, so it restarts. Traffic to it is interrupted while that happens.',
-      confirmLabel: 'Pull and recreate',
-    });
-    if (!ok) return;
-    containerBusy[containerId] = true;
-    try {
-      const res = await fetch(`/api/containers/${containerId}/recreate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pullImage: true }),
-      });
-      const body = await res.json();
-      if (res.ok) {
-        showToast('success', 'Container updated');
-        setTimeout(() => invalidateAll(), 600);
-      } else {
-        showToast('error', body.error || 'Update failed');
-      }
-    } catch (e: any) {
-      showToast('error', e.message);
-    } finally {
-      containerBusy[containerId] = false;
-    }
-  }
-
   // ── Resource limits modal ────────────────────────────────────────────────
   let showLimitsModal = $state(false);
   let selectedContainerForLimits = $state<string | null>(null);
@@ -1606,7 +1578,7 @@
                   >Clear record</button>
                 {:else if isSuperseded}
                   <!-- Reap, and nothing else. Start would run a version nothing
-                       routes to; Update would pull for a version being retired. -->
+                       routes to. -->
                   <button
                     class="btn-act btn-stop"
                     onclick={() => containerAction(container.id, 'remove', {
@@ -1645,12 +1617,6 @@
                       title="Start this container"
                     >Start</button>
                   {/if}
-                  <button
-                    class="btn-act"
-                    onclick={() => updateContainer(container.id)}
-                    disabled={busy}
-                    title="Pull latest image and recreate this container"
-                  >Update</button>
                   <button
                     class="btn-act"
                     onclick={() => openLimitsModal(container.id)}

@@ -7,7 +7,7 @@ Container orchestration platform built with SvelteKit, Drizzle ORM, and SQLite. 
 ### Core
 - **Application deployment** -- single container, Docker Compose, and Kubernetes manifests
 - **Worker provisioning** -- automated SSH-based setup of Podman, Traefik, CrowdSec, and an nftables host firewall
-- **Container management** -- start, stop, restart, recreate, resource limits, scaling (replicas)
+- **Container management** -- start, stop, restart, resource limits, scaling (replicas). A new image is picked up by redeploying the application, which pulls the tag fresh and switches traffic over once the new version is healthy
 - **Container logs** -- searchable, filterable, downloadable log viewer with line-level highlighting
 - **Container terminal** -- xterm.js WebSocket terminal for container exec and host SSH
 - **Health checks** -- configurable container health checks with status display

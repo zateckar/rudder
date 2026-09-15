@@ -6,11 +6,30 @@ import type { RequestHandler } from './$types';
 import { withPodman } from '$lib/server/podman-client';
 import { requireContainer, route } from '$lib/server/auth';
 
+/**
+ * Recreate a container from its own inspected config, to apply new resource
+ * limits without a full deploy.
+ *
+ * **Not a way to pick up a new image.** This rebuilds from `podman inspect`,
+ * not from the application's deployment plan, so it drops the healthcheck, the
+ * network mode and aliases, the tmpfs that carries secret mounts and the files
+ * delivered into it — and it copies `Config.Cmd`/`Config.Entrypoint`, which are
+ * the *old* image's resolved defaults, onto whatever image it creates. It also
+ * writes no deployment row, so nothing records what ran. The UI used to offer
+ * this as an "Update" button next to each container; it was removed, because
+ * `/api/applications/deploy` is the path that pulls the tag fresh, blue/greens,
+ * verifies health and records the digest.
+ *
+ * `pullImage` therefore defaults to **false**: a call that does not ask for a
+ * new image must not silently swap one in. A pull that fails is still only
+ * warned about — `createContainer` falls back to the copy already on the worker
+ * — which is the other reason this must not be anyone's update mechanism.
+ */
 export const POST: RequestHandler = route(async (event) => {
   const { container: dbContainer, worker } = await requireContainer(event, event.params.id!);
 
   const body = await event.request.json().catch(() => ({}));
-  const pullImage = body.pullImage ?? true;
+  const pullImage = body.pullImage ?? false;
   const memory = body.memory;
   const cpuQuota = body.cpuQuota;
   const cpuPeriod = body.cpuPeriod;
