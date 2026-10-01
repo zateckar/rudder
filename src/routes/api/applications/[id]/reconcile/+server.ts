@@ -28,7 +28,7 @@ import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { executeApplicationDeploy } from '$lib/server/deploy';
 import { canAccessApplication, requireAuth } from '$lib/server/auth';
-import { actionable, reconcileWorker } from '$lib/server/reconcile';
+import { actionable, reconcileWorker, StaleWorkerSnapshotError } from '$lib/server/reconcile';
 
 export async function GET({ params, cookies }: { params: { id: string }; cookies: any }) {
   await requireAuth(cookies);
@@ -59,6 +59,7 @@ export async function GET({ params, cookies }: { params: { id: string }; cookies
       unreconcilable: error?.message ?? null,
     });
   } catch (e: any) {
+    if (e instanceof StaleWorkerSnapshotError) return json({ error: e.message }, { status: 409 });
     console.error('[reconcile] On-demand pass failed:', e);
     return json({ error: e.message }, { status: 502 });
   }
@@ -71,7 +72,7 @@ export async function POST({ params, cookies }: { params: { id: string }; cookie
   if (!access) return json({ error: 'Application not found' }, { status: 404 });
 
   try {
-    const result = await executeApplicationDeploy(params.id, ctx.user?.id ?? null);
+    const result = await executeApplicationDeploy(params.id, ctx.user?.id ?? null, { respectRuntimeIntent: true });
     if (!result.success) {
       return json({ error: result.message }, { status: result.statusCode || 500 });
     }

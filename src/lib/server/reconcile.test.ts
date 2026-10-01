@@ -523,6 +523,56 @@ describe('diff', () => {
     expect(result.clean).toBe(true);
   });
 
+  test('a manually stopped application is clean even with missing containers or changed configuration', () => {
+    const base = healthy();
+    const desired = [desiredState({ app: appRow({ desiredStatus: 'stopped' }), worker: workerRow() })];
+    const observed = [toObserved(raw({ State: 'exited', Status: 'Exited (0)', Labels: {} }))];
+    const rows = [containerRow({ name: base.want.name, specHash: 'old', status: 'exited' })];
+    for (const input of [{ rows, observed }, { rows, observed: [] }, { rows: [], observed: [] }]) {
+      const result = diff({ ...base, ...input, desired });
+      expect(result.drift).toEqual([]);
+      expect(result.clean).toBe(true);
+      expect(autoCorrectable(result.drift)).toEqual([]);
+    }
+  });
+
+  test('an individual manual stop survives observed status refreshes', () => {
+    const base = healthy();
+    const rows = [containerRow({ name: base.want.name, desiredStatus: 'stopped', status: 'exited', specHash: 'old' })];
+    const observed = [toObserved(raw({ State: 'exited', Status: 'Exited (0) (unhealthy)' }))];
+    expect(diff({ ...base, rows, observed }).drift).toEqual([]);
+    expect(diff({ ...base, rows, observed: [] }).drift).toEqual([]);
+  });
+
+  test('a stopped replica does not hide a crashed sibling', () => {
+    const desired = desiredState({ app: appRow({ replicas: 2 }), worker: workerRow() });
+    const rows = desired.containers.map((c, i) => containerRow({
+      id: `row-${i}`, containerId: `c${i}`, name: c.name, specHash: c.specHash,
+      desiredStatus: i === 0 ? 'stopped' : 'running',
+    }));
+    const observed = rows.map((r) => toObserved(raw({ Id: r.containerId, Names: [r.name], State: 'exited', Status: 'Exited (1)' })));
+    const result = diff({ desired: [desired], rows, observed, knownAppIds: new Set(['app-1']) });
+    expect(result.drift.map((d) => d.name)).toEqual([rows[1].name]);
+    expect(autoCorrectable(result.drift)).toHaveLength(1);
+  });
+
+  test('running against stopped intent is reported without offering a start', () => {
+    const base = healthy();
+    const rows = [containerRow({ name: base.want.name, desiredStatus: 'stopped' })];
+    const result = diff({ ...base, rows });
+    expect(result.drift.map((d) => d.kind)).toEqual(['unexpected-running']);
+    expect(result.clean).toBe(false);
+    expect(autoCorrectable(result.drift)).toEqual([]);
+    expect(summarize(result.drift)).toBe('1 unexpected-running');
+  });
+
+  test('starting again restores missing detection, while crashes remain drift', () => {
+    const base = healthy();
+    const rows = [containerRow({ name: base.want.name, desiredStatus: 'running', status: 'exited' })];
+    const observed = [toObserved(raw({ State: 'exited', Status: 'Exited (1)' }))];
+    expect(diff({ ...base, rows, observed }).drift.map((d) => d.kind)).toEqual(['missing']);
+  });
+
   test('a container removed by hand is missing', () => {
     const base = healthy();
     const result = diff({ ...base, observed: [] });

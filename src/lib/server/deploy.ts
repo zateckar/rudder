@@ -29,7 +29,10 @@ import { ensureAppNetwork, teardownAppNetwork } from '$lib/server/networks';
 import { env } from '$lib/server/env';
 import { MountPolicyError, realizeMounts, type MountIntent } from '$lib/server/mounts';
 // Deploys are serialized per worker; see `workerDeployLock`.
-import { isLocked, LockError, withLock, workerDeployLock } from '$lib/server/locks';
+import { LockError, withLock, workerDeployLock } from '$lib/server/locks';
+import { commitGenerationCutover, revertGenerationCutover, revertRetainedGenerationCutover } from './lifecycle-cutover';
+import { expectedRoutingHash, waitForRoutingAcknowledgement } from './routing-convergence';
+import { suppressContainerRestart, restoreContainerRestart } from './runtime-policy';
 import {
   parseDigestRecord,
   pinnedImageFor,
@@ -47,12 +50,10 @@ import { pickFreePort } from '$lib/server/ports';
 // database does not, and used to keep a plaintext copy of it there.
 import { redactSecretLabels } from '$lib/server/redaction';
 import {
-  CONVERGENCE_POLL_MS,
   CUTOVER_CONVERGENCE_TIMEOUT_MS,
   DRAIN_GRACE_MS,
   HEALTH_POLL_MS,
   SETTLE_MS,
-  TRAEFIK_RELOAD_MARGIN_MS,
   declaresFixedHostPorts,
   generationalName,
   healthTimeoutMs,
@@ -466,9 +467,10 @@ async function discardGeneration(
 ): Promise<void> {
   for (const c of created) {
     try {
-      await client.removeContainer(c.containerId, true);
+      await client.ensureContainerRemoved(c.containerId, true);
     } catch (e: any) {
       console.warn(`[deploy] Could not remove abandoned container ${c.name}:`, e.message);
+      continue; // Keep the row and port reservation until removal is confirmed.
     }
     try {
       await db.delete(containers).where(eq(containers.id, c.rowId));
@@ -478,30 +480,13 @@ async function discardGeneration(
   }
 }
 
-/**
- * Block until the worker has fetched routing configuration written after
- * `since`, so the caller knows traffic has actually moved.
- *
- * Returns false on timeout. The caller continues anyway: the configuration is
- * correct in the database and the worker will converge on its next successful
- * poll. What must not happen is reaping the old generation while the worker is
- * still routing to it, so a false return suppresses the reap.
- */
-async function waitForConfigConvergence(workerId: string, since: Date): Promise<boolean> {
-  const deadline = Date.now() + CUTOVER_CONVERGENCE_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const row = await db
-      .select({ fetchedAt: workers.configFetchedAt })
-      .from(workers)
-      .where(eq(workers.id, workerId))
-      .get();
-    if (row?.fetchedAt && row.fetchedAt.getTime() >= since.getTime()) {
-      await sleep(TRAEFIK_RELOAD_MARGIN_MS);
-      return true;
-    }
-    await sleep(CONVERGENCE_POLL_MS);
-  }
-  return false;
+/** A response timestamp is telemetry; only the installed content hash admits cleanup. */
+async function routingReadyForCleanup(worker: typeof workers.$inferSelect): Promise<boolean> {
+  if (worker.routingMode !== 'http') return true;
+  const hash = await expectedRoutingHash(worker.id);
+  const current = db.select({ hash: workers.configAppliedHash }).from(workers)
+    .where(eq(workers.id, worker.id)).get();
+  return current?.hash === hash;
 }
 
 /**
@@ -614,40 +599,39 @@ async function recordReapFailure(
  * precisely the shape of an orphan. Every successful reap raised a spurious
  * orphan finding, and a notification with it.
  */
-export async function sweepExpiredGenerations(): Promise<{
-  reaped: number;
-  removedContainerIds: string[];
-}> {
-  const draining = await db
-    .select({ container: containers, app: applications, worker: workers })
-    .from(containers)
-    .innerJoin(applications, eq(containers.applicationId, applications.id))
-    .innerJoin(workers, eq(containers.workerId, workers.id))
-    .where(eq(containers.state, 'draining'))
-    .all();
-
+/** Caller owns this worker's lock; read eligibility here, never before acquisition. */
+async function sweepExpiredWithinLock(worker: typeof workers.$inferSelect): Promise<string[]> {
+  const candidates = db.select({ container: containers, app: applications })
+    .from(containers).innerJoin(applications, eq(containers.applicationId, applications.id))
+    .where(and(eq(containers.workerId, worker.id), eq(containers.state, 'draining'))).all();
   const now = new Date();
-  const removedContainerIds: string[] = [];
-  const byWorker = new Map<string, { worker: typeof workers.$inferSelect; rows: Array<typeof containers.$inferSelect> }>();
-
-  for (const row of draining) {
-    if (!retentionExpired(row.app, row.container.updatedAt, now)) continue;
-    const bucket = byWorker.get(row.worker.id) ?? { worker: row.worker, rows: [] };
-    bucket.rows.push(row.container);
-    byWorker.set(row.worker.id, bucket);
+  const eligible = candidates.filter(({ app, container }) =>
+    retentionExpired(app, container.retainedAt ?? container.updatedAt, now)).map((r) => r.container);
+  if (!eligible.length || !(await routingReadyForCleanup(worker))) return [];
+  if (worker.routingMode === 'http') {
+    await sleep(DRAIN_GRACE_MS);
+    if (!(await routingReadyForCleanup(worker))) return [];
   }
+  const client = getRestPodmanClient(worker);
+  try { return await reapContainers(client, eligible); } finally { client.destroy(); }
+}
 
-  for (const { worker, rows } of byWorker.values()) {
-    let client: PodmanRestClient | null = null;
+export async function sweepExpiredGenerations(): Promise<{ reaped: number; removedContainerIds: string[] }> {
+  const workerIds = db.selectDistinct({ id: containers.workerId }).from(containers)
+    .where(eq(containers.state, 'draining')).all();
+  const removedContainerIds: string[] = [];
+  for (const { id } of workerIds) {
+    if (!id) continue;
     try {
-      client = getRestPodmanClient(worker);
-      // Collect what was actually removed, not what was attempted: a container
-      // whose removal failed keeps its row and will be retried next sweep.
-      removedContainerIds.push(...(await reapContainers(client, rows)));
-    } catch (e: any) {
-      console.warn(`[deploy] Sweep failed for worker ${worker.name}:`, e.message);
-    } finally {
-      client?.destroy();
+      const removed = await withLock(workerDeployLock(id), {
+        operation: 'reap expired generations', holder: crypto.randomUUID(),
+      }, async () => {
+        const worker = db.select().from(workers).where(eq(workers.id, id)).get();
+        return worker ? sweepExpiredWithinLock(worker) : [];
+      });
+      removedContainerIds.push(...removed);
+    } catch (error) {
+      if (!(error instanceof LockError)) console.warn('[deploy] Expiry sweep failed:', error);
     }
   }
   return { reaped: removedContainerIds.length, removedContainerIds };
@@ -674,62 +658,41 @@ export async function sweepExpiredGenerations(): Promise<{
  * Deploys` runs at startup and is what turns a killed process's `pending`
  * deployment into `failed`, so its containers become visible to this.
  *
- * The lock check is belt and braces for the one remaining overlap: a deploy
- * that has already written `failed` but has not finished its own discard.
- * Rather than race it, leave the worker to the next sweep.
+ * Eligibility is read while owning the worker lock, including terminal history
+ * status and current generation role. A busy worker is left to the next sweep.
  *
  * Called from the metrics loop, so an unreachable worker is simply retried.
  */
-export async function sweepInterruptedGenerations(): Promise<{
-  reaped: number;
-  removedContainerIds: string[];
-}> {
-  const orphaned = await db
-    .select({ container: containers, worker: workers, deployStatus: deployments.status })
-    .from(containers)
-    .innerJoin(workers, eq(containers.workerId, workers.id))
-    // Left, not inner: a row whose deployment has been pruned from the history
-    // is orphaned too, and an inner join would hide it forever.
-    .leftJoin(deployments, eq(containers.deploymentId, deployments.id))
-    .where(eq(containers.state, 'pending'))
-    .all();
-
+export async function sweepInterruptedGenerations(): Promise<{ reaped: number; removedContainerIds: string[] }> {
+  const workerIds = db.selectDistinct({ id: containers.workerId }).from(containers)
+    .where(eq(containers.state, 'pending')).all();
   const removedContainerIds: string[] = [];
-  const byWorker = new Map<
-    string,
-    { worker: typeof workers.$inferSelect; rows: Array<typeof containers.$inferSelect> }
-  >();
-
-  for (const row of orphaned) {
-    if (row.deployStatus === 'pending') continue; // still being deployed
-    if (isLocked(workerDeployLock(row.worker.id))) continue;
-    const bucket = byWorker.get(row.worker.id) ?? { worker: row.worker, rows: [] };
-    bucket.rows.push(row.container);
-    byWorker.set(row.worker.id, bucket);
-  }
-
-  for (const { worker, rows } of byWorker.values()) {
-    let client: PodmanRestClient | null = null;
+  for (const { id } of workerIds) {
+    if (!id) continue;
     try {
-      client = getRestPodmanClient(worker);
-      const reaped = await reapContainers(client, rows);
-      removedContainerIds.push(...reaped);
-      if (reaped.length > 0) {
-        console.log(
-          `[deploy] Discarded ${reaped.length} container(s) from an interrupted deploy ` +
-            `on worker ${worker.name}.`,
-        );
-      }
-    } catch (e: any) {
-      console.warn(
-        `[deploy] Could not discard the interrupted generation on worker ${worker.name}:`,
-        e.message,
-      );
-    } finally {
-      client?.destroy();
+      const removed = await withLock(workerDeployLock(id), {
+        operation: 'reap interrupted generations', holder: crypto.randomUUID(),
+      }, async () => {
+        const worker = db.select().from(workers).where(eq(workers.id, id)).get();
+        if (!worker) return [];
+        const eligible = db.select({ container: containers, status: deployments.status })
+          .from(containers).leftJoin(deployments, eq(containers.deploymentId, deployments.id))
+          .where(and(eq(containers.workerId, id), eq(containers.state, 'pending'))).all()
+          .filter((r) => r.status == null || ['succeeded', 'failed', 'rolled_back'].includes(r.status))
+          .map((r) => r.container);
+        if (!eligible.length || !(await routingReadyForCleanup(worker))) return [];
+        if (worker.routingMode === 'http') {
+          await sleep(DRAIN_GRACE_MS);
+          if (!(await routingReadyForCleanup(worker))) return [];
+        }
+        const client = getRestPodmanClient(worker);
+        try { return await reapContainers(client, eligible); } finally { client.destroy(); }
+      });
+      removedContainerIds.push(...removed);
+    } catch (error) {
+      if (!(error instanceof LockError)) console.warn('[deploy] Interrupted sweep failed:', error);
     }
   }
-
   return { reaped: removedContainerIds.length, removedContainerIds };
 }
 
@@ -777,6 +740,8 @@ export async function resolveWorkerSSHConfig(
 }
 
 export interface DeployOptions {
+  /** Corrective deploys must not undo manual application/container stops. */
+  respectRuntimeIntent?: boolean;
   /**
    * `deployments.image_digest` from the deployment being restored.
    *
@@ -868,6 +833,18 @@ async function deployApplication(
 ): Promise<DeployResult> {
   const app = await db.select().from(applications).where(eq(applications.id, applicationId)).get();
   if (!app) return { success: false, message: 'Application not found', statusCode: 404 };
+  if (options.respectRuntimeIntent) {
+    const stopped = await db.select({ id: containers.id }).from(containers)
+      .where(and(eq(containers.applicationId, applicationId), eq(containers.state, 'active'), eq(containers.desiredStatus, 'stopped')))
+      .get();
+    if (app.desiredStatus === 'stopped' || stopped) {
+      return {
+        success: false,
+        message: 'This application has manually stopped containers. Start them or explicitly deploy the application to resume it.',
+        statusCode: 409,
+      };
+    }
+  }
   if (!app.workerId) return { success: false, message: 'No worker assigned to this application', statusCode: 400 };
 
   const worker = await db.select().from(workers).where(eq(workers.id, app.workerId)).get();
@@ -1125,6 +1102,8 @@ async function deployApplication(
   // and the failure path used to build a *second* client to discard the failed
   // generation with, leaking that one too.
   let podmanClient: PodmanRestClient | null = null;
+  let cutoverCommitted = false;
+  let previousActive: Array<typeof containers.$inferSelect> = [];
 
   try {
     podmanClient = getRestPodmanClient(worker);
@@ -1144,7 +1123,7 @@ async function deployApplication(
       // deploy's retention window, so its ports come back before this deploy
       // allocates.
       try {
-        await sweepExpiredGenerations();
+        await sweepExpiredWithinLock(worker);
       } catch (e: any) {
         console.warn('[deploy] Could not sweep expired generations:', e.message);
       }
@@ -1231,6 +1210,11 @@ async function deployApplication(
           ...containerMounts(planned.mounts, appSecrets.files.length > 0, app.id),
         });
 
+        // Track the external effect immediately: file delivery, digest lookup,
+        // or the FK insert can all fail after Podman has created the container.
+        const rowId = crypto.randomUUID();
+        createdContainers.push({ rowId, containerId: containerResult.Id, name: containerName });
+
         await deliverFiles(podmanClient, containerResult.Id, files);
 
         // Resolved after createContainer, which pulls: this is the digest of
@@ -1241,7 +1225,6 @@ async function deployApplication(
           if (digest) deployedDigests.set(digestKey, digest);
         }
 
-        const rowId = crypto.randomUUID();
         await db.insert(containers).values({
           id: rowId,
           applicationId: app.id,
@@ -1273,16 +1256,14 @@ async function deployApplication(
           createdAt: new Date(),
           updatedAt: new Date(),
         });
-        createdContainers.push({
-          rowId,
-          containerId: containerResult.Id,
-          name: containerName,
-        });
-
         await podmanClient.startContainer(containerResult.Id);
         await db.update(containers)
           .set({ status: 'running', updatedAt: new Date() })
           .where(eq(containers.id, rowId));
+        if (!blueGreen) {
+          const row = db.select().from(containers).where(eq(containers.id, rowId)).get()!;
+          await restoreContainerRestart(podmanClient, row);
+        }
       } catch (e: any) {
         console.error(`Failed to create container ${planned.name}:`, e);
         // Keep the type: a mount the policy rejects is the user's to fix, and
@@ -1302,75 +1283,45 @@ async function deployApplication(
       // One pair of updates moves the traffic. The worker's next fetch sees the
       // new servers and stops seeing the old ones — no container is recreated,
       // which is what makes the switch atomic from Traefik's point of view.
-      const cutoverAt = new Date();
       const newRowIds = new Set(createdContainers.map((c) => c.rowId));
-      // Re-read rather than reusing the pre-deploy snapshot: the sweep above
-      // may already have removed a generation that was being retained, and
-      // reaping a row that no longer exists would report failures that are not.
-      const superseded = (
-        await db.select().from(containers).where(eq(containers.applicationId, app.id)).all()
-      ).filter((c) => !newRowIds.has(c.id));
-
-      await db
-        .update(containers)
-        .set({ state: 'active', updatedAt: cutoverAt })
-        .where(inArray(containers.id, [...newRowIds]));
-      if (superseded.length > 0) {
-        await db
-          .update(containers)
-          .set({ state: 'draining', updatedAt: cutoverAt })
-          .where(inArray(containers.id, superseded.map((c) => c.id)));
+      const superseded = db.select().from(containers).where(eq(containers.applicationId, app.id)).all()
+        .filter((c) => !newRowIds.has(c.id));
+      previousActive = superseded.filter((c) => c.state === 'active');
+      // Durable boot exclusion precedes demotion, including on Podman 4.9.
+      for (const row of superseded) await suppressContainerRestart(podmanClient, row);
+      commitGenerationCutover(worker.id, [...newRowIds], previousActive.map((c) => c.id), deploymentId, app.id);
+      cutoverCommitted = true;
+      for (const row of db.select().from(containers).where(inArray(containers.id, [...newRowIds])).all()) {
+        await restoreContainerRestart(podmanClient, row);
       }
+      const routingHash = await expectedRoutingHash(worker.id);
+      if (previousActive.length) db.update(containers).set({ drainConfigHash: routingHash })
+        .where(inArray(containers.id, previousActive.map((c) => c.id))).run();
 
-      // ── Reap ──────────────────────────────────────────────────────────────
       if (superseded.length > 0) {
-        const converged = await waitForConfigConvergence(worker.id, cutoverAt);
+        const converged = await waitForRoutingAcknowledgement(worker.id, routingHash);
         if (!converged) {
-          // The worker has not fetched since the cutover, so its Traefik is
-          // still working from the configuration that names the old
-          // generation. Put that generation back into service rather than
-          // reaping it: removing the one the worker is actually routing to
-          // would take the application down.
-          //
-          // The new generation is then discarded rather than left running.
-          // Not converging is precisely the statement that the worker never
-          // learned about it, so it is serving nothing — and in http mode it
-          // carries no labels either, so nothing else can reach it. Leaving it
-          // up was how a worker with a broken fetch accumulated a generation
-          // per deploy, each one holding ports and memory and serving no
-          // traffic at all. Rolling it back bounds that at zero.
-          console.warn(
-            `[deploy] Worker ${worker.name} did not fetch routing configuration within ` +
-            `${Math.round(CUTOVER_CONVERGENCE_TIMEOUT_MS / 1000)}s of cutover; ` +
-            `generation ${superseded[0].generation} stays in service and ${generation} is discarded.`,
-          );
-          await db
-            .update(containers)
-            .set({ state: 'active', updatedAt: new Date() })
-            .where(inArray(containers.id, superseded.map((c) => c.id)));
-          await discardGeneration(podmanClient, createdContainers);
-
-          await db.update(deployments)
-            .set({
-              status: 'failed',
-              finishedAt: new Date(),
-              notes:
-                `Worker "${worker.name}" did not fetch its routing configuration within ` +
-                `${Math.round(CUTOVER_CONVERGENCE_TIMEOUT_MS / 1000)}s of cutover, so the new generation was ` +
-                `never routed and has been removed. Generation ${superseded[0].generation} is still serving. ` +
-                `Fix the worker's routing fetch — its Settings tab shows the last attempt — and deploy again.`,
-            })
+          // Missing ACK does not prove the candidate was never installed. Revert
+          // roles, then confirm exclusion before destroying a possible backend.
+          const candidateRows = db.select().from(containers).where(inArray(containers.id, [...newRowIds])).all();
+          for (const row of candidateRows) await suppressContainerRestart(podmanClient, row);
+          revertGenerationCutover(worker.id, previousActive.map((c) => c.id), [...newRowIds], deploymentId, app.id, app.desiredStatus);
+          for (const row of previousActive) {
+            if ((row.desiredStatus ?? app.desiredStatus) === 'running') await restoreContainerRestart(podmanClient, row);
+          }
+          const revertedHash = await expectedRoutingHash(worker.id);
+          const safeToDiscard = await waitForRoutingAcknowledgement(worker.id, revertedHash);
+          cutoverCommitted = !safeToDiscard;
+          if (safeToDiscard) {
+            await sleep(DRAIN_GRACE_MS);
+            await discardGeneration(podmanClient, createdContainers);
+          }
+          const message = safeToDiscard
+            ? 'Routing installation was not acknowledged. The previous generation was restored and the candidate removed.'
+            : 'Routing installation was not acknowledged. Previous roles were restored; candidate containers are retained until the worker acknowledges their exclusion.';
+          await db.update(deployments).set({ status: 'failed', finishedAt: new Date(), notes: message })
             .where(eq(deployments.id, deploymentId));
-
-          return {
-            success: false,
-            message:
-              `Deployed, but worker "${worker.name}" never fetched the new routing configuration, so the new ` +
-              `containers were never reachable and have been removed. The previous version is still serving. ` +
-              `Fix the worker's routing fetch — its Settings tab shows the last attempt — then deploy again.`,
-            statusCode: 409,
-            deploymentId,
-          };
+          return { success: false, message, statusCode: 409, deploymentId };
         } else {
           // Traffic is on the new generation. The old containers are still
           // finishing whatever they had in flight when the routing changed —
@@ -1407,7 +1358,7 @@ async function deployApplication(
     }
 
     await db.update(applications)
-      .set({ updatedAt: new Date() })
+      .set({ desiredStatus: 'running', updatedAt: new Date() })
       .where(eq(applications.id, applicationId));
 
     // Mark deployment as succeeded, recording what actually ran. Null when no
@@ -1424,6 +1375,16 @@ async function deployApplication(
     return { success: true, message: 'Application deployed' };
   } catch (error: any) {
     console.error('Deployment error:', error);
+    if (!cutoverCommitted && podmanClient) {
+      // Disabling boot on old rows may have partially succeeded before cutover.
+      for (const old of previousActive) {
+        const row = db.select().from(containers).where(eq(containers.id, old.id)).get();
+        if (row?.state === 'active' && (row.desiredStatus ?? app.desiredStatus) === 'running') {
+          try { await restoreContainerRestart(podmanClient, row); }
+          catch (restoreError) { console.warn('[deploy] Boot intent recovery will retry:', restoreError); }
+        }
+      }
+    }
 
     // What the containers printed, read *before* anything is discarded below.
     //
@@ -1452,13 +1413,15 @@ async function deployApplication(
     // legacy path has already removed the previous generation, so tearing the
     // new one down would leave the application with nothing running at all,
     // where leaving the partial deploy in place at least keeps some of it up.
-    if (blueGreen && createdContainers.length > 0) {
+    if (!cutoverCommitted && createdContainers.length > 0) {
       try {
         // Reuse the client this deploy already has. Only build one if the
         // failure was `getRestPodmanClient` itself, in which case there is
         // nothing to discard with anyway and this throws into the catch below.
         podmanClient ??= getRestPodmanClient(worker);
-        await discardGeneration(podmanClient, createdContainers);
+        const discarded = blueGreen ? createdContainers : createdContainers.filter((c) =>
+          !db.select({ id: containers.id }).from(containers).where(eq(containers.id, c.rowId)).get());
+        await discardGeneration(podmanClient, discarded);
       } catch (e: any) {
         console.warn('[deploy] Could not fully discard the failed generation:', e.message);
       }
@@ -1578,7 +1541,11 @@ export async function executeFastRollback(
         holder: `${process.pid}:${crypto.randomUUID()}`,
         ttlMs: deployLockTtlMs(app),
       },
-      () => rollbackWithinLock(app, worker, applicationId, targetDeploymentId),
+      async () => {
+        const currentApp = db.select().from(applications).where(eq(applications.id, applicationId)).get();
+        if (!currentApp) return { success: false, message: 'Application not found', statusCode: 404 };
+        return rollbackWithinLock(currentApp, worker, applicationId, targetDeploymentId);
+      },
     );
   } catch (e) {
     if (e instanceof LockError) return busyResult(worker.name);
@@ -1605,6 +1572,10 @@ async function rollbackWithinLock(
     .all();
   if (retained.length === 0) {
     return { success: false, message: 'That version is no longer on the worker', statusCode: 409 };
+  }
+
+  if (retained.some((row) => retentionExpired(app, row.retainedAt ?? row.updatedAt, new Date()))) {
+    return { success: false, message: 'That retained version has expired. Deploy its configuration again.', statusCode: 409 };
   }
 
   // The rows exist; the containers may not. Checked before anything is started
@@ -1652,6 +1623,7 @@ async function rollbackWithClient(
   const restarted: CreatedContainer[] = [];
 
   try {
+    for (const row of retained) await suppressContainerRestart(podmanClient, row);
     for (const row of retained) {
       await podmanClient.startContainer(row.containerId);
       await db
@@ -1682,17 +1654,14 @@ async function rollbackWithClient(
     };
   }
 
-  const cutoverAt = new Date();
-  await db
-    .update(containers)
-    .set({ state: 'active', updatedAt: cutoverAt })
-    .where(inArray(containers.id, retained.map((c) => c.id)));
-  if (current.length > 0) {
-    await db
-      .update(containers)
-      .set({ state: 'draining', updatedAt: cutoverAt })
-      .where(inArray(containers.id, current.map((c) => c.id)));
-  }
+  // Keep the target boot-ineligible until it is committed active.
+  for (const row of retained) await suppressContainerRestart(podmanClient, row);
+  for (const row of current) await suppressContainerRestart(podmanClient, row);
+  commitGenerationCutover(worker.id, retained.map((c) => c.id), current.map((c) => c.id), undefined, app.id);
+  for (const row of retained) await restoreContainerRestart(podmanClient, row);
+  const routingHash = await expectedRoutingHash(worker.id);
+  if (current.length) db.update(containers).set({ drainConfigHash: routingHash })
+    .where(inArray(containers.id, current.map((c) => c.id))).run();
 
   // Nothing is created here — the retained generation already exists — so a
   // failure to converge cannot accumulate containers the way a deploy can. What
@@ -1700,14 +1669,25 @@ async function rollbackWithClient(
   let converged = true;
 
   if (current.length > 0) {
-    converged = await waitForConfigConvergence(worker.id, cutoverAt);
+    converged = await waitForRoutingAcknowledgement(worker.id, routingHash);
     if (!converged) {
-      // Same reasoning as a deploy that cannot confirm its cutover: keep both
-      // generations serving rather than remove the one the worker is using.
-      await db
-        .update(containers)
-        .set({ state: 'active', updatedAt: new Date() })
-        .where(inArray(containers.id, current.map((c) => c.id)));
+      // Restore one active generation atomically. The candidate stays running
+      // until its exclusion is acknowledged: the worker may have installed it.
+      for (const row of retained) await suppressContainerRestart(podmanClient, row);
+      revertRetainedGenerationCutover(worker.id, app.id, app.desiredStatus, current, retained);
+      for (const row of current) {
+        if ((row.desiredStatus ?? app.desiredStatus) === 'running') await restoreContainerRestart(podmanClient, row);
+      }
+      const revertedHash = await expectedRoutingHash(worker.id);
+      if (await waitForRoutingAcknowledgement(worker.id, revertedHash)) {
+        await sleep(DRAIN_GRACE_MS);
+        for (const row of retained) {
+          try {
+            await podmanClient.stopContainer(row.containerId);
+            db.update(containers).set({ status: 'exited' }).where(eq(containers.id, row.id)).run();
+          } catch (error) { console.warn('[rollback] Could not stop excluded candidate:', error); }
+        }
+      }
     } else {
       await sleep(DRAIN_GRACE_MS);
       if (retentionMs(app) > 0) {
@@ -1730,18 +1710,10 @@ async function rollbackWithClient(
     }
   }
 
-  await db.update(applications).set({ updatedAt: new Date() }).where(eq(applications.id, applicationId));
-
   if (!converged) {
-    return {
-      success: false,
-      message:
-        `The retained version was started, but worker "${worker.name}" has not fetched the routing change, so ` +
-        `traffic may still be on the version you rolled back from. Both are running. Fix the worker's routing ` +
-        `fetch — its Settings tab shows the last attempt — and the rollback takes effect on its next fetch.`,
-      statusCode: 409,
-    };
+    return { success: false, message: 'Routing installation was not acknowledged. Previous generation roles were restored; candidate cleanup waits for acknowledged exclusion.', statusCode: 409 };
   }
+  await db.update(applications).set({ desiredStatus: 'running', updatedAt: new Date() }).where(eq(applications.id, applicationId));
 
   return { success: true, message: 'Rolled back to the retained version' };
 }

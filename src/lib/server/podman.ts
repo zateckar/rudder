@@ -299,6 +299,7 @@ export interface ContainerInspect {
   HostConfig: {
     RestartPolicy?: {
       Name: string;
+      MaximumRetryCount?: number;
     };
     PortBindings?: Record<string, Array<{ HostIp?: string; HostPort: string }>>;
     Binds?: string[];

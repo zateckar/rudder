@@ -32,6 +32,12 @@ entryPoints:
   # /etc/traefik/dynamic/metrics.yml.
   metrics:
     address: "127.0.0.1:8082"
+  # Installation verification is local only; there is no public router to it.
+  routing-admin:
+    address: "127.0.0.1:8083"
+
+api:
+  dashboard: false
 
 metrics:
   prometheus:

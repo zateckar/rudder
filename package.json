@@ -9,6 +9,7 @@
 		"preview": "bun --bun vite preview",
 		"prepare": "svelte-kit sync || echo ''",
 		"test": "bun test src",
+		"verify:lifecycle": "bun scripts/verify-lifecycle.ts",
 		"test:watch": "bun test --watch src",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",

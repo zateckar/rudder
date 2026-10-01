@@ -16,6 +16,7 @@ import provisionShTemplate from './shell/provision.sh?raw';
 import traefikYmlTemplate from './shell/templates/traefik.yml?raw';
 import podmanApiRoutingTlsTemplate from './shell/templates/podman-api-routing-tls.yml?raw';
 import metricsRoutingTemplate from './shell/templates/metrics-routing.yml?raw';
+import routingAdminTemplate from './shell/templates/routing-admin.yml?raw';
 import crowdsecMiddlewareTemplate from './shell/templates/crowdsec-middleware.yml?raw';
 import globalOidcMiddlewareTemplate from './shell/templates/global-oidc-middleware.yml?raw';
 import globalOidcCallbackRouterTemplate from './shell/templates/global-oidc-callback-router.yml?raw';
@@ -31,6 +32,7 @@ import netavarkCleanupSh from './shell/scripts/rudder-netavark-cleanup.sh?raw';
 import metricsSh from './shell/scripts/rudder-metrics.sh?raw';
 import metricsHttpSh from './shell/scripts/rudder-metrics-http.sh?raw';
 import traefikConfigSh from './shell/scripts/rudder-traefik-config.sh?raw';
+import routingVerifyPy from './shell/scripts/rudder-routing-verify.py?raw';
 import appsecConfigSh from './shell/scripts/rudder-appsec-config.sh?raw';
 import updatesSh from './shell/scripts/rudder-updates.sh?raw';
 import containerBootSh from './shell/scripts/rudder-container-boot.sh?raw';
@@ -510,6 +512,7 @@ export function generateProvisioningScript(
     TRAEFIK_YML_B64: toBase64(traefikYml),
     PODMAN_API_ROUTING_B64: podmanApiRouting ? toBase64(podmanApiRouting) : '',
     METRICS_ROUTING_B64: metricsRouting ? toBase64(metricsRouting) : '',
+    ROUTING_ADMIN_B64: toBase64(routingAdminTemplate),
     CROWDSEC_MIDDLEWARE_B64: toBase64(crowdsecMiddleware),
     GLOBAL_OIDC_MIDDLEWARE_B64: globalOidcMiddleware ? toBase64(globalOidcMiddleware) : '',
     CROWDSEC_ACQUIS_B64: toBase64(crowdsecAcquisTemplate),
@@ -543,6 +546,7 @@ export function generateProvisioningScript(
     METRICS_SCRIPT_B64: toBase64(metricsSh),
     METRICS_HTTP_SCRIPT_B64: toBase64(metricsHttpSh),
     TRAEFIK_CONFIG_SCRIPT_B64: toBase64(traefikConfigSh),
+    ROUTING_VERIFY_SCRIPT_B64: toBase64(routingVerifyPy),
     APPSEC_CONFIG_SCRIPT_B64: toBase64(appsecConfigSh),
     UPDATES_SCRIPT_B64: toBase64(updatesSh),
     CONTAINER_BOOT_SCRIPT_B64: toBase64(containerBootSh),

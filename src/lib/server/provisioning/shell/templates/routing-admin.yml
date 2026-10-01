@@ -1,0 +1,7 @@
+http:
+  routers:
+    rudder-routing-admin:
+      rule: "PathPrefix(`/api`)"
+      entryPoints:
+        - routing-admin
+      service: api@internal

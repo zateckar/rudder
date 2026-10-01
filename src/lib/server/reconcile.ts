@@ -69,6 +69,7 @@ import {
 } from './generations';
 import type { PortAllocator } from './ports';
 import { singleMountIntents } from './volumes';
+import { workerMutationEpoch, workerSnapshotIsCurrent } from './locks';
 
 export const MANAGED_LABEL = 'rudder.managed';
 export const APP_ID_LABEL = 'rudder.app.id';
@@ -300,6 +301,7 @@ export interface DesiredContainer {
 
 export interface DesiredApp {
   appId: string;
+  desiredStatus: 'running' | 'stopped';
   appName: string;
   workerId: string;
   containers: DesiredContainer[];
@@ -374,6 +376,7 @@ export function desiredState(input: DesiredStateInput): DesiredApp {
     appId: app.id,
     appName: app.name,
     workerId: worker.id,
+    desiredStatus: app.desiredStatus ?? 'running',
     containers: plan.containers.map((planned) => ({
       key: planned.key,
       name: planned.name,
@@ -411,6 +414,7 @@ export type DriftKind =
   | 'missing'
   | 'stale'
   | 'unhealthy'
+  | 'unexpected-running'
   | 'orphan'
   | 'foreign'
   | 'retained'
@@ -525,7 +529,9 @@ export function diff(input: DiffInput): DiffResult {
 
     for (const want of app.containers) {
       const row = matchRow(live, want.name, claimed);
+      const desiredStatus = row?.desiredStatus ?? app.desiredStatus ?? 'running';
       if (!row) {
+        if (desiredStatus === 'stopped') continue;
         drift.push({
           kind: 'missing',
           appId: app.appId,
@@ -538,6 +544,21 @@ export function diff(input: DiffInput): DiffResult {
       claimed.add(row.id);
 
       const container = observedById.get(row.containerId);
+      // A manual stop is intent, not a crash. Even absent or outdated targets
+      // must not become a corrective deploy that silently starts them again.
+      if (desiredStatus === 'stopped') {
+        if (container?.state === 'running' || container?.state === 'paused') {
+          drift.push({
+            kind: 'unexpected-running',
+            appId: app.appId,
+            appName: app.appName,
+            name: row.name,
+            containerId: container.id,
+            detail: `Container '${row.name}' is ${container.state} but was manually stopped. Stop it again to apply the desired state.`,
+          });
+        }
+        continue;
+      }
       if (!container) {
         drift.push({
           kind: 'missing',
@@ -641,7 +662,7 @@ export function diff(input: DiffInput): DiffResult {
 
     // No entry in `apps` means nothing is known about the window, so age is not
     // grounds for a finding. Reported as retained instead: visible, not alarming.
-    if (app && retentionExpired(app, row.updatedAt, now)) {
+    if (app && retentionExpired(app, row.retainedAt ?? row.updatedAt, now)) {
       drift.push({
         ...base,
         kind: 'unreaped',
@@ -806,6 +827,8 @@ export interface ReconcileOptions {
    * whole thing the operator is trying to fix.
    */
   observed?: readonly ObservedContainer[];
+  /** Epoch captured before the supplied list was read. Unversioned lists are unsafe. */
+  observedEpoch?: number;
 
   /**
    * Whether this pass may correct what it finds.
@@ -824,6 +847,22 @@ export interface ReconcileOptions {
    * Automatic deletion is not a feature worth its blast radius here.
    */
   apply?: boolean;
+}
+
+export interface ObservedSnapshot {
+  containers: readonly ObservedContainer[];
+  mutationEpoch: number;
+}
+
+export class StaleWorkerSnapshotError extends Error {
+  constructor(workerId: string) {
+    super(`Worker ${workerId} changed during observation; retry after its operation completes`);
+    this.name = 'StaleWorkerSnapshotError';
+  }
+}
+
+function requireCurrentSnapshot(workerId: string, epoch: number): void {
+  if (!workerSnapshotIsCurrent(workerId, epoch)) throw new StaleWorkerSnapshotError(workerId);
 }
 
 export interface ReconcileReport {
@@ -852,6 +891,11 @@ export async function reconcileWorker(
   worker: typeof workers.$inferSelect,
   options: ReconcileOptions = {},
 ): Promise<ReconcileReport> {
+  const epoch = workerMutationEpoch(worker.id);
+  requireCurrentSnapshot(worker.id, epoch);
+  if (options.observed && options.observedEpoch !== epoch) {
+    throw new StaleWorkerSnapshotError(worker.id);
+  }
   const ranAt = new Date();
   const workerApps = await db
     .select()
@@ -940,7 +984,7 @@ export async function reconcileWorker(
     );
   }
 
-  await persistReport(report);
+  await persistReport(report, epoch);
   return report;
 }
 
@@ -952,17 +996,20 @@ export async function reconcileWorker(
  * page the operator every five minutes about the same dead container until they
  * stopped reading the alerts entirely.
  */
-async function persistReport(report: ReconcileReport): Promise<void> {
+async function persistReport(report: ReconcileReport, epoch: number): Promise<void> {
+  // Check and write without yielding the event loop: lifecycle callbacks cannot
+  // start between validation and publication in this control-plane process.
+  requireCurrentSnapshot(report.workerId, epoch);
   const findings = actionable(report.drift);
   const fingerprint = findings.length > 0 ? driftFingerprint(report.drift) : null;
 
-  const previous = await db
+  const previous = db
     .select()
     .from(reconcileReports)
     .where(eq(reconcileReports.workerId, report.workerId))
     .get();
 
-  await db
+  db
     .insert(reconcileReports)
     .values({
       workerId: report.workerId,
@@ -981,7 +1028,7 @@ async function persistReport(report: ReconcileReport): Promise<void> {
         errors: report.errors.length > 0 ? JSON.stringify(report.errors) : null,
         fingerprint,
       },
-    });
+    }).run();
 
   if (!fingerprint || fingerprint === previous?.fingerprint) return;
 
@@ -991,7 +1038,7 @@ async function persistReport(report: ReconcileReport): Promise<void> {
     `Nothing has been changed — reconciliation is reporting only.`;
 
   try {
-    await db.insert(alertEvents).values({
+    db.insert(alertEvents).values({
       id: crypto.randomUUID(),
       // No rule produced this. Drift is not a metric crossing a threshold, and
       // inventing a rule row to point at would put a rule in the UI that nobody
@@ -1005,7 +1052,7 @@ async function persistReport(report: ReconcileReport): Promise<void> {
       message,
       acknowledged: false,
       createdAt: report.ranAt,
-    });
+    }).run();
   } catch (e: any) {
     console.error('[reconcile] Could not record the drift event:', e?.message ?? e);
   }
@@ -1038,6 +1085,7 @@ export function summarize(findings: readonly DriftEntry[]): string {
     'missing',
     'stale',
     'unhealthy',
+    'unexpected-running',
     'unreaped',
     'orphan',
     'retained',
@@ -1070,7 +1118,7 @@ export async function reconcileAllWorkers(
      * again. See `ReconcileOptions.observed`; the background collector supplies
      * this from the sweep it has just finished.
      */
-    observedByWorker?: ReadonlyMap<string, readonly ObservedContainer[]>;
+    observedByWorker?: ReadonlyMap<string, ObservedSnapshot>;
   } = {},
 ): Promise<ReconcileReport[]> {
   const online = await db.select().from(workers).where(eq(workers.status, 'online')).all();
@@ -1080,7 +1128,8 @@ export async function reconcileAllWorkers(
     try {
       const report = await reconcileWorker(worker, {
         ...options,
-        observed: options.observedByWorker?.get(worker.id) ?? options.observed,
+        observed: options.observedByWorker?.get(worker.id)?.containers ?? options.observed,
+        observedEpoch: options.observedByWorker?.get(worker.id)?.mutationEpoch ?? options.observedEpoch,
       });
       reports.push(report);
       if (!report.clean) {

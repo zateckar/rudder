@@ -52,7 +52,7 @@
   // corrected on its own: the pass is read-only, so anything shown here is
   // waiting on a person.
   interface Drift {
-    kind: 'missing' | 'stale' | 'unhealthy' | 'orphan' | 'foreign' | 'retained' | 'unreaped';
+    kind: 'missing' | 'stale' | 'unhealthy' | 'unexpected-running' | 'orphan' | 'foreign' | 'retained' | 'unreaped';
     name: string;
     detail: string;
   }
@@ -75,6 +75,7 @@
     missing: 'Not running',
     stale: 'Out of date',
     unhealthy: 'Failing health check',
+    'unexpected-running': 'Should be stopped',
     orphan: 'Untracked',
     foreign: 'Not managed by Rudder',
     retained: 'Previous version',

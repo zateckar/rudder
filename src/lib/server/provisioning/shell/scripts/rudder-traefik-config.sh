@@ -20,6 +20,10 @@ TARGET=/etc/traefik/dynamic/routes.yml
 # Staged outside the watched directory: Traefik reads every file in
 # /etc/traefik/dynamic, and a half-written one would be parsed.
 STAGE=/etc/rudder/routes.next
+INSTALL_STAGE=/etc/rudder/routes.install
+PREVIOUS=/var/lib/rudder/routing-previous.json
+APPLIED=/var/lib/rudder/routing-applied.json
+VERIFY=/usr/local/bin/rudder-routing-verify.py
 # Last outcome, for the metrics collector to carry back to the control plane.
 #
 # A worker that cannot fetch is invisible from Rudder's side: the only signal is
@@ -48,6 +52,11 @@ STATEEOF
 [ -n "${CONFIG_ENDPOINT:-}" ] || exit 0
 [ -n "${CONFIG_TOKEN:-}" ] || { record 0 0 no-token; echo "no config token; not fetching"; exit 1; }
 
+# Timer and manual runs must not install/acknowledge different bodies concurrently.
+command -v flock >/dev/null 2>&1 || { record 0 0 lock-unavailable; exit 1; }
+exec 9>/etc/rudder/routing-fetch.lock
+flock -n 9 || exit 0
+
 # Response headers are kept so a 401 can be attributed.
 #
 # Rudder answers an unauthenticated fetch with a bare 401 and no
@@ -60,7 +69,7 @@ HEADERS=$(mktemp)
 # Declared before the trap is installed: `set -u` would make the handler itself
 # fail on an unset variable if anything exited in between.
 CURLRC=""
-cleanup() { rm -f "$STAGE" "$HEADERS" ${CURLRC:+"$CURLRC"}; }
+cleanup() { rm -f "$STAGE" "$INSTALL_STAGE" "$HEADERS" "$PREVIOUS.next" "$APPLIED.next" ${CURLRC:+"$CURLRC"}; }
 trap cleanup EXIT
 
 # Two layers of authentication, one Authorization header.
@@ -128,52 +137,54 @@ if [ "$CURL_RC" -ne 0 ]; then
   exit 1
 fi
 
-# Reject anything that is not a routing document before it can replace a
-# working one. Traefik parses JSON through its YAML reader, so the file keeps
-# the .yml extension the file provider expects.
-#
-# Exit code 2 from the check means "valid, but this worker has no routes".
-HAS_ROUTES=1
-if command -v python3 >/dev/null 2>&1; then
-  python3 -c '
-import json, sys
-d = json.load(open(sys.argv[1]))
-assert isinstance(d.get("http"), dict), "no http section"
-routers = d["http"].get("routers")
-assert routers is None or isinstance(routers, dict), "routers is not a map"
-sys.exit(0 if routers else 2)
-' "$STAGE" 2>/dev/null
-  case $? in
-    0) HAS_ROUTES=1 ;;
-    2) HAS_ROUTES=0 ;;
-    *) record "$HTTP_CODE" 0 not-a-document
-       echo "response is not a routing document — keeping the existing ${TARGET}"; exit 1 ;;
-  esac
-elif ! grep -q '"routers"' "$STAGE"; then
-  HAS_ROUTES=0
+# The hash identifies the exact served body. Fetching it is not installation.
+HASH=$(awk 'tolower($1) == "x-rudder-config-hash:" { gsub("\r", "", $2); print $2 }' "$HEADERS" | tail -1)
+if ! "$VERIFY" prepare "$STAGE" "$HASH" "$INSTALL_STAGE"; then
+  record "$HTTP_CODE" 0 not-a-document
+  echo "response failed routing validation - keeping ${TARGET}"
+  exit 1
 fi
 
-# Traefik rejects a document whose sections are empty — "http cannot be a
-# standalone element" — and rejects it for the whole file. A worker with no
-# applications therefore gets no file at all rather than an empty one.
-if [ "$HAS_ROUTES" -eq 0 ]; then
-  # A successful fetch: the control plane answered and this worker genuinely has
-  # nothing to route. Recorded as ok so it is not reported as a failure.
-  record "$HTTP_CODE" 1 no-routes
-  if [ -f "$TARGET" ]; then
-    rm -f "$TARGET"
-    echo "no routes for this worker — removed ${TARGET}"
+mkdir -p /var/lib/rudder
+# A reboot during a manifest copy must not leave truncated JSON for the next run.
+copy_state() {
+  cp "$1" "$2.next" && chmod 600 "$2.next" && mv -f "$2.next" "$2"
+}
+# Preserve the previously installed component names across retries, so a
+# rejected reload cannot be acknowledged just because the new marker exists.
+if [ -f "$APPLIED" ]; then
+  copy_state "$APPLIED" "$PREVIOUS" || { record "$HTTP_CODE" 0 install-failed; exit 1; }
+elif [ ! -f "$PREVIOUS" ] && [ -f "$TARGET" ]; then
+  copy_state "$TARGET" "$PREVIOUS" || { record "$HTTP_CODE" 0 install-failed; exit 1; }
+fi
+if [ ! -f "$TARGET" ] || ! cmp -s "$INSTALL_STAGE" "$TARGET"; then
+  if ! mv -f "$INSTALL_STAGE" "$TARGET"; then
+    record "$HTTP_CODE" 0 install-failed
+    exit 1
   fi
-  exit 0
+  echo "routing configuration updated"
 fi
 
+# Even unchanged and empty bodies need a positive loaded-content check. The
+# marker is on the same file-provider snapshot and loopback-only entryPoint.
+LOADED=0
+for _attempt in $(seq 1 20); do
+  if "$VERIFY" verify "$STAGE" "$HASH" "$PREVIOUS"; then LOADED=1; break; fi
+  sleep 0.5
+done
+if [ "$LOADED" -ne 1 ]; then
+  record "$HTTP_CODE" 0 reload-failed
+  echo "Traefik has not loaded the expected routing content; acknowledgement withheld"
+  exit 1
+fi
+
+# Reuse the fetch's bearer/proxy credentials. A stale-body 409 means another
+# cutover happened while the worker installed; retain the file and fetch again.
+if ! curl -fsS --max-time 15 "${AUTH_ARGS[@]}" \
+     -H 'Content-Type: application/json' -X POST \
+     --data "{\"hash\":\"${HASH}\"}" "$CONFIG_ENDPOINT" >/dev/null; then
+  record "$HTTP_CODE" 0 ack-failed
+  exit 1
+fi
+copy_state "$STAGE" "$APPLIED" || { record "$HTTP_CODE" 0 install-failed; exit 1; }
 record "$HTTP_CODE" 1 ok
-
-if [ -f "$TARGET" ] && cmp -s "$STAGE" "$TARGET"; then
-  exit 0
-fi
-
-chmod 644 "$STAGE"
-mv -f "$STAGE" "$TARGET"
-trap - EXIT
-echo "routing configuration updated"

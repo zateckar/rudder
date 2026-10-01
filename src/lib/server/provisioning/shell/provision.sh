@@ -153,6 +153,12 @@ step_podman() {
     dnf -y module enable podman
     dnf -y install podman curl openssl nc
   fi
+  # Routing installation is acknowledged only after strict JSON/hash validation
+  # and a local Traefik API check. There is no permissive grep fallback.
+  if ! command -v python3 &> /dev/null; then
+    if [ "$OS" = "rhel" ]; then dnf -y install python3
+    else apt-get install -y python3; fi
+  fi
   podman --version || { echo "ERROR: Podman not installed"; exit 1; }
   command -v nc &> /dev/null && echo "netcat installed: $(nc -h 2>&1 | head -1)" || echo "WARNING: netcat not found"
 }
@@ -457,6 +463,7 @@ step_traefik_config() {
 
   mkdir -p /etc/traefik/dynamic /etc/traefik/acme /var/log/traefik
   echo "{{TRAEFIK_YML_B64}}" | base64 -d > /etc/traefik/traefik.yml
+  echo "{{ROUTING_ADMIN_B64}}" | base64 -d > /etc/traefik/dynamic/routing-admin.yml
   echo "traefik.yml written (443 + 1443-4443, TLS-ALPN-01, CrowdSec plugin)"
   sed -i "s/BOUNCER_VERSION_PLACEHOLDER/${BOUNCER_VERSION}/g" /etc/traefik/traefik.yml
   sed -i "s/OIDC_VERSION_PLACEHOLDER/${OIDC_VERSION}/g" /etc/traefik/traefik.yml
@@ -710,6 +717,8 @@ echo "Netavark cleanup timer installed (runs every 5 min)"
 
 echo "{{TRAEFIK_CONFIG_SCRIPT_B64}}" | base64 -d > /usr/local/bin/rudder-traefik-config.sh
 chmod +x /usr/local/bin/rudder-traefik-config.sh
+echo "{{ROUTING_VERIFY_SCRIPT_B64}}" | base64 -d > /usr/local/bin/rudder-routing-verify.py
+chmod 755 /usr/local/bin/rudder-routing-verify.py
 echo "{{TRAEFIK_CONFIG_SERVICE_B64}}" | base64 -d > /etc/systemd/system/rudder-traefik-config.service
 echo "{{TRAEFIK_CONFIG_TIMER_B64}}" | base64 -d > /etc/systemd/system/rudder-traefik-config.timer
 systemctl daemon-reload

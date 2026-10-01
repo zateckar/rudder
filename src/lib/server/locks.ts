@@ -1,6 +1,7 @@
 /**
  * Simple in-memory locking mechanism for preventing concurrent operations.
- * Uses a Map with TTL-based cleanup to prevent memory leaks.
+ * A live callback owns its lock until its finally block runs. Timeouts cannot
+ * cancel callbacks and must never admit another mutation alongside them.
  */
 
 interface LockEntry {
@@ -8,35 +9,15 @@ interface LockEntry {
   operation: string;
   holder: string;
   /**
-   * How long this holder is allowed to run before the lock is considered
-   * abandoned. Recorded per entry because it is a property of the operation
-   * being protected, not of whoever asks next: a deploy legitimately runs for
-   * longer than the default, and judging its staleness by the default — or by
-   * the ttl of the caller that happens to be contending — releases the lock out
-   * from under it and lets a second one run concurrently, which is the whole
-   * thing the lock exists to prevent.
+   * Diagnostic threshold only. A slow or hung callback still owns the lock;
+   * process restart releases in-memory ownership after callbacks are gone.
    */
   ttlMs: number;
 }
 
 const locks = new Map<string, LockEntry>();
+const mutationEpochs = new Map<string, number>();
 const DEFAULT_TTL_MS = 10 * 60 * 1000; // 10 minutes
-
-function isStale(entry: LockEntry, now: number): boolean {
-  return now - entry.acquiredAt.getTime() > entry.ttlMs;
-}
-
-function cleanupExpiredLocks(): void {
-  const now = Date.now();
-  for (const [key, entry] of locks.entries()) {
-    if (isStale(entry, now)) {
-      console.warn(`Lock ${key} expired, releasing (held by ${entry.holder} for ${entry.operation})`);
-      locks.delete(key);
-    }
-  }
-}
-
-setInterval(cleanupExpiredLocks, 60 * 1000).unref();
 
 export class LockError extends Error {
   constructor(message: string) {
@@ -57,34 +38,33 @@ export async function withLock<T>(
   fn: () => Promise<T>
 ): Promise<T> {
   const holder = options.holder || process.pid.toString();
-  const ttl = options.ttlMs || DEFAULT_TTL_MS;
+  const ttl = options.ttlMs ?? DEFAULT_TTL_MS;
 
   const existing = locks.get(key);
   if (existing) {
     const now = Date.now();
-    // Judged against the *holder's* ttl, not this caller's.
-    if (!isStale(existing, now)) {
-      const age = now - existing.acquiredAt.getTime();
-      throw new LockError(
-        `Resource "${key}" is locked by ${existing.holder} for ${existing.operation} (${Math.round(age / 1000)}s ago)`
-      );
-    }
-    console.warn(`Lock ${key} expired during acquisition, proceeding`);
+    const age = now - existing.acquiredAt.getTime();
+    throw new LockError(
+      `Resource "${key}" is locked by ${existing.holder} for ${existing.operation} (${Math.round(age / 1000)}s ago${age > existing.ttlMs ? ', exceeding its expected duration' : ''})`
+    );
   }
 
-  locks.set(key, {
+  const entry: LockEntry = {
     acquiredAt: new Date(),
     operation: options.operation,
     holder,
     ttlMs: ttl,
-  });
+  };
+  locks.set(key, entry);
+  mutationEpochs.set(key, (mutationEpochs.get(key) ?? 0) + 1);
 
   try {
     return await fn();
   } finally {
     const current = locks.get(key);
-    if (current && current.holder === holder) {
+    if (current === entry) {
       locks.delete(key);
+      mutationEpochs.set(key, (mutationEpochs.get(key) ?? 0) + 1);
     }
   }
 }
@@ -112,29 +92,32 @@ export function workerDeployLock(workerId: string): string {
 }
 
 /**
- * How long a volume operation may hold the worker lock before it is presumed
- * abandoned.
+ * Expected duration of a volume operation, used in contention diagnostics.
  *
  * The default ten minutes is sized for a deploy and is far too short for these.
  * A restore streams an upload of arbitrary size from the client's browser and a
  * copy is a `cp -a` of an arbitrarily large volume; both routinely outlast it, and
  * both talk to Podman with `timeoutMs: null` because being idle for a long time is
- * what they are supposed to do. Once `isStale` says the lock is abandoned, a
- * webhook-triggered deploy acquires the same key and recreates containers onto the
- * volume mid-extraction — precisely the interleaving the lock was extended to
- * cover, and silently, because the operation's own `finally` then finds a
- * different holder and does not even release it.
+ * what they are supposed to do. Ownership therefore lasts until completion,
+ * even beyond this diagnostic threshold.
  *
  * Six hours. A lock is in-memory and dies with the process, so the only thing
- * this bounds is a genuinely hung operation inside a live one; being generous
- * costs nothing that a restart does not already fix.
+ * this describes is a slow operation inside a live process.
  */
 export const VOLUME_OP_TTL_MS = 6 * 60 * 60 * 1000;
 
 export function isLocked(key: string): boolean {
-  const entry = locks.get(key);
-  if (!entry) return false;
-  return !isStale(entry, Date.now());
+  return locks.has(key);
+}
+
+/** Invalidates asynchronous reads on both entry to and exit from a mutation. */
+export function workerMutationEpoch(workerId: string): number {
+  return mutationEpochs.get(workerDeployLock(workerId)) ?? 0;
+}
+
+/** Check and commit synchronously; an await between them would reintroduce a race. */
+export function workerSnapshotIsCurrent(workerId: string, epoch: number): boolean {
+  return !isLocked(workerDeployLock(workerId)) && workerMutationEpoch(workerId) === epoch;
 }
 
 /**
@@ -145,7 +128,7 @@ export function isLocked(key: string): boolean {
  * is the one thing no caller is entitled to do. Nothing used it, so it was a
  * loaded gun with no purpose rather than a bug.
  *
- * `withLock`'s `finally` is the only release path, and it checks the holder
+ * `withLock`'s `finally` is the only release path, and it checks acquisition identity
  * before deleting. If something ever genuinely needs to break a lock from
  * outside, it should say so in its name and log who it took it from.
  */

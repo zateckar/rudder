@@ -16,6 +16,7 @@
 set -uo pipefail
 
 PODMAN=${PODMAN:-/usr/bin/podman}
+RUNTIME_INTENT_DIR=${RUNTIME_INTENT_DIR:-/var/lib/rudder/runtime-intent}
 # Matches the drain grace a deploy gives a superseded generation. Long enough
 # for a database to flush, short enough that a reboot is not held hostage —
 # TimeoutStopSec in the unit is set above this so systemd never SIGKILLs us
@@ -28,7 +29,21 @@ POLICIES=(always unless-stopped)
 
 # Every container carrying one of the policies above, running or not.
 ids_for_policy() {
-  "$PODMAN" ps -a -q --filter "restart-policy=$1" 2>/dev/null || true
+  "$PODMAN" ps -a -q --no-trunc --filter "restart-policy=$1" 2>/dev/null || true
+}
+
+may_start() {
+  local id=$1 marker managed
+  marker="$RUNTIME_INTENT_DIR/$id"
+  # Markers also cover adopted containers that cannot be relabelled in place.
+  if [ -f "$marker" ]; then
+    [ "$(cat "$marker" 2>/dev/null)" = running ]
+    return
+  fi
+  managed=$("$PODMAN" inspect --format '{{ index .Config.Labels "rudder.managed" }}' "$id" 2>/dev/null) || return 1
+  # Pending containers are never boot-eligible before explicit promotion writes
+  # their marker. Preserve existing restart behavior for unrelated workloads.
+  [ "$managed" != true ]
 }
 
 start_all() {
@@ -39,12 +54,13 @@ start_all() {
     local ids
     ids=$(ids_for_policy "$policy")
     [ -n "$ids" ] || continue
-    started=$((started + $(printf '%s\n' "$ids" | grep -c .)))
     # One `podman start` per container, not one for the batch: a single
     # container that cannot start (its image pruned, a volume gone) must not
     # take the rest of the worker's applications down with it.
     local id
     for id in $ids; do
+      may_start "$id" || continue
+      started=$((started + 1))
       "$PODMAN" start "$id" >/dev/null 2>&1 \
         || echo "[rudder] failed to start $id (restart policy $policy)"
     done

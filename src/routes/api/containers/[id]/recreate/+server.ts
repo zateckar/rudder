@@ -1,10 +1,12 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
-import { containers } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { applications, containers, workers } from '$lib/db/schema';
+import { eq, sql } from 'drizzle-orm';
 import type { RequestHandler } from './$types';
 import { withPodman } from '$lib/server/podman-client';
 import { requireContainer, route } from '$lib/server/auth';
+import { LockError, withLock, workerDeployLock } from '$lib/server/locks';
+import { suppressContainerRestart, restoreContainerRestart } from '$lib/server/runtime-policy';
 
 /**
  * Recreate a container from its own inspected config, to apply new resource
@@ -33,65 +35,94 @@ export const POST: RequestHandler = route(async (event) => {
   const memory = body.memory;
   const cpuQuota = body.cpuQuota;
   const cpuPeriod = body.cpuPeriod;
+  const rowId = dbContainer.id;
 
-  return withPodman(worker, async (podmanClient) => {
-    // Inspect current container to get config
-    const inspectData = await podmanClient.getContainer(dbContainer.containerId);
-    const oldConfig = inspectData.Config;
-    const oldHostConfig = inspectData.HostConfig;
+  try {
+    return await withLock(workerDeployLock(worker.id), {
+      operation: `recreate ${dbContainer.name}`,
+      holder: crypto.randomUUID(),
+    }, () => withPodman(worker, async (podmanClient) => {
+      // A Stop may have completed while the request body was being read.
+      const dbContainer = await db.select().from(containers).where(eq(containers.id, rowId)).get();
+      if (!dbContainer) return json({ error: 'Container not found' }, { status: 404 });
+      const app = dbContainer.applicationId
+        ? await db.select({ desiredStatus: applications.desiredStatus }).from(applications)
+            .where(eq(applications.id, dbContainer.applicationId)).get()
+        : null;
+      const shouldStart = dbContainer.state === 'active' && (dbContainer.desiredStatus ?? app?.desiredStatus ?? 'running') === 'running';
+      // Inspect current container to get config
+      const inspectData = await podmanClient.getContainer(dbContainer.containerId);
+      const oldConfig = inspectData.Config;
+      const oldHostConfig = inspectData.HostConfig;
 
-    // Optionally pull the latest image first
-    if (pullImage) {
-      try {
-        await podmanClient.pullImage(oldConfig.Image);
-      } catch (e: any) {
-        console.warn(`Failed to pull image ${oldConfig.Image}:`, e.message);
+      // Optionally pull the latest image first
+      if (pullImage) {
+        try {
+          await podmanClient.pullImage(oldConfig.Image);
+        } catch (e: any) {
+          console.warn(`Failed to pull image ${oldConfig.Image}:`, e.message);
+        }
       }
-    }
 
-    // Stop and remove the old container
-    if (inspectData.State.Running) {
-      await podmanClient.stopContainer(dbContainer.containerId, 10);
-    }
-    await podmanClient.removeContainer(dbContainer.containerId, true);
-
-    // Rebuild port bindings
-    const ports: Record<string, Array<{ hostPort: string }>> = {};
-    if (oldHostConfig.PortBindings) {
-      for (const [port, bindings] of Object.entries(oldHostConfig.PortBindings)) {
-        ports[port] = bindings.map((b) => ({ hostPort: b.HostPort }));
+      // Stop and remove the old container
+      if (inspectData.State.Running) {
+        await podmanClient.stopContainer(dbContainer.containerId, 10);
       }
+      await podmanClient.removeContainer(dbContainer.containerId, true);
+
+      // Rebuild port bindings
+      const ports: Record<string, Array<{ hostPort: string }>> = {};
+      if (oldHostConfig.PortBindings) {
+        for (const [port, bindings] of Object.entries(oldHostConfig.PortBindings)) {
+          ports[port] = bindings.map((b) => ({ hostPort: b.HostPort }));
+        }
+      }
+
+      // Create the replacement container with same config (+ optional new limits)
+      const newContainer = await podmanClient.createContainer({
+        name: inspectData.Name.replace(/^\//, ''),
+        image: oldConfig.Image,
+        env: oldConfig.Env,
+        labels: oldConfig.Labels,
+        command: oldConfig.Cmd,
+        entrypoint: oldConfig.Entrypoint,
+        workingDir: oldConfig.WorkingDir,
+        restartPolicy: oldHostConfig.RestartPolicy?.Name,
+        ports: Object.keys(ports).length > 0 ? ports : undefined,
+        binds: oldHostConfig.Binds,
+        memory: memory !== undefined ? memory : oldHostConfig.Memory,
+        cpuPeriod: cpuPeriod !== undefined ? cpuPeriod : oldHostConfig.CpuPeriod,
+        cpuQuota: cpuQuota !== undefined ? cpuQuota : oldHostConfig.CpuQuota,
+      });
+
+      // Bind the new worker marker to the new identity before claiming success.
+      db.transaction((tx) => {
+        tx.update(containers).set({
+          containerId: newContainer.Id,
+          status: 'created',
+          updatedAt: new Date(),
+        }).where(eq(containers.id, dbContainer.id)).run();
+        tx.update(workers).set({ routingRevision: sql`${workers.routingRevision} + 1`, configAppliedHash: null })
+          .where(eq(workers.id, worker.id)).run();
+      });
+      const replacement = { ...dbContainer, containerId: newContainer.Id };
+      if (shouldStart) await restoreContainerRestart(podmanClient, replacement);
+      else await suppressContainerRestart(podmanClient, replacement);
+      if (shouldStart) {
+        await podmanClient.startContainer(newContainer.Id);
+        db.transaction((tx) => {
+          tx.update(containers).set({ status: 'running', updatedAt: new Date() }).where(eq(containers.id, dbContainer.id)).run();
+          tx.update(workers).set({ routingRevision: sql`${workers.routingRevision} + 1`, configAppliedHash: null })
+            .where(eq(workers.id, worker.id)).run();
+        });
+      }
+
+      return json({ success: true, message: 'Container recreated successfully' });
+    }));
+  } catch (error) {
+    if (error instanceof LockError) {
+      return json({ error: 'Another operation is running on this worker. Try again when it finishes.' }, { status: 409 });
     }
-
-    // Create the replacement container with same config (+ optional new limits)
-    const newContainer = await podmanClient.createContainer({
-      name: inspectData.Name.replace(/^\//, ''),
-      image: oldConfig.Image,
-      env: oldConfig.Env,
-      labels: oldConfig.Labels,
-      command: oldConfig.Cmd,
-      entrypoint: oldConfig.Entrypoint,
-      workingDir: oldConfig.WorkingDir,
-      restartPolicy: oldHostConfig.RestartPolicy?.Name,
-      ports: Object.keys(ports).length > 0 ? ports : undefined,
-      binds: oldHostConfig.Binds,
-      memory: memory !== undefined ? memory : oldHostConfig.Memory,
-      cpuPeriod: cpuPeriod !== undefined ? cpuPeriod : oldHostConfig.CpuPeriod,
-      cpuQuota: cpuQuota !== undefined ? cpuQuota : oldHostConfig.CpuQuota,
-    });
-
-    await podmanClient.startContainer(newContainer.Id);
-
-    // Update DB record
-    await db
-      .update(containers)
-      .set({
-        containerId: newContainer.Id,
-        status: 'running',
-        updatedAt: new Date(),
-      })
-      .where(eq(containers.id, dbContainer.id));
-
-    return json({ success: true, message: 'Container recreated successfully' });
-  });
+    throw error;
+  }
 });

@@ -17,9 +17,10 @@
  */
 
 import { db } from '$lib/db';
-import { deployments } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { deployments, workers } from '$lib/db/schema';
+import { eq, or } from 'drizzle-orm';
 import { sweepInterruptedGenerations } from './deploy';
+import { synchronizeWorkerRuntimePolicies } from './runtime-policy';
 
 /**
  * Fail every deployment still marked `pending`, and discard what it created.
@@ -39,29 +40,49 @@ export async function recoverInterruptedDeploys(): Promise<{
   failedDeployments: number;
   discardedContainers: number;
 }> {
+  const failedDeployments = recoverInterruptedDeploymentHistory();
+
+  let discardedContainers = 0;
+  for (const worker of db.select({ id: workers.id }).from(workers).all()) {
+    try { await synchronizeWorkerRuntimePolicies(worker.id); }
+    catch (error) { console.warn('[recover] Worker boot intent synchronization will retry:', error); }
+  }
+  try {
+    // Runs after the statement above on purpose — that is what moves the
+    // deployment off `pending`, which is the signal the sweep tests for.
+    ({ reaped: discardedContainers } = await sweepInterruptedGenerations());
+  } catch (e: any) {
+    console.error('[recover] Could not discard interrupted generations:', e?.message ?? e);
+  }
+
+  return { failedDeployments, discardedContainers };
+}
+
+/** Startup-only history repair; committed cutover survives even if finalization did not. */
+export function recoverInterruptedDeploymentHistory(): number {
   let failedDeployments = 0;
 
   try {
-    const stranded = await db
-      .select({ id: deployments.id, applicationId: deployments.applicationId, version: deployments.version })
+    const stranded = db
+      .select({ id: deployments.id, applicationId: deployments.applicationId, version: deployments.version, cutoverAt: deployments.cutoverAt })
       .from(deployments)
-      .where(eq(deployments.status, 'pending'))
+      .where(or(eq(deployments.status, 'pending'), eq(deployments.status, 'running')))
       .all();
 
     for (const row of stranded) {
-      await db
+      db
         .update(deployments)
         .set({
           status: 'failed',
           // The operator reading the history needs to know this deploy did not
           // fail on its merits — nothing was wrong with the manifest, and the
           // previous version is still the one serving.
-          errorMessage:
-            'Interrupted: the control plane restarted while this deploy was running. ' +
-            'The previous version continued serving. Redeploy to retry.',
+          errorMessage: row.cutoverAt
+            ? 'Interrupted after committed cutover: the new generation remains active. Previous containers are retained until the worker acknowledges routing installation. Check application health before retrying.'
+            : 'Interrupted before a committed generation switch was recorded. Check application health and retry. Abandoned candidate cleanup waits for acknowledged routing exclusion.',
           finishedAt: new Date(),
         })
-        .where(eq(deployments.id, row.id));
+        .where(eq(deployments.id, row.id)).run();
       failedDeployments += 1;
     }
 
@@ -77,14 +98,5 @@ export async function recoverInterruptedDeploys(): Promise<{
     console.error('[recover] Could not reconcile interrupted deployments:', e?.message ?? e);
   }
 
-  let discardedContainers = 0;
-  try {
-    // Runs after the statement above on purpose — that is what moves the
-    // deployment off `pending`, which is the signal the sweep tests for.
-    ({ reaped: discardedContainers } = await sweepInterruptedGenerations());
-  } catch (e: any) {
-    console.error('[recover] Could not discard interrupted generations:', e?.message ?? e);
-  }
-
-  return { failedDeployments, discardedContainers };
+  return failedDeployments;
 }

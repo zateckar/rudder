@@ -23,31 +23,21 @@ export type ContainerState = 'pending' | 'active' | 'draining';
  *
  * Must match `OnUnitActiveSec` in
  * `provisioning/shell/units/rudder-traefik-config.timer`. A cutover is not
- * complete until the worker has fetched the configuration that describes it.
+ * complete until the worker verifies Traefik has loaded the served content.
  */
 export const CONFIG_POLL_INTERVAL_MS = 10_000;
 
 /**
  * Longest a cutover waits for the worker to pick the new configuration up.
  *
- * The wait normally ends early, on observing `workers.config_fetched_at` move
- * past the cutover — this is the ceiling for a worker whose timer is late or
+ * The wait normally ends early when `workers.config_applied_hash` matches the
+ * desired routing body — this is the ceiling for a worker whose timer is late or
  * whose fetch is failing, not the expected cost.
  */
 export const CUTOVER_CONVERGENCE_TIMEOUT_MS = CONFIG_POLL_INTERVAL_MS * 2 + 5_000;
 
-/** How often the cutover wait re-reads `config_fetched_at`. */
+/** How often the cutover wait re-reads the content acknowledgement. */
 export const CONVERGENCE_POLL_MS = 500;
-
-/**
- * Slack between the worker fetching the configuration and Traefik acting on it.
- *
- * The fetch script writes the file and Traefik's file provider watches the
- * directory, so the reload follows within milliseconds — but `config_fetched_at`
- * is stamped when the control plane serves the response, which is strictly
- * before either.
- */
-export const TRAEFIK_RELOAD_MARGIN_MS = 1_000;
 
 /**
  * How long the superseded generation keeps running after traffic has moved off
@@ -191,7 +181,7 @@ export function retentionMs(app: { retainPreviousMinutes?: number | null }): num
 /**
  * Whether a retained generation has outlived its window and should be reaped.
  *
- * `retainedAt` is the container row's `updated_at`, stamped when it entered
+ * `retainedAt` is the container row's dedicated `retained_at`, stamped when it entered
  * `draining`.
  *
  * The drain grace is a floor even when retention is zero. A deploy reaps its

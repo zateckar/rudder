@@ -20,12 +20,13 @@
  */
 import { db, sqlite } from '$lib/db';
 import { containers, workers, containerMetrics, workerMetrics, workerPings } from '$lib/db/schema';
-import { eq, lt, inArray } from 'drizzle-orm';
+import { and, eq, lt, ne, sql } from 'drizzle-orm';
 import { getRestPodmanClient } from './podman-client';
 import { getHostStatsHttp } from './host-metrics-http';
 import type { HostStats } from './host-metrics';
 import { publishWorkerInfo } from './worker-info-cache';
-import { reconcileAllWorkers, toObserved, type ObservedContainer } from './reconcile';
+import { reconcileAllWorkers, toObserved, type ObservedContainer, type ObservedSnapshot } from './reconcile';
+import { workerMutationEpoch, workerSnapshotIsCurrent } from './locks';
 import { numericSetting } from './settings';
 import { mapWithConcurrency } from './concurrency';
 import type { PodmanClient } from './podman';
@@ -77,11 +78,17 @@ interface WorkerSweep {
   observed: ObservedContainer[];
   /** True when `observed` is what the worker actually said, not an empty stand-in. */
   observedIsReal: boolean;
+  mutationEpoch: number;
   sysInfo: any;
   systemDf: any;
   /** Rows whose recorded status disagrees with Podman, keyed by the new status. */
-  statusFixes: Map<string, string[]>;
+  statusFixes: Map<string, ObservedRowIdentity[]>;
   containerMetrics: MetricValues[];
+}
+
+export interface ObservedRowIdentity {
+  id: string;
+  containerId: string;
 }
 
 function emptySweep(worker: Worker, status: WorkerSweep['status'], latencyMs: number): WorkerSweep {
@@ -91,6 +98,7 @@ function emptySweep(worker: Worker, status: WorkerSweep['status'], latencyMs: nu
     latencyMs,
     observed: [],
     observedIsReal: false,
+    mutationEpoch: workerMutationEpoch(worker.id),
     sysInfo: null,
     systemDf: null,
     statusFixes: new Map(),
@@ -105,7 +113,7 @@ function emptySweep(worker: Worker, status: WorkerSweep['status'], latencyMs: nu
  * `error` with nothing collected, because one unreachable machine must not stop
  * the others being swept.
  */
-async function sweepWorker(worker: Worker, rows: readonly ContainerRow[]): Promise<WorkerSweep> {
+export async function sweepWorker(worker: Worker, rows: readonly ContainerRow[], epoch: number): Promise<WorkerSweep> {
   const start = Date.now();
 
   if (!worker.podmanApiUrl) {
@@ -129,6 +137,7 @@ async function sweepWorker(worker: Worker, rows: readonly ContainerRow[]): Promi
     if (!reachable) return emptySweep(worker, 'offline', latencyMs);
 
     const sweep = emptySweep(worker, 'online', latencyMs);
+    sweep.mutationEpoch = epoch;
     sweep.observedIsReal = true;
 
     // Each of these is separately survivable — a worker whose `systemDf` fails
@@ -155,7 +164,7 @@ async function sweepWorker(worker: Worker, rows: readonly ContainerRow[]): Promi
       const realStatus = byPodmanId.get(row.containerId)?.state ?? 'missing';
       if (realStatus !== row.status) {
         const bucket = sweep.statusFixes.get(realStatus) ?? [];
-        bucket.push(row.id);
+        bucket.push({ id: row.id, containerId: row.containerId });
         sweep.statusFixes.set(realStatus, bucket);
       }
       if (realStatus === 'running') running.push(row);
@@ -259,7 +268,37 @@ function parseStats(raw: any): Omit<MetricValues, 'id' | 'containerId' | 'collec
 
 // ── Writing a sweep down ─────────────────────────────────────────────────────
 
-async function persistSweep(sweep: WorkerSweep, now: Date): Promise<void> {
+/**
+ * Commit an observation only if no lifecycle callback crossed its read. The
+ * identity guard additionally protects rows recreated/adopted under a new
+ * Podman ID. This function must stay synchronous through the whole transaction.
+ */
+export function persistContainerObservations(
+  workerId: string,
+  epoch: number,
+  fixes: ReadonlyMap<string, readonly ObservedRowIdentity[]>,
+): boolean {
+  if (!workerSnapshotIsCurrent(workerId, epoch)) return false;
+  db.transaction((tx) => {
+    let changed = false;
+    for (const [status, identities] of fixes) {
+      for (const identity of identities) {
+        const result = tx.update(containers).set({ status }).where(and(
+          eq(containers.id, identity.id),
+          eq(containers.workerId, workerId),
+          eq(containers.containerId, identity.containerId),
+          ne(containers.status, status),
+        )).returning({ id: containers.id }).all();
+        changed ||= result.length > 0;
+      }
+    }
+    if (changed) tx.update(workers).set({ routingRevision: sql`routing_revision + 1`, configAppliedHash: null })
+      .where(eq(workers.id, workerId)).run();
+  });
+  return true;
+}
+
+export async function persistSweep(sweep: WorkerSweep, now: Date): Promise<void> {
   const { worker } = sweep;
 
   await db.insert(workerPings).values({
@@ -276,15 +315,10 @@ async function persistSweep(sweep: WorkerSweep, now: Date): Promise<void> {
     lastSeenAt: sweep.status === 'online' ? now : worker.lastSeenAt,
   }).where(eq(workers.id, worker.id));
 
-  for (const [status, ids] of sweep.statusFixes) {
-    try {
-      await db.update(containers).set({ status, updatedAt: now }).where(inArray(containers.id, ids));
-    } catch (e) {
-      console.error(`[metrics] Failed to update container statuses on ${worker.name}:`, (e as any).message || e);
-    }
-  }
+  // updatedAt is a lifecycle/retention timestamp, not an observation timestamp.
+  const observationCurrent = persistContainerObservations(worker.id, sweep.mutationEpoch, sweep.statusFixes);
 
-  if (sweep.containerMetrics.length > 0) {
+  if (observationCurrent && sweep.containerMetrics.length > 0) {
     // One insert for the whole worker, not one per container.
     try {
       await db.insert(containerMetrics).values(sweep.containerMetrics);
@@ -431,14 +465,26 @@ async function persistSweep(sweep: WorkerSweep, now: Date): Promise<void> {
  * Sweep every worker, write what came back, and return what reconciliation can
  * reuse.
  */
-async function collectFleet(): Promise<Map<string, readonly ObservedContainer[]>> {
+async function collectFleet(): Promise<Map<string, ObservedSnapshot>> {
   const now = new Date();
   const allWorkers = await db.select().from(workers).all();
   if (allWorkers.length === 0) return new Map();
 
+  // Upgrade/retry worker-side durable intent before taking this cycle's
+  // observation epoch. A busy lifecycle operation remains authoritative.
+  const { synchronizeWorkerRuntimePolicies } = await import('./runtime-policy');
+  await mapWithConcurrency(allWorkers.filter((worker) => worker.status === 'online'), WORKER_CONCURRENCY, async (worker) => {
+    try {
+      const result = await synchronizeWorkerRuntimePolicies(worker.id);
+      if (result.failures.length) console.warn(`[metrics] Runtime policy sync incomplete for ${worker.name}:`, result.failures);
+    }
+    catch (e) { console.warn(`[metrics] Runtime policy sync failed for ${worker.name}:`, (e as any).message || e); }
+  });
+
   // Every tracked container in one query, grouped in memory — this used to be a
   // join re-read per worker.
-  const allRows = await db.select().from(containers).all();
+  const epochs = new Map(allWorkers.map((worker) => [worker.id, workerMutationEpoch(worker.id)]));
+  const allRows = db.select().from(containers).all();
   const rowsByWorker = new Map<string, ContainerRow[]>();
   for (const row of allRows) {
     if (!row.workerId) continue;
@@ -449,14 +495,14 @@ async function collectFleet(): Promise<Map<string, readonly ObservedContainer[]>
 
   const sweeps = await mapWithConcurrency(allWorkers, WORKER_CONCURRENCY, async (worker) => {
     try {
-      return await sweepWorker(worker, rowsByWorker.get(worker.id) ?? []);
+      return await sweepWorker(worker, rowsByWorker.get(worker.id) ?? [], epochs.get(worker.id)!);
     } catch (e) {
       console.error(`[metrics] Sweep failed for ${worker.name}:`, (e as any).message || e);
       return emptySweep(worker, 'error', 0);
     }
   });
 
-  const observedByWorker = new Map<string, readonly ObservedContainer[]>();
+  const observedByWorker = new Map<string, ObservedSnapshot>();
   for (const sweep of sweeps) {
     try {
       await persistSweep(sweep, now);
@@ -466,7 +512,9 @@ async function collectFleet(): Promise<Map<string, readonly ObservedContainer[]>
     // Only a real listing is handed on. A worker whose list call failed must not
     // reconcile against an empty set, which would report every one of its
     // containers as missing.
-    if (sweep.observedIsReal) observedByWorker.set(sweep.worker.id, sweep.observed);
+    if (sweep.observedIsReal && workerSnapshotIsCurrent(sweep.worker.id, sweep.mutationEpoch)) {
+      observedByWorker.set(sweep.worker.id, { containers: sweep.observed, mutationEpoch: sweep.mutationEpoch });
+    }
   }
 
   return observedByWorker;
@@ -559,7 +607,7 @@ async function collectAll(): Promise<void> {
     return;
   }
 
-  let observedByWorker = new Map<string, readonly ObservedContainer[]>();
+  let observedByWorker = new Map<string, ObservedSnapshot>();
   try {
     observedByWorker = await collectFleet();
   } catch (e) {
@@ -586,7 +634,7 @@ async function collectAll(): Promise<void> {
       observedByWorker = new Map(
         [...observedByWorker].map(([workerId, list]) => [
           workerId,
-          list.filter((c) => !removed.has(c.id)),
+          { ...list, containers: list.containers.filter((c) => !removed.has(c.id)) },
         ]),
       );
     }
@@ -607,7 +655,7 @@ async function collectAll(): Promise<void> {
       observedByWorker = new Map(
         [...observedByWorker].map(([workerId, list]) => [
           workerId,
-          list.filter((c) => !removed.has(c.id)),
+          { ...list, containers: list.containers.filter((c) => !removed.has(c.id)) },
         ]),
       );
     }

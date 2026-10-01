@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { applications, workers, containers, deployments, deployWebhooks, applicationTemplates } from '$lib/db/schema';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { getRestPodmanClient } from '$lib/server/podman-client';
 import { executeApplicationDeploy, resolveWorkerSSHConfig } from '$lib/server/deploy';
 import {
@@ -12,6 +12,8 @@ import {
 import { teardownAppNetwork } from '$lib/server/networks';
 import { canAccessApplication } from '$lib/server/auth';
 import { checkDeployQuota } from '$lib/server/quota';
+import { LockError, withLock, workerDeployLock } from '$lib/server/locks';
+import { suppressContainerRestart, restoreContainerRestart } from '$lib/server/runtime-policy';
 
 type PodmanClient = ReturnType<typeof getRestPodmanClient>;
 
@@ -108,49 +110,82 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
 
     // ──────── START / STOP / RESTART ───────────────────────
     } else if (isLifecycleAction(action)) {
-      const lifecycle = LIFECYCLE[action];
-      const client = getRestPodmanClient(worker);
-      podmanClient = client;
+      return await withLock(workerDeployLock(worker.id), {
+        operation: `${action} ${app.name}`,
+        holder: crypto.randomUUID(),
+      }, async () => {
+        if (!db.select({ id: applications.id }).from(applications).where(eq(applications.id, applicationId)).get()) {
+          return json({ error: 'Application not found' }, { status: 404 });
+        }
+        const lifecycle = LIFECYCLE[action];
 
-      // Only the generation that is serving. A superseded generation retained
-      // for a fast rollback is deliberately stopped, and starting or restarting
-      // it here would resurrect the old version's processes without routing any
-      // traffic to them.
-      const appContainers = await db
-        .select()
-        .from(containers)
-        .where(and(eq(containers.applicationId, applicationId), eq(containers.state, 'active')))
-        .all();
+        // Only the generation that is serving. A superseded generation retained
+        // for a fast rollback is deliberately stopped, and starting or restarting
+        // it here would resurrect the old version's processes without routing any
+        // traffic to them.
+        const appContainers = await db
+          .select()
+          .from(containers)
+          .where(and(eq(containers.applicationId, applicationId), eq(containers.state, 'active')))
+          .all();
 
-      const outcome = await applyToContainers(appContainers, (id) =>
-        lifecycle.run(client, id),
-      );
+        // Persist the request before contacting Podman, including failed stops.
+        // A status sweep may change what is observed, never what was requested.
+        const desiredStatus = action === 'stop' ? 'stopped' : 'running';
+        db.transaction((tx) => {
+          tx.update(applications).set({ desiredStatus, updatedAt: new Date() })
+            .where(eq(applications.id, applicationId)).run();
+          tx.update(containers).set({ desiredStatus: null })
+            .where(and(eq(containers.applicationId, applicationId), eq(containers.state, 'active'))).run();
+          tx.update(workers).set({ routingRevision: sql`${workers.routingRevision} + 1`, configAppliedHash: null })
+            .where(eq(workers.id, worker.id)).run();
+        });
 
-      // One statement for everything that took it, rather than one per
-      // container — and only for those, so a container Podman refused keeps the
-      // status it really has instead of the one that was asked for.
-      if (outcome.succeeded.length > 0) {
-        await db
-          .update(containers)
-          .set({ status: lifecycle.status, updatedAt: new Date() })
-          .where(inArray(containers.id, outcome.succeeded));
-      }
+        const client = getRestPodmanClient(worker);
+        podmanClient = client;
+        const outcome = await applyToContainers(appContainers, async (id) => {
+          const row = appContainers.find((container) => container.containerId === id)!;
+          if (action === 'stop') await suppressContainerRestart(client, row);
+          else await restoreContainerRestart(client, row);
+          await lifecycle.run(client, id);
+        });
 
-      if (outcome.failures.length > 0) {
-        console.error(`[applications] ${action} "${app.name}":`, outcome.failures);
-      }
+        // One statement for everything that took it, rather than one per
+        // container — and only for those, so a container Podman refused keeps the
+        // status it really has instead of the one that was asked for.
+        if (outcome.succeeded.length > 0) {
+          db.transaction((tx) => {
+            tx.update(containers).set({ status: lifecycle.status, updatedAt: new Date() })
+              .where(inArray(containers.id, outcome.succeeded)).run();
+            tx.update(workers).set({ routingRevision: sql`${workers.routingRevision} + 1`, configAppliedHash: null })
+              .where(eq(workers.id, worker.id)).run();
+          });
+        }
 
-      // 200 even when some containers refused: something did happen, and the
-      // message says exactly what. `success` and `failures` are what the caller
-      // reads to decide whether to say so in red.
-      return json({
-        success: outcome.failures.length === 0,
-        message: lifecycleMessage(lifecycle.verb, appContainers.length, outcome),
-        failures: outcome.failures,
+        if (outcome.failures.length > 0) {
+          console.error(`[applications] ${action} "${app.name}":`, outcome.failures);
+        }
+
+        // 200 even when some containers refused: something did happen, and the
+        // message says exactly what. `success` and `failures` are what the caller
+        // reads to decide whether to say so in red.
+        return json({
+          success: outcome.failures.length === 0,
+          message: lifecycleMessage(lifecycle.verb, appContainers.length, outcome),
+          failures: outcome.failures,
+        });
       });
 
     // ──────────────────────── DELETE ───────────────────────
     } else if (action === 'delete') {
+      return await withLock(workerDeployLock(worker.id), {
+        operation: `delete ${app.name}`, holder: crypto.randomUUID(),
+      }, async () => {
+      if (!db.select({ id: applications.id }).from(applications).where(eq(applications.id, applicationId)).get()) {
+        return json({ error: 'Application not found' }, { status: 404 });
+      }
+      db.update(workers).set({ routingRevision: sql`${workers.routingRevision} + 1`, configAppliedHash: null })
+        .where(eq(workers.id, worker.id)).run();
       podmanClient = getRestPodmanClient(worker);
       // Every generation, unlike the lifecycle actions above: deleting the
       // application must not leave a retained generation behind on the worker.
@@ -197,18 +232,26 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
         }
       }
 
-      await db.delete(applications).where(eq(applications.id, applicationId));
+      db.transaction((tx) => {
+        tx.delete(applications).where(eq(applications.id, applicationId)).run();
+        tx.update(workers).set({ routingRevision: sql`${workers.routingRevision} + 1`, configAppliedHash: null })
+          .where(eq(workers.id, worker.id)).run();
+      });
       return json({ success: true, message: 'Application deleted' });
+      });
 
     } else {
       return json({ error: 'Invalid action' }, { status: 400 });
     }
   } catch (error: any) {
+    if (error instanceof LockError) {
+      return json({ error: 'Another operation is running on this worker. Try again when it finishes.' }, { status: 409 });
+    }
     console.error('Deployment error:', error);
     // A deploy that threw still recorded a history row, and carries its id —
     // see `DeployFailure`. That row holds what the containers printed.
     return json({ error: error.message, deploymentId: error?.deploymentId }, { status: 500 });
   } finally {
-    podmanClient?.destroy();
+    (podmanClient as PodmanClient | null)?.destroy();
   }
 }

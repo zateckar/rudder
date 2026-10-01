@@ -143,6 +143,10 @@ export const workers = sqliteTable('workers', {
   configBasicPassword: text('config_basic_password'),
   /** Last time this worker successfully fetched its routing configuration. */
   configFetchedAt: integer('config_fetched_at', { mode: 'timestamp' }),
+  /** Last complete routing document verified as loaded by the worker. */
+  configAppliedHash: text('config_applied_hash'),
+  /** Invalidates asynchronous routing acknowledgements across role/status changes. */
+  routingRevision: integer('routing_revision').notNull().default(0),
   /**
    * Outcome of the worker's last routing-fetch *attempt*, reported by the worker
    * over the metrics endpoint.
@@ -166,6 +170,8 @@ export const workers = sqliteTable('workers', {
 
 export const applications = sqliteTable('applications', {
   id: text('id').primaryKey(),
+  /** Operator intent, independent of the statuses refreshed from Podman. */
+  desiredStatus: text('desired_status', { enum: ['running', 'stopped'] }).notNull().default('running'),
   teamId: text('team_id').references(() => teams.id),
   workerId: text('worker_id').references(() => workers.id),
   name: text('name').notNull(),
@@ -287,6 +293,8 @@ export const containers = sqliteTable('containers', {
   name: text('name').notNull(),
   image: text('image').notNull(),
   status: text('status').notNull(),
+  /** Manual per-container override; null inherits the application's intent. */
+  desiredStatus: text('desired_status', { enum: ['running', 'stopped'] }),
   ports: text('ports'),
   exposedPort: integer('exposed_port'),
   /**
@@ -345,6 +353,10 @@ export const containers = sqliteTable('containers', {
    * the ports the old generation holds.
    */
   state: text('state', { enum: ['pending', 'active', 'draining'] }).notNull().default('active'),
+  /** Retention starts at demotion and is unaffected by metrics/status refreshes. */
+  retainedAt: integer('retained_at', { mode: 'timestamp' }),
+  /** Routing content that excluded this generation at cutover (diagnostic). */
+  drainConfigHash: text('drain_config_hash'),
   /**
    * Hash of the parts of this container's intent that can only be changed by
    * recreating it — image, entrypoint, command, environment, mounts, resource
@@ -594,6 +606,8 @@ export const deployments = sqliteTable('deployments', {
   failureLogs: text('failure_logs'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   finishedAt: integer('finished_at', { mode: 'timestamp' }),
+  /** Committed with generation role changes, so restart recovery knows cutover occurred. */
+  cutoverAt: integer('cutover_at', { mode: 'timestamp' }),
 }, (t) => [
   // DESC to match `ORDER BY version DESC LIMIT 1`, which is how the next
   // deployment version is computed on every deploy.
