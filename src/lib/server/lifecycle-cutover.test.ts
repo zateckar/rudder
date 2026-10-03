@@ -6,6 +6,7 @@ import { commitGenerationCutover, revertGenerationCutover, revertRetainedGenerat
 import { executeApplicationDeploy, executeFastRollback, sweepExpiredGenerations, sweepInterruptedGenerations } from './deploy';
 import { withLock, workerDeployLock } from './locks';
 import { recoverInterruptedDeploymentHistory } from './recover';
+import { expectedRoutingHash } from './routing-convergence';
 
 const workerId = crypto.randomUUID();
 const appId = crypto.randomUUID();
@@ -176,6 +177,11 @@ describe('remote creation compensation', () => {
     test(`failed container insert compensates a bare remote create in ${routingMode} mode`, async () => {
       db.delete(containers).where(eq(containers.applicationId, appId)).run();
       db.update(workers).set({ routingMode, configFetchedAt: new Date() }).where(eq(workers.id, workerId)).run();
+      // A worker that fetches but has not acknowledged the current routing is
+      // refused before anything is created; this test is about what happens
+      // after creation, so the worker has to be a converged one.
+      db.update(workers).set({ configAppliedHash: await expectedRoutingHash(workerId) })
+        .where(eq(workers.id, workerId)).run();
       sqlite.run(`CREATE TRIGGER lifecycle_abort_container_insert BEFORE INSERT ON containers
         WHEN NEW.application_id = '${appId}'
         BEGIN SELECT RAISE(ABORT, 'injected container insert failure'); END`);

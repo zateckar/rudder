@@ -1015,6 +1015,32 @@ async function deployApplication(
     };
   }
 
+  // Fetching is not enough any more: a cutover waits for the worker to report,
+  // by content hash, that its Traefik has installed the configuration. A worker
+  // provisioned before acknowledgements existed fetches every ten seconds and
+  // never reports, so it passes the check above and then strands a candidate on
+  // every deploy — the cutover times out, the previous generation is put back,
+  // and the candidate is kept "until the worker acknowledges its exclusion",
+  // which on that worker is never. `sweepInterruptedGenerations` is gated on the
+  // same acknowledgement, so nothing reaps them either. Seen in production with
+  // one application at ten running generations, one per automatic image check.
+  //
+  // A healthy worker is normally already converged here; the wait only absorbs a
+  // routing change that landed in the last poll interval. 503 rather than 409,
+  // because 409 means "busy, retry" to the automatic image checker, which then
+  // retries silently — exactly how the pile-up went unnoticed.
+  if (blueGreen && !(await waitForRoutingAcknowledgement(worker.id, await expectedRoutingHash(worker.id)))) {
+    return {
+      success: false,
+      message:
+        `Worker "${worker.name}" fetches its routing configuration but has not acknowledged installing the ` +
+        `current one, so a deploy would start a new version that traffic can never be switched to. This is ` +
+        `what a worker provisioned before routing acknowledgements looks like — re-provision it to install ` +
+        `the current routing scripts. Nothing was created.`,
+      statusCode: 503,
+    };
+  }
+
   // Containers already deployed for this application. On the legacy path they
   // are removed before anything new is created; on the blue/green path they go
   // on serving until the new generation is verified.
