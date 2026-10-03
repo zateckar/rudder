@@ -577,7 +577,7 @@ export class PodmanClient {
     };
   }
 
-  private async request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  private async request<T>(path: string, options: RequestInit & { checkStreamErrors?: boolean } = {}): Promise<T> {
     const method = (options.method as string) || 'GET';
     const body = options.body as string | undefined;
 
@@ -592,11 +592,32 @@ export class PodmanClient {
     return new Promise<T>((resolve, reject) => {
       const req = reqModule.request(reqOptions, (res) => {
         let data = '';
+        // A truncated progress stream never emits `end`. Reject it so callers
+        // release their worker lock instead of waiting for a vanished socket.
+        res.on('error', reject);
+        res.on('aborted', () => reject(new Error(`Podman API response aborted: ${method} ${path}`)));
+        res.on('close', () => {
+          if (!res.complete) reject(new Error(`Podman API response incomplete: ${method} ${path}`));
+        });
         res.on('data', (chunk) => { data += chunk; });
         res.on('end', () => {
           if (res.statusCode && res.statusCode >= 400) {
             reject(PodmanApiError.fromResponse(res.statusCode, data));
             return;
+          }
+          // Image pulls can fail after the HTTP-200 progress stream has started.
+          // Check every frame; the first progress message says nothing about
+          // whether the pull completed, and a stale local tag is still readable.
+          if (options.checkStreamErrors) {
+            for (const line of data.split('\n')) {
+              let frame: { error?: string; errorDetail?: { message?: string } };
+              try { frame = JSON.parse(line); } catch { continue; }
+              const message = frame?.error || frame?.errorDetail?.message;
+              if (message) {
+                reject(new Error(`Image pull failed: ${message}`));
+                return;
+              }
+            }
           }
           try {
             resolve(JSON.parse(data) as T);
@@ -1342,7 +1363,7 @@ export class PodmanClient {
       const digest = name.slice(at + 1);
       await this.request(
         `/images/create?fromImage=${encodeURIComponent(repo)}&tag=${encodeURIComponent(digest)}`,
-        { method: 'POST' },
+        { method: 'POST', checkStreamErrors: true },
       );
       return;
     }
@@ -1350,6 +1371,7 @@ export class PodmanClient {
     const imageName = name.includes(':') ? name : `${name}:${tag}`;
     await this.request('/images/create?fromImage=' + encodeURIComponent(imageName), {
       method: 'POST',
+      checkStreamErrors: true,
     });
   }
 

@@ -48,6 +48,8 @@ export async function GET({ params, cookies }: { params: { id: string }; cookies
     environment,
     volumes: app.volumes,
     restartPolicy: app.restartPolicy,
+    autoUpdateEnabled: app.autoUpdateEnabled,
+    autoUpdateIntervalMinutes: app.autoUpdateIntervalMinutes,
     exposedPorts: app.exposedPorts,
     rateLimitAvg: app.rateLimitAvg,
     rateLimitBurst: app.rateLimitBurst,

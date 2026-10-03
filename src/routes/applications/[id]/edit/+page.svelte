@@ -5,6 +5,8 @@
   import EnvVarEditor from '$lib/components/form/EnvVarEditor.svelte';
   import PortMappingEditor from '$lib/components/form/PortMappingEditor.svelte';
   import VolumeMountEditor from '$lib/components/form/VolumeMountEditor.svelte';
+  import ImageUpdateSettings from '$lib/components/form/ImageUpdateSettings.svelte';
+  import { DEFAULT_IMAGE_UPDATE_INTERVAL_MINUTES } from '$lib/image-update-settings';
   import type { EnvVar, PortMapping, VolumeMount } from '$lib/components/form/types';
 
   let { data } = $props();
@@ -62,6 +64,8 @@
   // default rather than "no timeout".
   let healthTimeoutSeconds = $state<number | ''>('');
   let retainPreviousMinutes = $state(0);
+  let autoUpdateEnabled = $state(false);
+  let autoUpdateIntervalMinutes = $state<number | undefined>(DEFAULT_IMAGE_UPDATE_INTERVAL_MINUTES);
 
   // Health Check config
   let hcTestCmd = $state('');
@@ -121,6 +125,8 @@
       // Deploy behaviour
       healthTimeoutSeconds = app.healthTimeoutSeconds ?? '';
       retainPreviousMinutes = app.retainPreviousMinutes ?? 0;
+      autoUpdateEnabled = app.autoUpdateEnabled ?? false;
+      autoUpdateIntervalMinutes = app.autoUpdateIntervalMinutes ?? DEFAULT_IMAGE_UPDATE_INTERVAL_MINUTES;
       // Git source
       if (app.gitRepo) {
         sourceType = 'git';
@@ -410,6 +416,11 @@
         </div>
       </div>
     {/if}
+
+    <ImageUpdateSettings
+      bind:enabled={autoUpdateEnabled}
+      bind:intervalMinutes={autoUpdateIntervalMinutes}
+    />
 
     <!-- ── Public ports (all app types) ───────────────────────── -->
     <div class="form-section">

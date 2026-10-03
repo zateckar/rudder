@@ -6,6 +6,7 @@ import { selectWorker, getAllWorkerResources, getAllEligibleWorkers } from '$lib
 import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
 import { ALLOWED_DOMAINS_UNSUPPORTED, normalizeTokenHeader, tokenHeadersError } from '$lib/server/oidc';
 import { imageReferenceError } from '$lib/server/image-reference';
+import { IMAGE_UPDATE_INTERVAL_ERROR, parseImageUpdateFormSettings } from '$lib/image-update-settings';
 import { checkApplicationQuota } from '$lib/server/quota';
 import {
   canWriteToTeam,
@@ -72,6 +73,8 @@ export const actions = {
     }
     const userId = ctx.user.id;
     const formData = await event.request.formData();
+    const imageUpdateSettings = parseImageUpdateFormSettings(formData);
+    if (!imageUpdateSettings) return fail(400, { error: IMAGE_UPDATE_INTERVAL_ERROR });
 
     const name = formData.get('name')?.toString();
     const teamId = formData.get('teamId')?.toString();
@@ -319,6 +322,7 @@ export const actions = {
       environment,
       volumes,
       restartPolicy,
+      ...imageUpdateSettings,
       exposedPorts: serializeExposedPorts(exposedPorts),
       appsecDisabledRules: serializeAppsecRules(appsecRules),
       rateLimitAvg,

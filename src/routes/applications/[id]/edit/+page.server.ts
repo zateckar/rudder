@@ -11,6 +11,7 @@ import { assertDomainAvailable } from '$lib/server/domains';
 import { ALLOWED_DOMAINS_UNSUPPORTED, normalizeTokenHeader, tokenHeadersError } from '$lib/server/oidc';
 import { DEFAULT_HEALTH_TIMEOUT_S } from '$lib/server/generations';
 import { imageReferenceError } from '$lib/server/image-reference';
+import { IMAGE_UPDATE_INTERVAL_ERROR, parseImageUpdateFormSettings } from '$lib/image-update-settings';
 import { decryptField, encryptField } from '$lib/server/encryption';
 import {
   EXPOSED_PORTS_ERROR,
@@ -147,6 +148,8 @@ export const actions = {
     const { ctx, application: app } = access;
 
     const formData = await request.formData();
+    const imageUpdateSettings = parseImageUpdateFormSettings(formData, app);
+    if (!imageUpdateSettings) return fail(400, { error: IMAGE_UPDATE_INTERVAL_ERROR });
 
     const name = formData.get('name')?.toString();
     const workerId = formData.get('workerId')?.toString();
@@ -370,6 +373,7 @@ export const actions = {
         environment,
         volumes,
         restartPolicy,
+        ...imageUpdateSettings,
         exposedPorts: serializeExposedPorts(exposedPorts),
         appsecDisabledRules: serializeAppsecRules(appsecRules),
         rateLimitAvg,

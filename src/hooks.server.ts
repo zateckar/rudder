@@ -249,3 +249,11 @@ if (!(globalThis as any).__backupStarted) {
     .then(({ startBackupScheduler }) => startBackupScheduler())
     .catch((e) => console.error('[backup] Failed to start scheduler:', e));
 }
+
+// ── Opt-in automatic image updates ────────────────────────────────────────────
+if (!(globalThis as any).__imageUpdatesStarted) {
+  (globalThis as any).__imageUpdatesStarted = true;
+  import('$lib/server/image-updates')
+    .then(({ startImageUpdateChecks }) => startImageUpdateChecks())
+    .catch((e) => console.error('[image-updates] Failed to start checks:', e));
+}

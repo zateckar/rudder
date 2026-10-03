@@ -36,6 +36,13 @@
       "when": 1790726400001,
       "tag": "0004_lifecycle_safety",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1790985600000,
+      "tag": "0005_automatic_image_updates",
+      "breakpoints": true
     }
   ]
 }

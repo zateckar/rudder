@@ -20,6 +20,7 @@ Container orchestration platform built with SvelteKit, Drizzle ORM, and SQLite. 
 - **Instant rollback** -- optionally keep the superseded generation stopped-but-present, so rolling back to it restarts containers instead of pulling and recreating
 - **Deployment history** -- versioned deployment records with full rollback support
 - **Digest-pinned rollback** -- each deployment records the image digest it actually ran, and rollback recreates containers from that digest rather than re-resolving the tag
+- **Automatic image updates** -- opt into checking configured image tags and deploying changed images, every hour by default (see [Automatic image updates](#automatic-image-updates))
 - **Deploy webhooks** -- per-application webhook tokens for GitHub Actions, GitLab CI, etc.
 - **Application scaling** -- run multiple replicas with Traefik load balancing
 - **Multi-container applications** -- a compose or Kubernetes manifest with several services is one application: one network, one page, and deploy/stop/restart act on all of it
@@ -355,6 +356,33 @@ reaches a worker through the Podman API and cannot connect to a published port
 itself — an application without one is accepted as soon as its containers have
 stayed up briefly. Define a health check on anything where "the process started"
 and "the process can serve" are meaningfully different.
+
+---
+
+## Automatic image updates
+
+Enable **Automatically deploy new images** when creating or editing an application
+to opt in. It is off by default for every application type: single container,
+Compose, and Kubernetes. **Check interval (minutes)** defaults to **60 minutes**
+and accepts whole minutes from 1 to 10080 (one week).
+
+Each check pulls the application's configured image tags through its worker's
+Podman API and compares the resolved digests with the digests recorded for the
+active deployment. A changed digest triggers a normal deployment using the exact
+images found by that check. Unchanged tags do not create a deployment, and images
+pinned to a digest (`@sha256:…`) are skipped. Checks require a successfully
+deployed application with recorded image digests. After saving manifest changes,
+deploy them manually before automatic checks can resume.
+
+Applications stopped manually stay stopped. Offline workers and busy deployment
+locks defer checks, and failed pulls or unresolved digests do not trigger a
+deployment. Automatic deployments use the normal deployment verification for
+the worker's routing mode, including health verification and keeping the previous
+version serving where blue/green deployment applies (see
+[Zero-downtime deploys](#zero-downtime-deploys)). Last-check timestamps are saved
+in the database, so the schedule survives Rudder restarts; checks are dispatched
+on a one-minute cycle. Automatic deployment attempts appear in deployment history
+and the audit log.
 
 ---
 

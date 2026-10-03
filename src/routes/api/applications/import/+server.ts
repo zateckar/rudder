@@ -7,6 +7,7 @@ import { requireTeam, route } from '$lib/server/auth';
 import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
 import { normalizeTokenHeader, tokenHeaderNameError } from '$lib/server/oidc';
 import { parseExposedPorts, serializeExposedPorts } from '$lib/server/deploy/plan';
+import { IMAGE_UPDATE_INTERVAL_ERROR, parseImageUpdateInterval } from '$lib/image-update-settings';
 
 /** A token header name from an imported file, or null if it is unusable. */
 function importedTokenHeader(raw: unknown): string | null {
@@ -40,6 +41,11 @@ export const POST: RequestHandler = route(async (event) => {
   // Import writes an application into a team — verify the caller belongs to
   // it, otherwise any user could plant an app in someone else's team.
   const ctx = await requireTeam(event, teamId);
+
+  const autoUpdateIntervalMinutes = parseImageUpdateInterval(config.autoUpdateIntervalMinutes);
+  if (autoUpdateIntervalMinutes === null) {
+    return json({ error: IMAGE_UPDATE_INTERVAL_ERROR }, { status: 400 });
+  }
 
   // Validate name format
   if (!/^[a-z][a-z0-9-]*$/.test(name)) {
@@ -91,6 +97,8 @@ export const POST: RequestHandler = route(async (event) => {
     environment: config.environment || null,
     volumes: config.volumes || null,
     restartPolicy: config.restartPolicy || 'always',
+    autoUpdateEnabled: config.autoUpdateEnabled === true,
+    autoUpdateIntervalMinutes,
     // Re-parsed rather than trusted: an exported file is user-editable by the
     // time it comes back, and this value ends up deciding what is public.
     // Anything unreadable degrades to undeclared, which is the safe direction —

@@ -6,6 +6,8 @@
   import EnvVarEditor from '$lib/components/form/EnvVarEditor.svelte';
   import PortMappingEditor from '$lib/components/form/PortMappingEditor.svelte';
   import VolumeMountEditor from '$lib/components/form/VolumeMountEditor.svelte';
+  import ImageUpdateSettings from '$lib/components/form/ImageUpdateSettings.svelte';
+  import { DEFAULT_IMAGE_UPDATE_INTERVAL_MINUTES } from '$lib/image-update-settings';
   import type { EnvVar, PortMapping, VolumeMount } from '$lib/components/form/types';
 
   let { data } = $props();
@@ -14,6 +16,8 @@
   let manifestContent = $state('');
   let manifestErrors = $state<Array<{ message: string; line: number; column: number }>>([]);
   let appName = $state('');
+  let autoUpdateEnabled = $state(false);
+  let autoUpdateIntervalMinutes = $state<number | undefined>(DEFAULT_IMAGE_UPDATE_INTERVAL_MINUTES);
 
   // Source toggle: 'image' or 'git'
   let sourceType = $state<'image' | 'git'>('image');
@@ -556,6 +560,11 @@ stringData:
         {/if}
       </div>
     {/if}
+
+    <ImageUpdateSettings
+      bind:enabled={autoUpdateEnabled}
+      bind:intervalMinutes={autoUpdateIntervalMinutes}
+    />
 
     <!-- ── Public ports (all app types) ───────────────────────── -->
     <div class="form-section">

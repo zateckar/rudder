@@ -251,6 +251,11 @@ export const applications = sqliteTable('applications', {
    * of every deploy before this setting existed.
    */
   retainPreviousMinutes: integer('retain_previous_minutes').notNull().default(0),
+  /** Opt-in checks follow configured image tags and deploy changed digests. */
+  autoUpdateEnabled: integer('auto_update_enabled', { mode: 'boolean' }).notNull().default(false),
+  autoUpdateIntervalMinutes: integer('auto_update_interval_minutes').notNull().default(60),
+  /** Persisted so restarting the control plane does not reset check intervals. */
+  autoUpdateLastCheckedAt: integer('auto_update_last_checked_at', { mode: 'timestamp' }),
   createdBy: text('created_by').references(() => users.id),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),

@@ -2,7 +2,7 @@
  * Shared deploy logic — used by both the deploy API endpoint and the webhook trigger.
  */
 import { db } from '$lib/db';
-import { applications, workers, containers, teams, volumes, secrets, deployments } from '$lib/db/schema';
+import { applications, workers, containers, teams, volumes, secrets, deployments, auditLogs } from '$lib/db/schema';
 import { and, eq, inArray, or, desc } from 'drizzle-orm';
 import { getRestPodmanClient } from '$lib/server/podman-client';
 import type { ContainerInspect } from '$lib/server/podman';
@@ -46,6 +46,8 @@ import {
   serializeCapturedOutput,
 } from '$lib/server/deploy/failure-logs';
 import { pickFreePort } from '$lib/server/ports';
+import { checkDeployQuota } from './quota';
+import { imageUpdateConfigurationIsCurrent, imageUpdateIsDue, resolveApplicationImageUpdate } from './image-updates';
 // Traefik needs the OIDC client secret in the container's labels; Rudder's own
 // database does not, and used to keep a plaintext copy of it there.
 import { redactSecretLabels } from '$lib/server/redaction';
@@ -740,6 +742,8 @@ export async function resolveWorkerSSHConfig(
 }
 
 export interface DeployOptions {
+  /** Check for changed image tags under the worker lock before deploying. */
+  automaticImageUpdate?: boolean;
   /** Corrective deploys must not undo manual application/container stops. */
   respectRuntimeIntent?: boolean;
   /**
@@ -805,10 +809,15 @@ export async function executeApplicationDeploy(
     .where(eq(applications.id, applicationId))
     .get();
 
-  // Fall through unlocked when there is nothing to lock on: `deployApplication`
-  // owns the "no application" / "no worker" messages and there is no shared
-  // resource to contend for in either case.
-  if (!target) return deployApplication(applicationId, deployedByUserId, options);
+  // Never fall through to an unlocked deploy: assignment can change while the
+  // query above is awaiting, including assigning a worker to an undeployed app.
+  if (!target) {
+    const app = await db.select({ workerId: applications.workerId }).from(applications)
+      .where(eq(applications.id, applicationId)).get();
+    if (!app) return { success: false, message: 'Application not found', statusCode: 404 };
+    if (!app.workerId) return { success: false, message: 'No worker assigned to this application', statusCode: 400 };
+    return { success: false, message: 'Worker not found or assignment changed; retry the deployment', statusCode: 404 };
+  }
 
   try {
     return await withLock(
@@ -818,7 +827,7 @@ export async function executeApplicationDeploy(
         holder: `${process.pid}:${crypto.randomUUID()}`,
         ttlMs: deployLockTtlMs(target.app),
       },
-      () => deployApplication(applicationId, deployedByUserId, options),
+      () => deployApplication(applicationId, deployedByUserId, options, target.worker.id),
     );
   } catch (e) {
     if (e instanceof LockError) return busyResult(target.worker.name);
@@ -828,12 +837,16 @@ export async function executeApplicationDeploy(
 
 async function deployApplication(
   applicationId: string,
-  deployedByUserId: string | null = null,
-  options: DeployOptions = {},
+  deployedByUserId: string | null,
+  options: DeployOptions,
+  lockedWorkerId: string,
 ): Promise<DeployResult> {
   const app = await db.select().from(applications).where(eq(applications.id, applicationId)).get();
   if (!app) return { success: false, message: 'Application not found', statusCode: 404 };
-  if (options.respectRuntimeIntent) {
+  if (app.workerId !== lockedWorkerId) {
+    return { success: false, message: 'Worker assignment changed; retry the deployment', statusCode: 409 };
+  }
+  if (options.respectRuntimeIntent || options.automaticImageUpdate) {
     const stopped = await db.select({ id: containers.id }).from(containers)
       .where(and(eq(containers.applicationId, applicationId), eq(containers.state, 'active'), eq(containers.desiredStatus, 'stopped')))
       .get();
@@ -849,6 +862,34 @@ async function deployApplication(
 
   const worker = await db.select().from(workers).where(eq(workers.id, app.workerId)).get();
   if (!worker) return { success: false, message: 'Worker not found', statusCode: 404 };
+
+  let pinnedDigests = options.pinnedDigests;
+  if (options.automaticImageUpdate) {
+    if (!imageUpdateIsDue(app) || worker.status !== 'online') {
+      return { success: true, message: 'Automatic image check skipped' };
+    }
+    // Written inside the lock: contention must not postpone a check that never
+    // ran. Persist attempts too, so registry failures retry at the chosen rate.
+    await db.update(applications).set({ autoUpdateLastCheckedAt: new Date() })
+      .where(eq(applications.id, app.id));
+    const update = await resolveApplicationImageUpdate(app, worker);
+    if (!update) return { success: true, message: 'No new image available' };
+
+    const currentApp = await db.select().from(applications).where(eq(applications.id, app.id)).get();
+    const currentWorker = await db.select().from(workers).where(eq(workers.id, worker.id)).get();
+    if (!currentApp || !imageUpdateConfigurationIsCurrent(app, currentApp) ||
+        !currentWorker || currentWorker.status !== 'online' ||
+        currentWorker.routingRevision !== worker.routingRevision ||
+        currentWorker.podmanApiUrl !== worker.podmanApiUrl ||
+        currentWorker.podmanCaCert !== worker.podmanCaCert ||
+        currentWorker.podmanClientCert !== worker.podmanClientCert ||
+        currentWorker.podmanClientKey !== worker.podmanClientKey) {
+      return { success: true, message: 'Configuration changed during the image check; deployment skipped' };
+    }
+    const quota = await checkDeployQuota(app.teamId, app.id, app.replicas ?? 1);
+    if (!quota.allowed) return { success: false, message: quota.message ?? 'Team quota exceeded', statusCode: 403 };
+    pinnedDigests = update.pinnedDigests;
+  }
 
   const globalOidcConfigured = !!(
     worker.oidcEnabled && worker.oidcProviderUrl && worker.oidcClientId &&
@@ -1054,6 +1095,7 @@ async function deployApplication(
     containers: desired.containers.map((c) => c.planned),
     notes: desired.notes,
   };
+  if (options.automaticImageUpdate) plan.notes.push('Automatically deployed after detecting a new image digest.');
   // Keyed by name, not by key: the replicas of a single-container application
   // all share one key and differ only by name.
   const specHashes = new Map(desired.containers.map((c) => [c.name, c.specHash]));
@@ -1073,9 +1115,9 @@ async function deployApplication(
   // deployment history.
   const deployImage = plan.containers[0]?.image ?? null;
 
-  // Digests recorded by the deployment being restored, if this is a rollback.
-  // Empty for an ordinary deploy, which pins nothing and resolves tags fresh.
-  const requestedDigests = parseDigestRecord(options.pinnedDigests);
+  // Rollback pins the historical bytes; automatic updates pin the bytes just
+  // checked. An ordinary deploy resolves the tags fresh.
+  const requestedDigests = parseDigestRecord(pinnedDigests);
   // Filled in as containers are created, then written back to this deployment
   // row so the next rollback has something to pin to.
   const deployedDigests = new Map<string, string>();
@@ -1096,6 +1138,22 @@ async function deployApplication(
     notes: plan.notes.length > 0 ? JSON.stringify(plan.notes) : null,
     createdAt: new Date(),
   });
+
+  if (options.automaticImageUpdate) {
+    try {
+      await db.insert(auditLogs).values({
+        id: crypto.randomUUID(),
+        teamId: app.teamId,
+        action: 'DEPLOY',
+        resourceType: 'application',
+        resourceId: app.id,
+        details: JSON.stringify({ via: 'image_update', deploymentId, imageDigest: pinnedDigests }),
+        createdAt: new Date(),
+      });
+    } catch (error) {
+      console.error('[image-updates] Failed to write deployment audit log:', error);
+    }
+  }
 
   // Built once and destroyed in the `finally` below. The agent keeps its TLS
   // sockets alive, so abandoning one leaks them for the life of the process —
