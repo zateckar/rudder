@@ -196,6 +196,15 @@ step_cleanup_old() {
   systemctl reset-failed crowdsec-container.service 2>/dev/null || true
   systemctl stop rudder-crowdsec-register.service 2>/dev/null || true
   systemctl reset-failed rudder-crowdsec-register.service 2>/dev/null || true
+  # Stopping the API socket below also stops rudder-container-boot (it
+  # Requires= the socket), and that runs whatever boot script is installed. An
+  # older one stopped every application there, marking each as stopped by a
+  # user, which the current one then refuses to start. Install the current
+  # script first, so that stop leaves the applications running.
+  if [ -f /usr/local/bin/rudder-container-boot.sh ]; then
+    echo "{{CONTAINER_BOOT_SCRIPT_B64}}" | base64 -d > /usr/local/bin/rudder-container-boot.sh
+    chmod +x /usr/local/bin/rudder-container-boot.sh
+  fi
   systemctl stop podman-api-http.service 2>/dev/null || true
   systemctl stop podman-api.service 2>/dev/null || true
   systemctl stop podman-api-socket.service 2>/dev/null || true
@@ -697,8 +706,14 @@ systemctl daemon-reload
 systemctl disable --now podman-restart.service 2>/dev/null || true
 # `--now` so the unit is active on the worker that provisioning just ran on,
 # rather than only after its next boot: `systemctl is-active` is how anyone
-# checks this, and an inactive unit on a healthy worker reads as broken. The
-# ExecStart is a no-op here — everything with a restart policy is already up.
+# checks this, and an inactive unit on a healthy worker reads as broken.
+#
+# The ExecStart is a real start, not a no-op. It starts every container with an
+# `always`/`unless-stopped` policy that the control plane marked as running and
+# that is down, unless a person stopped it (see `may_start`). So it brings back
+# a container that exited by itself, and leaves alone one someone stopped —
+# including a stop made on the worker that the control plane has not yet
+# recorded, which takes it a few minutes.
 systemctl enable --now rudder-container-boot.service
 echo "Restart-policy replay installed (containers return after a worker reboot)"
 

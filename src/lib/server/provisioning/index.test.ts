@@ -1091,6 +1091,17 @@ describe('generateProvisioningScript', () => {
     expect(enableAt).toBeGreaterThan(disableAt);
   });
 
+  test('re-provisioning does not take the applications down', () => {
+    // Stopping the API socket stops the boot unit too (Requires=), and its
+    // ExecStop runs whatever script is installed. The one that stopped every
+    // application must be replaced before that, not after.
+    const boot = blobFor('/usr/local/bin/rudder-container-boot.sh');
+    expect(boot).toContain('if ! host_is_going_down; then');
+    const installAt = script.indexOf('base64 -d > /usr/local/bin/rudder-container-boot.sh');
+    expect(installAt).toBeGreaterThan(-1);
+    expect(installAt).toBeLessThan(script.indexOf('systemctl stop podman-api-socket.service'));
+  });
+
   test('installs the patch-state scan on its own daily timer', () => {
     // apt-get -s upgrade takes seconds and holds the apt lock; it has no
     // business on the 30-second metrics timer.

@@ -819,6 +819,35 @@ export class PodmanClient {
   }
 
   /**
+   * Why a container is not running, from libpod's inspect — the compatible one
+   * leaves `StoppedByUser` out.
+   *
+   * Podman 4.9 sets the flag on `podman stop` and `podman kill`, clears it on
+   * `podman start`, and leaves it false when the process exits by itself. A
+   * reboot clears it too (the state refresh resets every container), so it never
+   * survives into a boot. Only served under a version prefix, like the volume
+   * routes; `null` means the worker has no such route or no such container, and
+   * either way there is nothing to conclude.
+   */
+  async getContainerStopState(id: string): Promise<{
+    status: string; stoppedByUser: boolean; finishedAt: string;
+  } | null> {
+    try {
+      const raw = await this.request<{ State?: { Status?: string; StoppedByUser?: boolean; FinishedAt?: string } }>(
+        `/v4.0.0/libpod/containers/${id}/json`,
+      );
+      return {
+        status: raw.State?.Status ?? '',
+        stoppedByUser: raw.State?.StoppedByUser === true,
+        finishedAt: raw.State?.FinishedAt ?? '',
+      };
+    } catch (err: unknown) {
+      if (PodmanApiError.hasStatus(err, 404)) return null;
+      throw err;
+    }
+  }
+
+  /**
    * Make sure `image` can be run on this worker, and return its resolved name.
    *
    * Extracted from `createContainer`, which is still the main caller, so that an

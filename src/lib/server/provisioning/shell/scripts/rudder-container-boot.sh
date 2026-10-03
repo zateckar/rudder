@@ -16,6 +16,7 @@
 set -uo pipefail
 
 PODMAN=${PODMAN:-/usr/bin/podman}
+SYSTEMCTL=${SYSTEMCTL:-systemctl}
 RUNTIME_INTENT_DIR=${RUNTIME_INTENT_DIR:-/var/lib/rudder/runtime-intent}
 # Matches the drain grace a deploy gives a superseded generation. Long enough
 # for a database to flush, short enough that a reboot is not held hostage —
@@ -33,7 +34,14 @@ ids_for_policy() {
 }
 
 may_start() {
-  local id=$1 marker managed
+  local id=$1 marker managed stopped
+  # Someone stopped it on this host — `podman stop`, Cockpit, Rudder — and has
+  # not started it since. Podman clears the flag on every reboot, so this never
+  # holds anything down at boot; it is what keeps provisioning, or a `systemctl
+  # restart` of this unit, from overriding that person on a live worker before
+  # the control plane has recorded the stop.
+  stopped=$("$PODMAN" inspect --format '{{ .State.StoppedByUser }}' "$id" 2>/dev/null) || return 1
+  [ "$stopped" != true ] || return 1
   marker="$RUNTIME_INTENT_DIR/$id"
   # Markers also cover adopted containers that cannot be relabelled in place.
   if [ -f "$marker" ]; then
@@ -68,8 +76,25 @@ start_all() {
   echo "[rudder] boot: ${started} container(s) with a restart policy"
 }
 
+# True only while the host is shutting down or rebooting.
+host_is_going_down() {
+  [ "$("$SYSTEMCTL" is-system-running 2>/dev/null)" = stopping ] && return 0
+  "$SYSTEMCTL" list-jobs --no-legend 2>/dev/null \
+    | grep -qE '(^|[[:space:]])(shutdown|reboot|poweroff|halt|kexec)\.target([[:space:]]|$)'
+}
+
 stop_all() {
   local policy ids
+  # This unit Requires= the Podman API socket, so systemd also stops it whenever
+  # that socket stops — which provisioning does on every run. Stopping here then
+  # took every application down until provisioning started the unit again, and
+  # left each one marked as stopped by a user (`podman stop` sets the flag that
+  # `may_start` and the control plane read as a person's decision). Applications
+  # are taken down only on the way to a reboot, which clears that flag.
+  if ! host_is_going_down; then
+    echo "[rudder] stop: host is not shutting down; leaving containers running"
+    return
+  fi
   for policy in "${POLICIES[@]}"; do
     # Only the running ones here: `podman stop` on an exited container is an
     # error, and shutdown is not the time to be parsing them.
