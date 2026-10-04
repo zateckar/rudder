@@ -49,7 +49,7 @@ import type { Container, ContainerInspect } from '$lib/server/podman';
 // deploy; keep it out of Rudder's database.
 import { redactSecretLabels } from '$lib/server/redaction';
 import { podmanName } from '$lib/server/reconcile';
-import { assertDomainAvailable } from '$lib/server/domains';
+import { assertDomainAvailable, withApplicationDomainWrite } from '$lib/server/domains';
 
 /** Platform containers. Rudder runs these; they are not applications. */
 const INFRASTRUCTURE = ['traefik', 'crowdsec', 'podman-api'];
@@ -313,6 +313,9 @@ export async function adoptContainers(
           continue;
         }
 
+        const reservationConflict = await withApplicationDomainWrite({
+          id: applicationId, name: appName, workerId, domain, type: 'single', manifest: image,
+        }, async () => {
         await db.insert(applications).values({
           id: applicationId,
           teamId: request.teamId ?? null,
@@ -342,6 +345,11 @@ export async function adoptContainers(
           createdAt: now,
           updatedAt: now,
         });
+        });
+        if (reservationConflict) {
+          result.skipped.push({ containerId: request.containerId, reason: reservationConflict });
+          continue;
+        }
 
         const deploymentId = crypto.randomUUID();
         await db.insert(deployments).values({

@@ -5,6 +5,7 @@ import { eq, desc } from 'drizzle-orm';
 import { executeFastRollback, fastRollbackTargets } from '$lib/server/deploy';
 import { parseCapturedOutput } from '$lib/server/deploy/failure-logs';
 import { canAccessApplication } from '$lib/server/auth';
+import { withApplicationDomainWrite } from '$lib/server/domains';
 
 /** Read the notes column, tolerating rows written before it existed. */
 function parseNotes(raw: string | null): string[] {
@@ -100,6 +101,9 @@ export async function POST({ params, request, cookies }: { params: { id: string 
   }
 
   // Update the application record with the old deployment's config
+  const reservationConflict = await withApplicationDomainWrite({
+    ...access.application, manifest: source.manifest, environment: source.environment,
+  }, async () => {
   await db.update(applications)
     .set({
       manifest: source.manifest,
@@ -108,6 +112,8 @@ export async function POST({ params, request, cookies }: { params: { id: string 
       updatedAt: new Date(),
     })
     .where(eq(applications.id, params.id));
+  });
+  if (reservationConflict) return json({ error: reservationConflict }, { status: 409 });
 
   // Determine next version number
   const lastDeployment = await db.select({ version: deployments.version })

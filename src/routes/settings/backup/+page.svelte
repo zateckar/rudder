@@ -19,6 +19,8 @@
   let backingUp = $state(false);
   let testing = $state(false);
   let restoring = $state(false);
+  let restorePending = $state(false);
+  let backupsError = $state<string | null>(null);
   let testResult = $state<{ success: boolean; message: string } | null>(null);
 
   // Restore confirmation
@@ -38,6 +40,8 @@
         const data = await res.json();
         backupConfig = data.config;
         backups = data.backups || [];
+        backupsError = data.backupsError || null;
+        restorePending = data.restorePending === true;
         if (backupConfig) {
           storageAccountName = backupConfig.storageAccountName;
           containerName = backupConfig.containerName;
@@ -121,6 +125,7 @@
       const result = await res.json();
       if (result.success) {
         configSuccess = result.message;
+        restorePending = true;
       } else {
         configError = result.message;
       }
@@ -140,6 +145,12 @@
 {/if}
 {#if configSuccess}
   <div class="alert alert-success">{configSuccess}</div>
+{/if}
+{#if backupsError}
+  <div class="alert alert-error">{backupsError}</div>
+{/if}
+{#if restorePending}
+  <div class="alert">A backup is staged for restoration. Restart the server to apply it. Changes made before the restart will be kept in the recovery snapshot.</div>
 {/if}
 
 <!-- Status Card -->
@@ -273,7 +284,7 @@
                     </button>
                   </div>
                 {:else}
-                  <button class="btn-danger btn-sm" onclick={() => confirmRestore = backup.name}>
+                    <button class="btn-danger btn-sm" disabled={restorePending} onclick={() => confirmRestore = backup.name}>
                     Restore
                   </button>
                 {/if}

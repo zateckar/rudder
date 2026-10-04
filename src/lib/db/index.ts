@@ -7,6 +7,7 @@ import { dirname, join } from 'path';
 import { getTableColumns, getTableName, is } from 'drizzle-orm';
 import { SQLiteTable } from 'drizzle-orm/sqlite-core';
 import { resolveDbPath, resolveMigrationsDir } from '../server/paths';
+import { applyPendingDatabaseRestore } from '../server/database-restore';
 import * as schema from './schema';
 
 // DATABASE_URL is now honoured; it was previously documented but ignored, so
@@ -21,6 +22,9 @@ if (!existsSync(dbDir)) {
   mkdirSync(dbDir, { recursive: true });
 }
 
+// A restore is staged while serving requests and applied only here, before
+// any live connection or background task can write to the replacement file.
+if (applyPendingDatabaseRestore(dbPath)) console.log('[db] Applied staged database restore.');
 const sqlite = new Database(dbPath);
 sqlite.run('PRAGMA journal_mode = WAL');
 

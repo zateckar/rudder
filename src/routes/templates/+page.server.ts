@@ -2,7 +2,7 @@ import { redirect, fail } from '@sveltejs/kit';
 import { db, safeWorkerColumns } from '$lib/db';
 import { applicationTemplates, applications, teams, teamMembers, workers } from '$lib/db/schema';
 import { eq, inArray, or } from 'drizzle-orm';
-import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
+import { buildAppDomain, assertDomainAvailable, withApplicationDomainWrite } from '$lib/server/domains';
 import {
   type AuthContext,
   canWriteToTeam,
@@ -246,6 +246,11 @@ export const actions = {
 
     const appId = crypto.randomUUID();
 
+    const reservationConflict = await withApplicationDomainWrite({
+      id: appId, name, workerId, domain, type: template.type,
+      manifest: template.manifest, environment: template.environment,
+      restartPolicy: template.restartPolicy, exposedPorts: template.exposedPorts,
+    }, async () => {
     await db.insert(applications).values({
       id: appId,
       name,
@@ -274,6 +279,8 @@ export const actions = {
       createdAt: new Date(),
       updatedAt: new Date(),
     });
+    });
+    if (reservationConflict) return fail(400, { error: reservationConflict });
 
     throw redirect(303, `/applications/${appId}`);
   },

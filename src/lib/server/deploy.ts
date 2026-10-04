@@ -28,6 +28,8 @@ import { decrypt, decryptField } from '$lib/server/encryption';
 import { ensureAppNetwork, teardownAppNetwork } from '$lib/server/networks';
 import { env } from '$lib/server/env';
 import { MountPolicyError, realizeMounts, type MountIntent } from '$lib/server/mounts';
+import { assertDeploymentVolumeAccess } from './deployment-volumes';
+import { AuthorizationError } from './auth';
 // Deploys are serialized per worker; see `workerDeployLock`.
 import { LockError, withLock, workerDeployLock } from '$lib/server/locks';
 import { commitGenerationCutover, revertGenerationCutover, revertRetainedGenerationCutover } from './lifecycle-cutover';
@@ -46,7 +48,8 @@ import {
   serializeCapturedOutput,
 } from '$lib/server/deploy/failure-logs';
 import { pickFreePort } from '$lib/server/ports';
-import { checkDeployQuota } from './quota';
+import { claimDeploymentDomains, DomainReservationError, withApplicationDeploymentDomains } from '$lib/server/domains';
+import { checkDeployQuota, plannedResources, withTeamDeployQuota } from './quota';
 import { imageUpdateConfigurationIsCurrent, imageUpdateIsDue, resolveApplicationImageUpdate } from './image-updates';
 // Traefik needs the OIDC client secret in the container's labels; Rudder's own
 // database does not, and used to keep a plaintext copy of it there.
@@ -742,6 +745,8 @@ export async function resolveWorkerSSHConfig(
 }
 
 export interface DeployOptions {
+  /** Scale the plan before validating quotas; persist only after admission. */
+  replicas?: number;
   /** Check for changed image tags under the worker lock before deploying. */
   automaticImageUpdate?: boolean;
   /** Corrective deploys must not undo manual application/container stops. */
@@ -827,10 +832,14 @@ export async function executeApplicationDeploy(
         holder: `${process.pid}:${crypto.randomUUID()}`,
         ttlMs: deployLockTtlMs(target.app),
       },
-      () => deployApplication(applicationId, deployedByUserId, options, target.worker.id),
+      () => withTeamDeployQuota(target.app.teamId,
+        () => withApplicationDeploymentDomains(applicationId,
+          () => deployApplication(applicationId, deployedByUserId, options, target.worker.id, target.app.teamId))),
     );
   } catch (e) {
     if (e instanceof LockError) return busyResult(target.worker.name);
+    if (e instanceof DomainReservationError) return { success: false, message: e.message, statusCode: 409 };
+    if (e instanceof ManifestError) return { success: false, message: e.message, statusCode: 400 };
     throw e;
   }
 }
@@ -840,11 +849,28 @@ async function deployApplication(
   deployedByUserId: string | null,
   options: DeployOptions,
   lockedWorkerId: string,
+  lockedTeamId: string | null,
 ): Promise<DeployResult> {
-  const app = await db.select().from(applications).where(eq(applications.id, applicationId)).get();
+  let app = await db.select().from(applications).where(eq(applications.id, applicationId)).get();
   if (!app) return { success: false, message: 'Application not found', statusCode: 404 };
   if (app.workerId !== lockedWorkerId) {
     return { success: false, message: 'Worker assignment changed; retry the deployment', statusCode: 409 };
+  }
+  if (app.teamId !== lockedTeamId) {
+    return { success: false, message: 'Team assignment changed; retry the deployment', statusCode: 409 };
+  }
+  if (options.replicas !== undefined) {
+    if ((app.type !== 'single' && app.type !== 'k8s') || !Number.isInteger(options.replicas) || options.replicas < 1 || options.replicas > 10) {
+      return { success: false, message: 'Scaling requires a single container or Kubernetes application and 1–10 replicas', statusCode: 400 };
+    }
+    app = { ...app, replicas: options.replicas };
+    if (app.type === 'k8s' && app.manifest) {
+      try {
+        const manifest = JSON.parse(app.manifest);
+        manifest.spec = { ...manifest.spec, replicas: options.replicas };
+        app = { ...app, manifest: JSON.stringify(manifest) };
+      } catch { /* YAML keeps its existing representation. */ }
+    }
   }
   if (options.respectRuntimeIntent || options.automaticImageUpdate) {
     const stopped = await db.select({ id: containers.id }).from(containers)
@@ -886,8 +912,6 @@ async function deployApplication(
         currentWorker.podmanClientKey !== worker.podmanClientKey) {
       return { success: true, message: 'Configuration changed during the image check; deployment skipped' };
     }
-    const quota = await checkDeployQuota(app.teamId, app.id, app.replicas ?? 1);
-    if (!quota.allowed) return { success: false, message: quota.message ?? 'Team quota exceeded', statusCode: 403 };
     pinnedDigests = update.pinnedDigests;
   }
 
@@ -1121,8 +1145,28 @@ async function deployApplication(
     containers: desired.containers.map((c) => c.planned),
     notes: desired.notes,
   };
+  const domainConflict = await claimDeploymentDomains(
+    plan.containers.flatMap((container) => container.routes.map((route) => route.domain)), app.id,
+  );
+  if (domainConflict) return { success: false, message: domainConflict, statusCode: 409 };
+  const quota = await checkDeployQuota(app.teamId, app.id, plan, {
+    keepInactive: blueGreen,
+    keepActive: blueGreen && retentionMs(app) > 0,
+  });
+  if (!quota.allowed) return { success: false, message: quota.message ?? 'Team quota exceeded', statusCode: 403 };
   if (options.automaticImageUpdate) plan.notes.push('Automatically deployed after detecting a new image digest.');
+  try {
+    await assertDeploymentVolumeAccess(app, worker, plan, getRestPodmanClient(worker));
+  } catch (error) {
+    if (error instanceof AuthorizationError) return { success: false, message: error.message, statusCode: error.statusCode };
+    throw error;
+  }
   // Keyed by name, not by key: the replicas of a single-container application
+  if (options.replicas !== undefined) {
+    await db.update(applications).set({ replicas: options.replicas,
+      ...(app.type === 'k8s' ? { manifest: app.manifest } : {}), updatedAt: new Date() })
+      .where(eq(applications.id, app.id));
+  }
   // all share one key and differ only by name.
   const specHashes = new Map(desired.containers.map((c) => [c.name, c.specHash]));
 
@@ -1337,6 +1381,7 @@ async function deployApplication(
           // produced this container, so a later pass computing the same intent
           // reads it as current without needing to inspect the container.
           specHash: specHashes.get(planned.name) ?? null,
+          ...plannedResources(planned),
           createdAt: new Date(),
           updatedAt: new Date(),
         });

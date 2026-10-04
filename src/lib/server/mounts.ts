@@ -39,7 +39,7 @@ export class MountPolicyError extends Error {
 export type MountIntent =
   /** A directory on the worker's filesystem. Subject to the allow-list. */
   | { kind: 'bind'; source: string; target: string; mode: string }
-  /** A named Podman volume, created on first use. Always permitted. */
+  /** A named Podman volume. Deployment additionally checks tenant access. */
   | { kind: 'volume'; name: string; target: string; mode: string }
   /** Memory-backed and gone when the container stops. */
   | { kind: 'tmpfs'; target: string; options?: string };
@@ -82,9 +82,8 @@ function assertContainerPath(containerPath: string): string {
  * goes. Mounting one bypassed all of that: the container reads and writes the
  * data directly and nothing in this path ever asked whose it was.
  *
- * Only names Rudder composed are refused. A bare `pgdata` names nothing in
- * particular and is left alone — two applications sharing one is a real
- * configuration, and the name carries no claim either way.
+ * This synchronous check covers generated names. Bare names need database and
+ * worker evidence; `assertDeploymentVolumeAccess` checks those before deployment.
  */
 function assertVolumeOwnership(name: string, owner: string | undefined): void {
   if (!owner) return;

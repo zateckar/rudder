@@ -170,21 +170,180 @@ export async function findAppIdByDomain(
 ): Promise<string | null> {
   // Imported lazily so the pure name helpers above stay usable from modules
   // that must not pull in the database singleton.
-  const [{ db }, { applications }, { and, eq, ne }] = await Promise.all([
+  const reservations = await loadDomainReservations();
+  const normalized = domain.toLowerCase();
+  for (const [appId, domains] of reservations) {
+    if (appId !== excludeApplicationId && domains.has(normalized)) return appId;
+  }
+  return null;
+}
+
+/** Inputs that decide public hostnames, shared by persisted rows and write sites. */
+export interface ApplicationDomainInput {
+  id: string;
+  name: string;
+  workerId?: string | null;
+  domain?: string | null;
+  type?: string | null;
+  manifest?: string | null;
+  exposedPorts?: string | null;
+  environment?: string | null;
+  restartPolicy?: string | null;
+  healthcheck?: string | null;
+}
+
+const activeDomains = new Map<string, Set<string>>();
+let domainPolicyTail = Promise.resolve();
+
+/** Queue brief database/claim operations; unrelated workers can deploy in parallel. */
+async function withDomainPolicy<T>(operation: () => Promise<T>): Promise<T> {
+  const previous = domainPolicyTail;
+  let release!: () => void;
+  domainPolicyTail = new Promise<void>((resolve) => { release = resolve; });
+  await previous;
+  try { return await operation(); }
+  finally { release(); }
+}
+
+export class DomainReservationError extends Error {}
+
+/** Reuse the deployment parsers rather than guessing which services are public. */
+export async function applicationPlannedDomains(
+  app: ApplicationDomainInput,
+  worker: { baseDomain?: string | null; hostname?: string | null } | undefined,
+): Promise<Set<string>> {
+  const domains = new Set<string>();
+  if (app.domain) domains.add(app.domain.toLowerCase());
+  if (!app.manifest || !worker) return domains;
+  const [{ buildDeploymentPlan }, { parseExposedPorts }] = await Promise.all([
+    import('./deploy/build'), import('./deploy/plan'),
+  ]);
+  let port = 1;
+  const plan = buildDeploymentPlan({ type: app.type, manifest: app.manifest }, {
+    appId: app.id, appName: app.name, appDomain: app.domain,
+    baseDomain: process.env.TRAEFIK_BASE_DOMAIN || worker.baseDomain || worker.hostname,
+    exposedPorts: parseExposedPorts(app.exposedPorts),
+    environment: app.environment, restartPolicy: app.restartPolicy,
+    healthcheck: app.healthcheck, replicas: 1, allocatePort: () => port++,
+  });
+  for (const container of plan.containers) {
+    for (const route of container.routes) domains.add(route.domain.toLowerCase());
+  }
+  return domains;
+}
+
+async function loadDomainReservations(): Promise<Map<string, Set<string>>> {
+  const [{ db }, { applications, workers, containers }] = await Promise.all([
     import('$lib/db'),
     import('$lib/db/schema'),
-    import('drizzle-orm'),
   ]);
-  const row = await db
-    .select({ id: applications.id })
-    .from(applications)
-    .where(
-      excludeApplicationId
-        ? and(eq(applications.domain, domain), ne(applications.id, excludeApplicationId))
-        : eq(applications.domain, domain),
-    )
-    .get();
-  return row?.id ?? null;
+  const apps = db.select().from(applications).all();
+  const workerRows = db.select().from(workers).all();
+  const containerRows = db.select().from(containers).all();
+  const result = new Map<string, Set<string>>();
+  for (const app of apps) {
+    let domains: Set<string>;
+    try {
+      domains = await applicationPlannedDomains(app, workerRows.find((worker) => worker.id === app.workerId));
+    } catch {
+      // A broken/new manifest must not erase a route still serving traffic.
+      domains = new Set(app.domain ? [app.domain.toLowerCase()] : []);
+    }
+    result.set(app.id, domains);
+  }
+  for (const row of containerRows) {
+    if (!row.applicationId) continue;
+    const domains = result.get(row.applicationId) ?? new Set<string>();
+    if (row.domain) domains.add(row.domain.toLowerCase());
+    try {
+      const routes: unknown = row.routes ? JSON.parse(row.routes) : [];
+      if (Array.isArray(routes)) for (const route of routes) {
+        if (typeof route?.domain === 'string') domains.add(route.domain.toLowerCase());
+      }
+    } catch { /* The legacy domain column remains reserved. */ }
+    result.set(row.applicationId, domains);
+  }
+  for (const [appId, claims] of activeDomains) {
+    const domains = result.get(appId) ?? new Set<string>();
+    for (const domain of claims) domains.add(domain);
+    result.set(appId, domains);
+  }
+  return result;
+}
+
+/** Check all routes together, including routes not yet deployed. */
+export async function assertDomainsAvailable(domains: Iterable<string>, applicationId: string): Promise<string | null> {
+  const reservations = await loadDomainReservations();
+  for (const domain of domains) {
+    const malformed = domainFormatError(domain);
+    if (malformed) return malformed;
+    for (const [owner, ownedDomains] of reservations) {
+      if (owner !== applicationId && ownedDomains.has(domain.toLowerCase())) return domainConflictMessage(domain);
+    }
+  }
+  return null;
+}
+
+/** Recheck the final plan and extend its live claims before worker mutations. */
+export async function claimDeploymentDomains(domains: Iterable<string>, applicationId: string): Promise<string | null> {
+    return await withDomainPolicy(async () => {
+      const desired = [...domains];
+      const conflict = await assertDomainsAvailable(desired, applicationId);
+      if (conflict) return conflict;
+      const claims = activeDomains.get(applicationId);
+      if (!claims) return 'The deployment no longer holds its hostname reservations. Retry the deployment.';
+      for (const domain of desired) claims.add(domain.toLowerCase());
+      return null;
+    });
+}
+
+async function candidateDomains(app: ApplicationDomainInput): Promise<Set<string>> {
+  const [{ db }, { workers }, { eq }] = await Promise.all([
+    import('$lib/db'), import('$lib/db/schema'), import('drizzle-orm'),
+  ]);
+  const worker = app.workerId ? db.select().from(workers).where(eq(workers.id, app.workerId)).get() : undefined;
+  return applicationPlannedDomains(app, worker);
+}
+
+/** Atomic against other writes and deploy claims, without holding a fleet lock during a deploy. */
+export async function withApplicationDomainWrite(
+  app: ApplicationDomainInput,
+  write: () => Promise<unknown>,
+): Promise<string | null> {
+    return await withDomainPolicy(async () => {
+      // An edit during a deploy could change the plan after its domains were claimed.
+      if (activeDomains.has(app.id)) return 'A deployment is running for this application. Retry the edit when it finishes.';
+      let domains: Set<string>;
+      try { domains = await candidateDomains(app); }
+      catch (e) { return e instanceof Error ? e.message : String(e); }
+      const conflict = await assertDomainsAvailable(domains, app.id);
+      if (conflict) return conflict;
+      await write();
+      return null;
+    });
+}
+
+/** Hold only this application's hostnames until its external deployment has finished. */
+export async function withApplicationDeploymentDomains<T>(applicationId: string, deploy: () => Promise<T>): Promise<T> {
+  const [{ db }, { applications }, { eq }] = await Promise.all([
+    import('$lib/db'), import('$lib/db/schema'), import('drizzle-orm'),
+  ]);
+  await withDomainPolicy(async () => {
+    const app = db.select().from(applications).where(eq(applications.id, applicationId)).get();
+    if (!app) throw new DomainReservationError('Application not found');
+    const domains = await candidateDomains(app);
+    const conflict = await assertDomainsAvailable(domains, app.id);
+    if (conflict) throw new DomainReservationError(conflict);
+    if (activeDomains.has(app.id)) throw new DomainReservationError('A deployment is already running for this application.');
+    for (const domain of (await loadDomainReservations()).get(app.id) ?? []) domains.add(domain);
+    activeDomains.set(app.id, domains);
+  });
+  try { return await deploy(); }
+  finally { activeDomains.delete(applicationId); }
+}
+
+function domainConflictMessage(domain: string): string {
+  return `The domain "${domain}" is already in use by another application. Choose a different application name, or set an explicit domain.`;
 }
 
 /**
@@ -215,5 +374,5 @@ export async function assertDomainAvailable(
 
   const owner = await findAppIdByDomain(domain, excludeApplicationId);
   if (!owner) return null;
-  return `The domain "${domain}" is already in use by another application. Choose a different application name, or set an explicit domain.`;
+  return domainConflictMessage(domain);
 }

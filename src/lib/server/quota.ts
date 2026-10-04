@@ -1,122 +1,96 @@
-/**
- * Team resource quota enforcement.
- *
- * Shared by the UI deploy endpoint and the Kubernetes-compatible API so both
- * entry points are held to the same limits — the k8s path previously created
- * and deployed applications without consulting quotas at all.
- */
+/** Team quotas are checked against the executable plan, under the deploy lock. */
 import { db } from '$lib/db';
 import { applications, containers, teamQuotas } from '$lib/db/schema';
 import { eq, inArray } from 'drizzle-orm';
+import type { DeploymentPlan } from './deploy/plan';
+import { withLock } from './locks';
 
-export interface QuotaVerdict {
-  allowed: boolean;
-  /** Human-readable reason, present when `allowed` is false. */
-  message?: string;
-}
-
+export interface QuotaVerdict { allowed: boolean; message?: string; }
 const OK: QuotaVerdict = { allowed: true };
 
-/** Count containers belonging to a set of applications. */
-async function countContainers(appIds: string[]): Promise<number> {
-  if (appIds.length === 0) return 0;
-  const rows = await db
-    .select({ id: containers.id })
-    .from(containers)
-    .where(inArray(containers.applicationId, appIds))
-    .all();
-  return rows.length;
-}
-
-/**
- * Check whether a team may create one more application.
- * Call before inserting a new application row.
- */
-export async function checkApplicationQuota(teamId: string | null): Promise<QuotaVerdict> {
+export function checkApplicationQuota(teamId: string | null): QuotaVerdict {
   if (!teamId) return OK;
-
-  const quota = await db.select().from(teamQuotas).where(eq(teamQuotas.teamId, teamId)).get();
+  const quota = db.select().from(teamQuotas).where(eq(teamQuotas.teamId, teamId)).get();
   if (!quota || quota.maxApplications === null) return OK;
+  const count = db.select({ id: applications.id }).from(applications)
+    .where(eq(applications.teamId, teamId)).all().length;
+  return count >= quota.maxApplications
+    ? { allowed: false, message: `Team quota exceeded: maximum ${quota.maxApplications} applications allowed (currently ${count})` }
+    : OK;
+}
 
-  const teamApps = await db
-    .select({ id: applications.id })
-    .from(applications)
-    .where(eq(applications.teamId, teamId))
-    .all();
+/** The check and insertion must share one synchronous SQLite transaction. */
+export function createApplicationWithQuota(values: typeof applications.$inferInsert): QuotaVerdict {
+  return db.transaction(() => {
+    const quota = checkApplicationQuota(values.teamId ?? null);
+    if (quota.allowed) db.insert(applications).values(values).run();
+    return quota;
+  });
+}
 
-  if (teamApps.length >= quota.maxApplications) {
-    return {
-      allowed: false,
-      message:
-        `Team quota exceeded: maximum ${quota.maxApplications} applications allowed ` +
-        `(currently ${teamApps.length})`,
-    };
-  }
+/** A team can deploy onto several workers; their allocations must not overlap. */
+export function withTeamDeployQuota<T>(teamId: string | null, callback: () => Promise<T>): Promise<T> {
+  return teamId
+    ? withLock(`quota:team:${teamId}`, { operation: 'allocate team deployment resources' }, callback)
+    : callback();
+}
 
-  return OK;
+export interface ContainerResources { cpuLimitCores: number | null; memoryLimitBytes: number | null; }
+type ResourcePlan = Pick<DeploymentPlan['containers'][number], 'memory' | 'cpuQuota' | 'cpuPeriod'>;
+export function plannedResources(container: ResourcePlan): ContainerResources {
+  const period = container.cpuPeriod ?? 100_000;
+  const cpu = container.cpuQuota;
+  return {
+    cpuLimitCores: cpu !== undefined && Number.isFinite(cpu) && cpu > 0 && Number.isFinite(period) && period > 0
+      ? cpu / period : null,
+    memoryLimitBytes: container.memory !== undefined && Number.isFinite(container.memory) && container.memory > 0
+      ? container.memory : null,
+  };
 }
 
 /**
- * Check whether an application may be deployed under its team's quota.
- * Accounts for the replicas this deploy will create.
+ * Replacement quotas describe the resulting workload. Blue/green may overlap
+ * its previous generation during verification; other applications' existing
+ * rows remain charged, including retained containers. Missing rows consume none.
+ * Unknown legacy limits are unbounded, never zero under a finite resource quota.
  */
-export async function checkDeployQuota(
-  teamId: string | null,
-  applicationId: string,
-  replicas = 1,
-): Promise<QuotaVerdict> {
+export async function checkDeployQuota(teamId: string | null, applicationId: string, plan: { containers: readonly ResourcePlan[] },
+  replacement: { containerId?: string; keepInactive?: boolean; keepActive?: boolean } = {}): Promise<QuotaVerdict> {
   if (!teamId) return OK;
-
-  const quota = await db.select().from(teamQuotas).where(eq(teamQuotas.teamId, teamId)).get();
+  const quota = db.select().from(teamQuotas).where(eq(teamQuotas.teamId, teamId)).get();
   if (!quota) return OK;
-
-  const teamApps = await db
-    .select({ id: applications.id })
-    .from(applications)
-    .where(eq(applications.teamId, teamId))
-    .all();
-  const teamAppIds = teamApps.map((a) => a.id);
-
-  if (quota.maxApplications !== null) {
-    const existing = await db
-      .select({ id: containers.id })
-      .from(containers)
-      .where(eq(containers.applicationId, applicationId))
-      .all();
-
-    // Only gate the first deploy: an app already running should stay
-    // redeployable even if the limit was lowered afterwards.
-    if (existing.length === 0 && teamApps.length > quota.maxApplications) {
-      return {
-        allowed: false,
-        message:
-          `Team quota exceeded: maximum ${quota.maxApplications} applications allowed ` +
-          `(currently ${teamApps.length})`,
-      };
+  const apps = db.select({ id: applications.id }).from(applications)
+    .where(eq(applications.teamId, teamId)).all();
+  const rows = apps.length
+    ? db.select().from(containers).where(inArray(containers.applicationId, apps.map((app) => app.id))).all()
+    : [];
+  const present = rows.filter((row) => row.status !== 'missing');
+  if (quota.maxApplications !== null && apps.length > quota.maxApplications &&
+      !present.some((row) => row.applicationId === applicationId)) {
+    return { allowed: false, message: `Team quota exceeded: maximum ${quota.maxApplications} applications allowed (currently ${apps.length})` };
+  }
+  const existing = present.filter((row) => {
+    if (replacement.containerId) return row.id !== replacement.containerId;
+    if (row.applicationId !== applicationId) return true;
+    return row.state === 'active' ? !!replacement.keepActive : !!replacement.keepInactive;
+  });
+  const projectedCount = existing.length + plan.containers.length;
+  if (quota.maxContainers !== null && projectedCount > quota.maxContainers) {
+    return { allowed: false, message: `Team quota exceeded: maximum ${quota.maxContainers} containers allowed (this deploy would bring the team to ${projectedCount})` };
+  }
+  const resources = [...existing, ...plan.containers.map(plannedResources)];
+  for (const [field, limit, label] of [
+    ['cpuLimitCores', quota.maxCpuCores, 'CPU cores'],
+    ['memoryLimitBytes', quota.maxMemoryBytes, 'memory bytes'],
+  ] as const) {
+    if (limit === null) continue;
+    if (resources.some((resource) => resource[field] === null || !Number.isFinite(resource[field]) || resource[field]! <= 0)) {
+      return { allowed: false, message: `Team quota requires explicit finite ${label} limits on every container, including existing applications` };
+    }
+    const total = resources.reduce((sum, resource) => sum + resource[field]!, 0);
+    if (total > limit + (field === 'cpuLimitCores' ? 1e-9 : 0)) {
+      return { allowed: false, message: `Team quota exceeded: maximum ${limit} ${label} allowed (this deploy would bring the team to ${total})` };
     }
   }
-
-  if (quota.maxContainers !== null) {
-    const currentTotal = await countContainers(teamAppIds);
-    const thisApp = await db
-      .select({ id: containers.id })
-      .from(containers)
-      .where(eq(containers.applicationId, applicationId))
-      .all();
-
-    // Redeploy replaces this application's containers, so its current count is
-    // released before the new replicas are created.
-    const projected = currentTotal - thisApp.length + Math.max(1, replicas);
-
-    if (projected > quota.maxContainers) {
-      return {
-        allowed: false,
-        message:
-          `Team quota exceeded: maximum ${quota.maxContainers} containers allowed ` +
-          `(this deploy would bring the team to ${projected})`,
-      };
-    }
-  }
-
   return OK;
 }

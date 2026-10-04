@@ -267,6 +267,7 @@ export interface Container {
 export interface ContainerInspect {
   Id: string;
   Name: string;
+  Mounts?: Array<{ Type?: string; Name?: string; Source?: string; Destination?: string }>;
   Config: {
     Image: string;
     Labels: Record<string, string>;

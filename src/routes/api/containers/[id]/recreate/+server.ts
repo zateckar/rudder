@@ -7,6 +7,7 @@ import { withPodman } from '$lib/server/podman-client';
 import { requireContainer, route } from '$lib/server/auth';
 import { LockError, withLock, workerDeployLock } from '$lib/server/locks';
 import { suppressContainerRestart, restoreContainerRestart } from '$lib/server/runtime-policy';
+import { checkDeployQuota, plannedResources, withTeamDeployQuota } from '$lib/server/quota';
 
 /**
  * Recreate a container from its own inspected config, to apply new resource
@@ -36,24 +37,40 @@ export const POST: RequestHandler = route(async (event) => {
   const cpuQuota = body.cpuQuota;
   const cpuPeriod = body.cpuPeriod;
   const rowId = dbContainer.id;
+  const owner = dbContainer.applicationId
+    ? db.select({ teamId: applications.teamId }).from(applications).where(eq(applications.id, dbContainer.applicationId)).get()
+    : null;
 
   try {
     return await withLock(workerDeployLock(worker.id), {
       operation: `recreate ${dbContainer.name}`,
       holder: crypto.randomUUID(),
-    }, () => withPodman(worker, async (podmanClient) => {
+    }, () => withTeamDeployQuota(owner?.teamId ?? null, () => withPodman(worker, async (podmanClient) => {
       // A Stop may have completed while the request body was being read.
       const dbContainer = await db.select().from(containers).where(eq(containers.id, rowId)).get();
       if (!dbContainer) return json({ error: 'Container not found' }, { status: 404 });
       const app = dbContainer.applicationId
-        ? await db.select({ desiredStatus: applications.desiredStatus }).from(applications)
+        ? await db.select({ desiredStatus: applications.desiredStatus, teamId: applications.teamId }).from(applications)
             .where(eq(applications.id, dbContainer.applicationId)).get()
         : null;
+      if ((app?.teamId ?? null) !== (owner?.teamId ?? null)) {
+        return json({ error: 'Team assignment changed; retry the operation' }, { status: 409 });
+      }
       const shouldStart = dbContainer.state === 'active' && (dbContainer.desiredStatus ?? app?.desiredStatus ?? 'running') === 'running';
       // Inspect current container to get config
       const inspectData = await podmanClient.getContainer(dbContainer.containerId);
       const oldConfig = inspectData.Config;
       const oldHostConfig = inspectData.HostConfig;
+      const resourcePlan = {
+        memory: memory !== undefined ? memory : oldHostConfig.Memory,
+        cpuPeriod: cpuPeriod !== undefined ? cpuPeriod : oldHostConfig.CpuPeriod,
+        cpuQuota: cpuQuota !== undefined ? cpuQuota : oldHostConfig.CpuQuota,
+      };
+      if (dbContainer.applicationId) {
+        const quota = await checkDeployQuota(app?.teamId ?? null, dbContainer.applicationId,
+          { containers: [resourcePlan] }, { containerId: dbContainer.id });
+        if (!quota.allowed) return json({ error: quota.message }, { status: 403 });
+      }
 
       // Optionally pull the latest image first
       if (pullImage) {
@@ -90,9 +107,7 @@ export const POST: RequestHandler = route(async (event) => {
         restartPolicy: oldHostConfig.RestartPolicy?.Name,
         ports: Object.keys(ports).length > 0 ? ports : undefined,
         binds: oldHostConfig.Binds,
-        memory: memory !== undefined ? memory : oldHostConfig.Memory,
-        cpuPeriod: cpuPeriod !== undefined ? cpuPeriod : oldHostConfig.CpuPeriod,
-        cpuQuota: cpuQuota !== undefined ? cpuQuota : oldHostConfig.CpuQuota,
+        ...resourcePlan,
       });
 
       // Bind the new worker marker to the new identity before claiming success.
@@ -100,6 +115,7 @@ export const POST: RequestHandler = route(async (event) => {
         tx.update(containers).set({
           containerId: newContainer.Id,
           status: 'created',
+          ...plannedResources(resourcePlan),
           updatedAt: new Date(),
         }).where(eq(containers.id, dbContainer.id)).run();
         tx.update(workers).set({ routingRevision: sql`${workers.routingRevision} + 1`, configAppliedHash: null })
@@ -118,7 +134,7 @@ export const POST: RequestHandler = route(async (event) => {
       }
 
       return json({ success: true, message: 'Container recreated successfully' });
-    }));
+    })));
   } catch (error) {
     if (error instanceof LockError) {
       return json({ error: 'Another operation is running on this worker. Try again when it finishes.' }, { status: 409 });

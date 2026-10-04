@@ -379,6 +379,9 @@ export const containers = sqliteTable('containers', {
    * hash never reads as stale.
    */
   specHash: text('spec_hash'),
+  /** Actual hard limits at creation; null is unbounded or unknown for legacy rows. */
+  cpuLimitCores: real('cpu_limit_cores'),
+  memoryLimitBytes: integer('memory_limit_bytes'),
   /**
    * Consecutive failed attempts to reap this container, and why the last one
    * failed.

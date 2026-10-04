@@ -43,6 +43,13 @@
       "when": 1790985600000,
       "tag": "0005_automatic_image_updates",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1791078033319,
+      "tag": "0006_deployed_resource_limits",
+      "breakpoints": true
     }
   ]
 }

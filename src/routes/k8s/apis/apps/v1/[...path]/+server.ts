@@ -38,8 +38,8 @@ import {
 import { eq, and } from 'drizzle-orm';
 import { executeApplicationDeploy } from '$lib/server/deploy';
 import { getRestPodmanClient } from '$lib/server/podman-client';
-import { checkApplicationQuota } from '$lib/server/quota';
-import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
+import { createApplicationWithQuota } from '$lib/server/quota';
+import { buildAppDomain, assertDomainAvailable, withApplicationDomainWrite } from '$lib/server/domains';
 import { serializeExposedPorts } from '$lib/server/deploy/plan';
 import { serializeAppsecRules } from '$lib/server/appsec';
 
@@ -192,10 +192,6 @@ export async function POST({
       );
     }
 
-    const quota = await checkApplicationQuota(team.id);
-    if (!quota.allowed) {
-      return k8sError(403, quota.message!, 'Forbidden');
-    }
 
     // Resolve worker
     const worker = await resolveWorker(parsed.workerAnnotation);
@@ -217,7 +213,13 @@ export async function POST({
 
     const appId = crypto.randomUUID();
 
-    await db.insert(applications).values({
+    let quota: ReturnType<typeof createApplicationWithQuota>;
+    const reservationConflict = await withApplicationDomainWrite({
+      id: appId, name: parsed.name, workerId: worker.id, domain, type: parsed.type,
+      manifest: parsed.manifest, environment: parsed.environment, restartPolicy: parsed.restartPolicy,
+      exposedPorts: serializeExposedPorts(parsed.exposedPorts),
+    }, async () => {
+    quota = createApplicationWithQuota({
       id: appId,
       name: parsed.name,
       description: parsed.description || null,
@@ -243,7 +245,10 @@ export async function POST({
       createdAt: new Date(),
       updatedAt: new Date(),
     });
+    });
 
+    if (reservationConflict) return k8sError(409, reservationConflict, 'AlreadyExists');
+    if (!quota!.allowed) return k8sError(403, quota!.message!, 'Forbidden');
     const deployError = await runDeploy(appId, 'create');
 
     const app = await db
@@ -496,10 +501,13 @@ async function handleUpdateDeployment(
   }
   if (parsed.description) updates.description = parsed.description;
 
+  const reservationConflict = await withApplicationDomainWrite({ ...app, ...updates }, async () => {
   await db
     .update(applications)
     .set(updates)
     .where(eq(applications.id, app.id));
+  });
+  if (reservationConflict) return k8sError(409, reservationConflict, 'AlreadyExists');
 
   const deployError = await runDeploy(app.id, 'update');
 
@@ -552,41 +560,15 @@ async function handleUpdateScale(
     );
   }
 
-  // For k8s deployments, update spec.replicas in the stored manifest
-  if (app.type === 'k8s' && app.manifest) {
-    try {
-      const manifestObj = JSON.parse(app.manifest);
-      manifestObj.spec = manifestObj.spec || {};
-      manifestObj.spec.replicas = replicas;
-      await db
-        .update(applications)
-        .set({ replicas, manifest: JSON.stringify(manifestObj), updatedAt: new Date() })
-        .where(eq(applications.id, app.id));
-    } catch {
-      // If manifest is invalid, fall through to the old behavior
-      await db
-        .update(applications)
-        .set({ replicas, updatedAt: new Date() })
-        .where(eq(applications.id, app.id));
+  // The shared operation validates the requested plan before persisting scale.
+  try {
+    const result = await executeApplicationDeploy(app.id, null, { replicas });
+    if (!result.success) {
+      return k8sError(result.statusCode || 500, `Scale failed: ${result.message}`,
+        result.statusCode === 403 ? 'Forbidden' : 'InternalError');
     }
-  } else if (app.type !== 'single') {
-    return k8sError(
-      400,
-      'Scaling is only supported for single-container and k8s deployments',
-    );
-  } else {
-    await db
-      .update(applications)
-      .set({ replicas, updatedAt: new Date() })
-      .where(eq(applications.id, app.id));
-  }
-
-  // Redeploy with new replica count.  A scale failure is reported to the
-  // caller rather than swallowed, so `kubectl scale` cannot report success
-  // for a rollout that never happened.
-  const deployError = await runDeploy(app.id, 'scale');
-  if (deployError) {
-    return k8sError(500, `Scale failed: ${deployError}`, 'InternalError');
+  } catch (error: any) {
+    return k8sError(500, `Scale failed: ${error.message}`, 'InternalError');
   }
 
   const updated = await db

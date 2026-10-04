@@ -1,7 +1,4 @@
 import { json } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { applications } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
 import { executeApplicationDeploy } from '$lib/server/deploy';
 import { canAccessApplication, requireAuth } from '$lib/server/auth';
 
@@ -26,14 +23,9 @@ export async function PATCH({ params, request, cookies }: { params: { id: string
     return json({ error: 'Scaling replicas is only supported for single container applications' }, { status: 400 });
   }
 
-  // Update replicas in DB
-  await db.update(applications)
-    .set({ replicas, updatedAt: new Date() })
-    .where(eq(applications.id, params.id));
-
-  // Redeploy with the new replica count
+  // Validate the requested plan under the deployment locks before saving it.
   try {
-    const result = await executeApplicationDeploy(params.id, ctx.user?.id ?? null);
+    const result = await executeApplicationDeploy(params.id, ctx.user?.id ?? null, { replicas });
     if (!result.success) {
       return json({ error: result.message }, { status: result.statusCode || 500 });
     }

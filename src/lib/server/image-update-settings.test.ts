@@ -77,17 +77,17 @@ describe('image update settings validation', () => {
 test('migration defaults and routing acknowledgement survive scheduling writes', () => {
   const sqlite = new Database(':memory:');
   const journal = JSON.parse(readFileSync('drizzle/meta/_journal.json', 'utf8')) as {
-    entries: Array<{ tag: string }>;
+    entries: Array<{ idx: number; tag: string }>;
   };
   try {
-    for (const { tag } of journal.entries.filter(({ tag }) => !tag.startsWith('0005_'))) {
+    for (const { tag } of journal.entries.filter(({ idx }) => idx < 5)) {
       for (const statement of readFileSync(`drizzle/${tag}.sql`, 'utf8').split('--> statement-breakpoint')) {
         sqlite.run(statement);
       }
     }
     sqlite.run("INSERT INTO workers (id, name, hostname, ssh_user, podman_api_url, created_at) VALUES ('w1', 'one', 'localhost', 'root', 'http://localhost', 0), ('w2', 'two', 'localhost', 'root', 'http://localhost', 0)");
     sqlite.run("INSERT INTO applications (id, worker_id, name, created_at, updated_at) VALUES ('old', 'w1', 'old', 0, 0)");
-    const migration = journal.entries.at(-1)!;
+    const migration = journal.entries.find(({ tag }) => tag === '0005_automatic_image_updates')!;
     expect(migration.tag).toBe('0005_automatic_image_updates');
     for (const statement of readFileSync(`drizzle/${migration.tag}.sql`, 'utf8').split('--> statement-breakpoint')) {
       // Executing every segment also catches empty/comment-only breakpoints.
@@ -181,8 +181,14 @@ describe('image update settings through application forms and configuration file
     expect(created.autoUpdateEnabled).toBe(false);
     expect(created.autoUpdateIntervalMinutes).toBe(60);
     for (const type of ['single', 'compose', 'k8s']) {
+      const manifest = type === 'compose'
+        ? 'services:\n  web:\n    image: nginx:latest\n'
+        : type === 'k8s'
+          ? JSON.stringify({ apiVersion: 'v1', kind: 'Pod', metadata: { name: 'web' },
+              spec: { containers: [{ name: 'web', image: 'nginx:latest' }] } })
+          : 'nginx:latest';
       const created = await create(`image-update-${type}`, {
-        type, autoUpdateEnabled: 'true', autoUpdateIntervalMinutes: '15',
+        type, manifest, autoUpdateEnabled: 'true', autoUpdateIntervalMinutes: '15',
       }) as typeof applications.$inferSelect;
       expect(created.autoUpdateEnabled).toBe(true);
       expect(created.autoUpdateIntervalMinutes).toBe(15);

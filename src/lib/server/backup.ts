@@ -2,10 +2,11 @@ import { db, sqlite } from '$lib/db';
 import { backupConfig } from '$lib/db/schema';
 import { decrypt } from '$lib/server/encryption';
 import { createHmac } from 'crypto';
-import { copyFileSync, readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, unlinkSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { resolveDbPath } from './paths';
+import { hasPendingDatabaseRestore, stageDatabaseRestore } from './database-restore';
 
 /**
  * The database this backs up, and the scratch directory it stages through.
@@ -27,6 +28,8 @@ const DB_PATH = resolveDbPath(join(dirname(fileURLToPath(import.meta.url)), '../
 /** Beside the database, so the staging copy is always on the same volume. */
 const TEMP_DIR = join(dirname(DB_PATH), 'tmp');
 const AZURE_API_VERSION = '2020-10-02';
+
+export function restoreIsPending(): boolean { return hasPendingDatabaseRestore(DB_PATH); }
 
 function getConfig() {
   return db.select().from(backupConfig).get();
@@ -203,13 +206,13 @@ async function updateStatus(status: string) {
 
 export async function listBackups(): Promise<{ name: string; size: number; lastModified: string }[]> {
   const config = getConfig();
-  if (!config) return [];
+  if (!config) throw new Error('Backup not configured');
 
   let accessKey: string;
   try {
     accessKey = decrypt(config.accessKey);
   } catch {
-    return [];
+    throw new Error('Failed to decrypt Azure access key');
   }
 
   const account = config.storageAccountName;
@@ -262,16 +265,19 @@ export async function listBackups(): Promise<{ name: string; size: number; lastM
       },
     });
 
-    if (!response.ok) return [];
+    if (!response.ok) throw new Error(`Azure list failed (${response.status})`);
 
     const xml = await response.text();
     return parseListBlobsXml(xml);
-  } catch {
-    return [];
+  } catch (error) {
+    throw new Error(`Could not list Azure backups: ${(error as Error).message}`);
   }
 }
 
 function parseListBlobsXml(xml: string): { name: string; size: number; lastModified: string }[] {
+  if (!/<EnumerationResults(?:\s|>)/.test(xml) || !/<\/EnumerationResults\s*>/.test(xml)) {
+    throw new Error('Azure returned an unexpected backup listing');
+  }
   const blobs: { name: string; size: number; lastModified: string }[] = [];
   const blobRegex = /<Blob>[\s\S]*?<\/Blob>/g;
   let match;
@@ -292,9 +298,6 @@ function parseListBlobsXml(xml: string): { name: string; size: number; lastModif
   blobs.sort((a, b) => new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime());
   return blobs;
 }
-
-/** The 16 bytes every SQLite file starts with, including the trailing NUL. */
-const SQLITE_MAGIC = Buffer.from('SQLite format 3\0', 'latin1');
 
 export async function restoreBackup(blobName: string): Promise<{ success: boolean; message: string }> {
   const config = getConfig();
@@ -358,49 +361,11 @@ export async function restoreBackup(blobName: string): Promise<{ success: boolea
 
     const buffer = Buffer.from(await response.arrayBuffer());
 
-    // Checked before the live database is overwritten, because this is the one
-    // operation with nothing to fall back on. A truncated download, or an Azure
-    // error document served with a 200, would otherwise be written over
-    // rudder.db and take the installation with it.
-    if (buffer.length < SQLITE_MAGIC.length || !buffer.subarray(0, SQLITE_MAGIC.length).equals(SQLITE_MAGIC)) {
-      return {
-        success: false,
-        message:
-          `"${blobName}" is not a SQLite database (${buffer.length} bytes, wrong header). ` +
-          `Nothing was changed.`,
-      };
-    }
-
-    // Keep the database that is being replaced. A restore aimed at the wrong
-    // backup is otherwise unrecoverable, and the operator finds out after the
-    // restart this instructs them to perform.
-    try {
-      if (existsSync(DB_PATH)) copyFileSync(DB_PATH, `${DB_PATH}.pre-restore`);
-    } catch (e: any) {
-      return {
-        success: false,
-        message: `Could not set the current database aside first (${e.message}). Nothing was changed.`,
-      };
-    }
-
-    writeFileSync(DB_PATH, buffer);
-
-    // The write-ahead log and shared-memory index belong to the database that
-    // was just replaced. Left in place, SQLite replays that WAL over the
-    // restored file on the next open — so the restore is silently undone, or
-    // worse, half-applied. They are removed here rather than left for the
-    // restart to trip over.
-    for (const sidecar of [`${DB_PATH}-wal`, `${DB_PATH}-shm`]) {
-      try {
-        if (existsSync(sidecar)) unlinkSync(sidecar);
-      } catch (e) {
-        console.error('[backup] Could not remove', sidecar, e);
-      }
-    }
+    stageDatabaseRestore(DB_PATH, buffer);
 
     return {
       success: true,
-      message: `Database restored from ${blobName}. Server restart required for changes to take effect.`,
+      message: `Backup ${blobName} validated and staged. Restart the server to apply it. The current database will be preserved as a recovery snapshot before replacement.`,
     };
   } catch (e: any) {
     return { success: false, message: 'Restore failed: ' + e.message };

@@ -7,7 +7,7 @@ import {
   requirePageUser,
   userTeams as allUserTeams,
 } from '$lib/server/auth';
-import { assertDomainAvailable } from '$lib/server/domains';
+import { assertDomainAvailable, withApplicationDomainWrite } from '$lib/server/domains';
 import { ALLOWED_DOMAINS_UNSUPPORTED, normalizeTokenHeader, tokenHeadersError } from '$lib/server/oidc';
 import { DEFAULT_HEALTH_TIMEOUT_S } from '$lib/server/generations';
 import { imageReferenceError } from '$lib/server/image-reference';
@@ -361,6 +361,10 @@ export const actions = {
       nextTeamId = teamId;
     }
 
+    const reservationConflict = await withApplicationDomainWrite({
+      ...app, name, workerId, domain, manifest, environment, restartPolicy,
+      healthcheck, exposedPorts: serializeExposedPorts(exposedPorts),
+    }, async () => {
     await db
       .update(applications)
       .set({
@@ -397,6 +401,8 @@ export const actions = {
         updatedAt: new Date(),
       })
       .where(eq(applications.id, params.id));
+    });
+    if (reservationConflict) return fail(400, { error: reservationConflict });
 
     throw redirect(303, `/applications/${params.id}`);
   },

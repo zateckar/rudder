@@ -4,10 +4,11 @@ import { applications, workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import type { RequestHandler } from './$types';
 import { requireTeam, route } from '$lib/server/auth';
-import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
+import { buildAppDomain, assertDomainAvailable, withApplicationDomainWrite } from '$lib/server/domains';
 import { normalizeTokenHeader, tokenHeaderNameError } from '$lib/server/oidc';
 import { parseExposedPorts, serializeExposedPorts } from '$lib/server/deploy/plan';
 import { IMAGE_UPDATE_INTERVAL_ERROR, parseImageUpdateInterval } from '$lib/image-update-settings';
+import { createApplicationWithQuota } from '$lib/server/quota';
 
 /** A token header name from an imported file, or null if it is unusable. */
 function importedTokenHeader(raw: unknown): string | null {
@@ -84,7 +85,14 @@ export const POST: RequestHandler = route(async (event) => {
 
   const appId = crypto.randomUUID();
 
-  await db.insert(applications).values({
+  let quota: ReturnType<typeof createApplicationWithQuota>;
+  const reservationConflict = await withApplicationDomainWrite({
+    id: appId, name, workerId, domain, type: config.type || 'single', manifest,
+    environment: config.environment || null, restartPolicy: config.restartPolicy || 'always',
+    healthcheck: config.healthcheck || null,
+    exposedPorts: serializeExposedPorts(parseExposedPorts(config.exposedPorts)),
+  }, async () => {
+  quota = createApplicationWithQuota({
     id: appId,
     name,
     description: config.description || null,
@@ -123,6 +131,9 @@ export const POST: RequestHandler = route(async (event) => {
     createdAt: new Date(),
     updatedAt: new Date(),
   });
+  });
 
+  if (reservationConflict) return json({ error: reservationConflict }, { status: 409 });
+  if (!quota!.allowed) return json({ error: quota!.message }, { status: 403 });
   return json({ success: true, applicationId: appId, message: `Application "${name}" imported successfully` });
 });

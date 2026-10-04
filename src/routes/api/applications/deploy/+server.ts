@@ -11,7 +11,6 @@ import {
 } from '$lib/server/deploy/lifecycle';
 import { teardownAppNetwork } from '$lib/server/networks';
 import { canAccessApplication } from '$lib/server/auth';
-import { checkDeployQuota } from '$lib/server/quota';
 import { LockError, withLock, workerDeployLock } from '$lib/server/locks';
 import { suppressContainerRestart, restoreContainerRestart } from '$lib/server/runtime-policy';
 
@@ -74,11 +73,6 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
   try {
     // ──────────────────────── DEPLOY ────────────────────────
     if (action === 'deploy') {
-      const verdict = await checkDeployQuota(app.teamId, applicationId, app.replicas ?? 1);
-      if (!verdict.allowed) {
-        return json({ error: verdict.message }, { status: 403 });
-      }
-
       const deployUserId = ctx.user.id;
 
       // A rollback names the deployment it is restoring, and the digests come

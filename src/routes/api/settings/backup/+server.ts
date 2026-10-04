@@ -3,7 +3,7 @@ import { db } from '$lib/db';
 import { backupConfig } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { encrypt } from '$lib/server/encryption';
-import { performBackup, listBackups, restoreBackup, testConnection } from '$lib/server/backup';
+import { performBackup, listBackups, restoreBackup, restoreIsPending, testConnection } from '$lib/server/backup';
 import type { RequestHandler } from './$types';
 import { requireAdminUser, route } from '$lib/server/auth';
 
@@ -14,10 +14,11 @@ export const GET: RequestHandler = route(async (event) => {
   const config = db.select().from(backupConfig).get();
 
   let backups: { name: string; size: number; lastModified: string }[] = [];
+  let backupsError: string | null = null;
   if (config) {
     try {
       backups = await listBackups();
-    } catch { /* ignore */ }
+    } catch (error) { backupsError = (error as Error).message; }
   }
 
   return json({
@@ -34,6 +35,8 @@ export const GET: RequestHandler = route(async (event) => {
         }
       : null,
     backups,
+    backupsError,
+    restorePending: restoreIsPending(),
   });
 });
 

@@ -3,11 +3,11 @@ import { db, safeUserColumns, toSafeWorker } from '$lib/db';
 import { applications, users, workers, teams, teamMembers, volumes } from '$lib/db/schema';
 import { eq, inArray, or, isNull, and } from 'drizzle-orm';
 import { selectWorker, getAllWorkerResources, getAllEligibleWorkers } from '$lib/server/worker-selector';
-import { buildAppDomain, assertDomainAvailable } from '$lib/server/domains';
+import { buildAppDomain, assertDomainAvailable, withApplicationDomainWrite } from '$lib/server/domains';
 import { ALLOWED_DOMAINS_UNSUPPORTED, normalizeTokenHeader, tokenHeadersError } from '$lib/server/oidc';
 import { imageReferenceError } from '$lib/server/image-reference';
 import { IMAGE_UPDATE_INTERVAL_ERROR, parseImageUpdateFormSettings } from '$lib/image-update-settings';
-import { checkApplicationQuota } from '$lib/server/quota';
+import { createApplicationWithQuota } from '$lib/server/quota';
 import {
   canWriteToTeam,
   currentUser as sessionUser,
@@ -134,10 +134,6 @@ export const actions = {
     // The same limit kubectl is held to. This path did not check it at all, so
     // a team at its application quota was refused by `kubectl apply` and
     // allowed by the New Application button.
-    const quota = await checkApplicationQuota(teamId);
-    if (!quota.allowed) {
-      return fail(400, { error: quota.message ?? 'Team quota exceeded' });
-    }
 
     // Worker selection — use form data or auto-select
     const formWorkerId = formData.get('workerId')?.toString();
@@ -309,7 +305,12 @@ export const actions = {
 
     const appId = crypto.randomUUID();
 
-    await db.insert(applications).values({
+    let quota: ReturnType<typeof createApplicationWithQuota>;
+    const reservationConflict = await withApplicationDomainWrite({
+      id: appId, name, workerId: worker.id, domain, type, manifest, environment,
+      restartPolicy, healthcheck, exposedPorts: serializeExposedPorts(exposedPorts),
+    }, async () => {
+    quota = createApplicationWithQuota({
       id: appId,
       name,
       description,
@@ -341,7 +342,10 @@ export const actions = {
       createdAt: new Date(),
       updatedAt: new Date(),
     });
+    });
 
+    if (reservationConflict) return fail(400, { error: reservationConflict });
+    if (!quota!.allowed) return fail(400, { error: quota!.message ?? 'Team quota exceeded' });
     throw redirect(303, `/applications/${appId}`);
   },
 };
