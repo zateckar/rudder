@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { db } from '$lib/db';
 import { applications, containers, teams, volumes, workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { assertDeploymentVolumeAccess, type VolumeAccessSource } from './deployment-volumes';
+import { assertDeploymentVolumeAccess, bareVolumeAccessForTeam, type VolumeAccessSource } from './deployment-volumes';
 import { desiredState } from './reconcile';
 import { executeApplicationDeploy } from './deploy';
 import { evictPodmanClient } from './podman-client';
@@ -140,6 +140,14 @@ describe('deployment volume authorization', () => {
     await expect(assertDeploymentVolumeAccess(a, f.worker, f.plan(a), f.source([], []))).rejects.toThrow('reserved by another application team');
   });
 
+  test('Kubernetes persistent volume claims receive the same guard', async () => {
+    const f = await fixture();
+    const manifest = 'apiVersion: v1\nkind: Pod\nmetadata:\n  name: db\nspec:\n  containers:\n    - name: db\n      image: postgres:16\n      volumeMounts:\n        - name: data\n          mountPath: /data\n  volumes:\n    - name: data\n      persistentVolumeClaim:\n        claimName: pgdata\n';
+    const a = await f.app(f.owner, { type: 'k8s', manifest });
+    await f.app(f.otherTeam);
+    await expect(assertDeploymentVolumeAccess(a, f.worker, f.plan(a), f.source([], []))).rejects.toThrow('reserved by another application team');
+  });
+
   test('registry references require the same team and assigned worker', async () => {
     const f = await fixture();
     const id = crypto.randomUUID();
@@ -167,6 +175,43 @@ describe('deployment volume authorization', () => {
     await assertDeploymentVolumeAccess(a, f.worker, plan, f.source());
     plan.containers[0].mounts = [{ kind: 'volume', name: 'rudder-00000000-db-data', target: '/data', mode: 'rw' }];
     await expect(assertDeploymentVolumeAccess(a, f.worker, plan, f.source())).rejects.toThrow('belongs to another application');
+  });
+
+  test('suggestions for a new application agree with what its deploy accepts', async () => {
+    // Each case: the worker as the suggestion and the deploy see it, and the
+    // verdict expected for `pgdata` — null when mountable, else the refusal.
+    const cases: { label: string; expected: string | null; setup: (f: Awaited<ReturnType<typeof fixture>>) => Promise<VolumeAccessSource> }[] = [
+      { label: 'mounted by a team container', expected: null, setup: async (f) => f.source([await f.mounted(await f.app())]) },
+      { label: 'on the worker, no longer mounted', expected: 'without an attributable application mount', setup: async (f) => { await f.app(); return f.source([]); } },
+      { label: 'declared by another team, not created', expected: 'reserved by another application team', setup: async (f) => { await f.app(f.otherTeam); return f.source([], []); } },
+      { label: 'mounted by another team', expected: 'outside this application', setup: async (f) => f.source([await f.mounted(await f.app(f.otherTeam))]) },
+      { label: 'mounted by an unrecorded container', expected: 'outside this application', setup: async (f) => f.source([{ ...(await f.mounted(await f.app())), Id: 'unrecorded' }]) },
+    ];
+    for (const c of cases) {
+      const f = await fixture();
+      const source = await c.setup(f);
+      const verdict = (await bareVolumeAccessForTeam(f.owner, f.worker, ['pgdata'], source)).get('pgdata');
+      // The application the suggestion is for, created only afterwards.
+      const created = await f.app();
+      const deploy = assertDeploymentVolumeAccess(created, f.worker, f.plan(created), source);
+      if (c.expected === null) {
+        expect(verdict, c.label).toBeNull();
+        await deploy;
+      } else {
+        expect(verdict, c.label).toContain(c.expected);
+        await expect(deploy, c.label).rejects.toThrow(verdict!);
+      }
+    }
+  });
+
+  test('suggestions leave generated names to the mount policy and fail closed', async () => {
+    const f = await fixture();
+    const generated = 'rudder-00000000-db-data';
+    const source = f.source([], ['pgdata', generated]);
+    source.listVolumes = async () => { throw new Error('connection reset'); };
+    // Generated names never reach the worker.
+    expect((await bareVolumeAccessForTeam(f.owner, f.worker, [generated], source)).get(generated)).toBeNull();
+    await expect(bareVolumeAccessForTeam(f.owner, f.worker, ['pgdata', generated], source)).rejects.toThrow('Could not verify volume ownership');
   });
 
   test('shared deploy refuses foreign data before any destructive worker request', async () => {

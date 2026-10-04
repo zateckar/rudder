@@ -1,6 +1,6 @@
 <script lang="ts">
   import PageHeader from '$lib/components/PageHeader.svelte';
-  import { formatDate } from '$lib/format';
+  import { formatBytes, formatDate } from '$lib/format';
   import { invalidateAll } from '$app/navigation';
   import { showToast } from '$lib/client/toast.svelte';
   import { confirmAction } from '$lib/client/dialog.svelte';
@@ -193,6 +193,10 @@
 
   <!-- Volumes Table -->
   <div class="card">
+    <div class="card-heading">
+      <h2>Registry</h2>
+      <p>Volumes created here and mounted into single-container applications from their form.</p>
+    </div>
     <table class="data-table">
       <thead>
         <tr>
@@ -252,6 +256,110 @@
       </tbody>
     </table>
   </div>
+
+  <!-- Every volume an application uses, whatever it was deployed from. The
+       registry above never covered compose files or Kubernetes manifests, so a
+       compose `./data` — a real volume, holding real data — appeared nowhere. -->
+  <div class="card">
+    <div class="card-heading">
+      <h2>On workers</h2>
+      <p>
+        Every volume an application uses or has left behind, including the ones a compose file or
+        Kubernetes manifest created. Back up, copy or delete them from the application's Storage tab.
+      </p>
+      {#if data.unreachableWorkers.length > 0}
+        <p class="notice">
+          Could not reach {data.unreachableWorkers.join(', ')} — sizes and leftover volumes there are not shown.
+        </p>
+      {/if}
+    </div>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Volume</th>
+          <th>Application</th>
+          <th>Worker</th>
+          <th>Mounted at</th>
+          <th>Usage</th>
+          <th>State</th>
+        </tr>
+      </thead>
+      <tbody>
+        {#each data.appVolumes as v (v.appId + v.name)}
+          <tr>
+            <td class="name-cell" title={v.name}>
+              {v.label}
+              {#if v.label !== v.name}<span class="sub mono">{v.name}</span>{/if}
+            </td>
+            <td><a href="/applications/{v.appId}">{v.appName}</a></td>
+            <td class="text-muted">{v.workerName ?? '—'}</td>
+            <td class="path-cell">
+              {#each v.targets as t}
+                <div>{t.path}{t.mode === 'ro' ? ' (ro)' : ''} <span class="text-muted">· {t.container}</span></div>
+              {:else}
+                <span class="text-muted">—</span>
+              {/each}
+            </td>
+            <td class="text-muted mono">
+              {v.sizeBytes != null ? formatBytes(v.sizeBytes) : '—'}
+              {#if v.copies > 0}<span class="sub">{v.copies} cop{v.copies === 1 ? 'y' : 'ies'}</span>{/if}
+            </td>
+            <td>
+              {#if v.origin === 'foreign'}
+                <span class="state warn" title="The name belongs to another application; deploys refuse to mount it">another application's</span>
+              {:else if !v.declared}
+                <span class="state warn" title="The manifest no longer mentions it, but it still holds data on the worker">left over</span>
+              {:else if !v.present}
+                <span class="state" title="Created on the next deploy">not created yet</span>
+              {:else}
+                <span class="state ok">in use</span>
+              {/if}
+              {#if v.origin === 'shared'}
+                <span class="state" title="Not namespaced to this application — any application on the worker naming it gets the same volume">shared name</span>
+              {/if}
+            </td>
+          </tr>
+        {:else}
+          <tr>
+            <td colspan="6" class="empty-message">No application uses a named volume.</td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+  </div>
+
+  {#if data.unclaimedVolumes && data.unclaimedVolumes.length > 0}
+    <div class="card">
+      <div class="card-heading">
+        <h2>Not used by any application</h2>
+        <p>
+          On a worker, but no application declares it or left it behind — volumes of deleted
+          applications, and anything created on the worker outside Rudder, including the worker's own
+          infrastructure. Shown to administrators only.
+        </p>
+      </div>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Volume</th>
+            <th>Worker</th>
+            <th>Usage</th>
+            <th>Created</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each data.unclaimedVolumes as v (v.workerName + v.name)}
+            <tr>
+              <td class="name-cell mono">{v.name}</td>
+              <td class="text-muted">{v.workerName}</td>
+              <td class="text-muted mono">{v.sizeBytes != null ? formatBytes(v.sizeBytes) : '—'}</td>
+              <td class="text-muted">{v.createdAt ? formatDate(v.createdAt) : '—'}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -318,6 +426,27 @@
   }
 
   .actions-cell { display: flex; gap: 6px; justify-content: flex-end; }
+
+  .card-heading { padding: 16px 16px 4px; }
+  .card-heading h2 { font-size: 15px; font-weight: 600; color: var(--text-primary); margin: 0 0 4px; }
+  .card-heading p { font-size: 12px; color: var(--text-secondary); margin: 0 0 8px; }
+  .card-heading .notice { color: var(--yellow-text); }
+
+  .sub { display: block; font-size: 11px; color: var(--text-muted); font-weight: 400; }
+  .mono { font-family: var(--font-mono); }
+
+  .state {
+    display: inline-block;
+    font-size: 11px;
+    padding: 1px 6px;
+    margin: 1px 4px 1px 0;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-default);
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+  .state.ok { color: var(--green-text); border-color: var(--green); }
+  .state.warn { color: var(--yellow-text); border-color: var(--yellow); }
 
   .empty-message {
     padding: 40px;

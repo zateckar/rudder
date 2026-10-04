@@ -5,6 +5,7 @@ import { eq, inArray } from 'drizzle-orm';
 import { requirePageUser } from '$lib/server/auth';
 import { withPodman } from '$lib/server/podman-client';
 import { registryVolumeName } from '$lib/server/volumes';
+import { storageForApplications, unclaimedVolumes } from '$lib/server/app-volumes';
 
 export const load: PageServerLoad = async (event) => {
   const currentUser = requirePageUser(event).user;
@@ -18,8 +19,11 @@ export const load: PageServerLoad = async (event) => {
 
   // Get volumes (admin sees all, others see their teams')
   let allVolumes: any[] = [];
-  if (currentUser.role === 'admin' && (!urlTeam || urlTeam === 'all')) {
+  let teamApps: (typeof applications.$inferSelect)[] = [];
+  const everything = currentUser.role === 'admin' && (!urlTeam || urlTeam === 'all');
+  if (everything) {
     allVolumes = await db.select().from(volumes).all();
+    teamApps = await db.select().from(applications).all();
   } else {
     let targetTeamIds = teamIds;
     if (urlTeam && urlTeam !== 'all') {
@@ -28,6 +32,7 @@ export const load: PageServerLoad = async (event) => {
 
     if (targetTeamIds.length > 0) {
       allVolumes = await db.select().from(volumes).where(inArray(volumes.teamId, targetTeamIds)).all();
+      teamApps = await db.select().from(applications).where(inArray(applications.teamId, targetTeamIds)).all();
     } else {
       allVolumes = [];
     }
@@ -51,11 +56,54 @@ export const load: PageServerLoad = async (event) => {
   // namespaced per application, so a size can only be attributed once the
   // application mounting it is known. Rows are matched by the suffix its
   // application prefix produces — see `registryVolumeName`.
-  const enrichedVolumes = await withActualSizes(allVolumes);
+  //
+  // ── What is actually on the workers ───────────────────────────────────────
+  //
+  // The registry is only the volumes someone created on this page. A compose
+  // file's `./data` or `models:` is a real Podman volume as well — created by
+  // the deploy, holding data, costing disk — and this page did not list a
+  // single one of them. They are read out of the same intent the deploy acts
+  // on, via `storageForApplications`, which asks each worker once. Both go out
+  // together, so the page waits for the slowest worker once rather than twice.
+  const [enrichedVolumes, fleet] = await Promise.all([
+    withActualSizes(allVolumes),
+    storageForApplications(teamApps, { sizes: true }),
+  ]);
+  const appVolumes = fleet.applications.flatMap(({ app, worker, storage }) =>
+    storage.volumes.map((v) => ({
+      appId: app.id,
+      appName: app.name,
+      teamId: app.teamId,
+      workerName: worker?.name ?? null,
+      name: v.name,
+      label: v.label,
+      origin: v.origin,
+      declared: v.declared,
+      present: v.present,
+      sizeBytes: v.sizeBytes,
+      targets: v.targets,
+      copies: v.copies.length,
+    })),
+  );
+  const unreachableWorkers = [...fleet.workers.values()]
+    .filter((w) => w.unreachable)
+    .map((w) => w.worker.name);
 
   return {
     user: currentUser,
     volumes: enrichedVolumes,
+    appVolumes,
+    // Only when every application was in the fleet: with a partial list, a
+    // neighbour's volume would read as nobody's. See `unclaimedVolumes`.
+    unclaimedVolumes: everything
+      ? unclaimedVolumes(fleet).map((v) => ({
+          workerName: v.worker.name,
+          name: v.name,
+          sizeBytes: v.sizeBytes,
+          createdAt: v.createdAt,
+        }))
+      : null,
+    unreachableWorkers,
     teams: allTeams,
     workers: allWorkers,
   };

@@ -411,6 +411,118 @@
     }
   });
 
+  // ── Pruning old versions ──────────────────────────────────────────────────
+  //
+  // Old deployment rows and the images only they used, removed together. The
+  // server decides what is safe — see `deployment-prune.ts` — and is asked for a
+  // preview first, so the confirmation names versions and megabytes rather than
+  // describing a rule.
+  interface PrunePreview {
+    deployments: { id: string; version: number; status: string }[];
+    keptAnyway: { id: string; version: number; reason: 'current' | 'containers' | 'in progress' }[];
+    images: { id: string; refs: string[]; sizeBytes: number }[];
+    reclaimableBytes: number;
+    applied: boolean;
+    removedImages: string[];
+    skippedImages: { id: string; reason: string }[];
+  }
+
+  let pruneKeep = $state(5);
+  let pruneBusy = $state(false);
+
+  /** `v1–v4, v7` rather than seven separate numbers. */
+  function versionRanges(versions: number[]): string {
+    const sorted = [...versions].sort((a, b) => a - b);
+    const parts: string[] = [];
+    for (let i = 0; i < sorted.length; i++) {
+      let j = i;
+      while (j + 1 < sorted.length && sorted[j + 1] === sorted[j] + 1) j++;
+      parts.push(j > i ? `v${sorted[i]}–v${sorted[j]}` : `v${sorted[i]}`);
+      i = j;
+    }
+    return parts.join(', ');
+  }
+
+  const KEPT_REASON: Record<PrunePreview['keptAnyway'][number]['reason'], string> = {
+    current: 'serving now',
+    containers: 'its containers are still on the worker',
+    'in progress': 'not finished',
+  };
+
+  async function pruneDeployments() {
+    const keep = Math.max(1, Math.floor(Number(pruneKeep) || 1));
+    pruneBusy = true;
+    try {
+      const base = `/api/applications/${data.application.id}/deployments/prune`;
+      const res = await fetch(`${base}?keep=${keep}`);
+      const preview: PrunePreview & { error?: string } = await res.json();
+      if (!res.ok) {
+        showToast('error', preview.error || 'Could not work out what to prune');
+        return;
+      }
+      if (preview.deployments.length === 0 && preview.images.length === 0) {
+        showToast('success', `Nothing to prune — keeping the newest ${keep} leaves nothing older to remove.`);
+        return;
+      }
+
+      const parts: string[] = [];
+      if (preview.deployments.length > 0) {
+        parts.push(
+          `${preview.deployments.length} deployment record${preview.deployments.length === 1 ? '' : 's'} ` +
+            `(${versionRanges(preview.deployments.map((d) => d.version))}) will be deleted from the history.`,
+        );
+      }
+      parts.push(
+        preview.images.length > 0
+          ? `${preview.images.length} image${preview.images.length === 1 ? '' : 's'} only they used will be ` +
+              `removed from the worker, freeing about ${formatBytes(preview.reclaimableBytes)}.`
+          : 'No images are removed: every image they used is still needed by a kept version, a container, or another application.',
+      );
+      if (preview.keptAnyway.length > 0) {
+        parts.push(
+          'Kept although older: ' +
+            preview.keptAnyway.map((k) => `v${k.version} (${KEPT_REASON[k.reason]})`).join(', ') + '.',
+        );
+      }
+      parts.push('Pruned versions can no longer be rolled back to. There is no undo.');
+
+      const ok = await confirmAction({
+        title: `Prune all but the newest ${keep} deployment${keep === 1 ? '' : 's'}?`,
+        body: parts.join(' '),
+        confirmLabel: 'Prune',
+        danger: true,
+      });
+      if (!ok) return;
+
+      const done = await fetch(base, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keep }),
+      });
+      const result: PrunePreview & { error?: string } = await done.json();
+      if (!done.ok) {
+        showToast('error', result.error || 'Prune failed');
+        return;
+      }
+      const freed = result.images
+        .filter((i) => result.removedImages.includes(i.id))
+        .reduce((s, i) => s + i.sizeBytes, 0);
+      showToast(
+        result.skippedImages.length > 0 ? 'error' : 'success',
+        `Pruned ${result.deployments.length} deployment${result.deployments.length === 1 ? '' : 's'} and ` +
+          `${result.removedImages.length} image${result.removedImages.length === 1 ? '' : 's'} (${formatBytes(freed)}).` +
+          (result.skippedImages.length > 0
+            ? ` ${result.skippedImages.length} image${result.skippedImages.length === 1 ? ' was' : 's were'} left in place: ${result.skippedImages[0].reason}`
+            : ''),
+      );
+      await fetchDeployments();
+    } catch (e: any) {
+      showToast('error', e.message || 'Prune failed');
+    } finally {
+      pruneBusy = false;
+    }
+  }
+
   // ── Web firewall ──────────────────────────────────────────────────────────
   //
   // The same evidence the worker page shows, scoped to this application and
@@ -1877,6 +1989,19 @@
     {:else if deploymentsList.length === 0}
       <div class="empty-row"><p>No deployments recorded yet.</p></div>
     {:else}
+      <div class="storage-bar">
+        <span class="storage-summary">
+          {deploymentsList.length} deployment{deploymentsList.length === 1 ? '' : 's'} recorded
+        </span>
+        <div class="prune-controls">
+          <label for="pruneKeep">Keep newest</label>
+          <input id="pruneKeep" type="number" min="1" max="50" bind:value={pruneKeep} disabled={pruneBusy} />
+          <button class="btn-act" onclick={pruneDeployments} disabled={pruneBusy || rollbackBusy !== null}
+            title="Delete older deployment records and remove the images only they used from the worker">
+            {pruneBusy ? 'Pruning…' : 'Prune older versions…'}
+          </button>
+        </div>
+      </div>
       <div class="deployments-list">
         <table class="deployments-table">
           <thead>
@@ -3051,6 +3176,8 @@
   .field-hint { margin: 6px 0 0; font-size: 12px; color: var(--text-muted); }
 
   /* ── Deployments tab ──────────────────────────────────────────────── */
+  .prune-controls { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); }
+  .prune-controls input { width: 60px; padding: 3px 6px; font-size: 12px; }
   .deployments-list {
     background: var(--bg-raised); border: 1px solid var(--border-subtle);
     border-radius: var(--radius-lg); overflow: hidden;

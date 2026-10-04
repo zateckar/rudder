@@ -715,8 +715,8 @@ to be discovered:
 | `configMap` / `secret` volume | Delivered as files at the mount path, on a tmpfs, before the container starts. Secret data is decoded and lands at mode 0400, so it never reaches the worker's disk or `podman inspect`. |
 | `envFrom`, `configMapKeyRef`, `secretKeyRef` | Resolved against ConfigMaps and Secrets **declared in the same manifest**. There is no cluster to look anything else up in, so a reference to an object that is not there is refused unless it is marked `optional`. |
 | `hostPath` | Allowed only under `ALLOWED_HOST_MOUNT_PREFIXES`, and refused by name otherwise. |
-| `persistentVolumeClaim`, `nfs`, `projected`, `downwardAPI`, `csi`, `ephemeral` | Refused, naming the kind. |
-| Persistent storage generally | There is none from a Kubernetes manifest: the kinds above are the only ones that ask for it, and they are refused. A Kubernetes application therefore has no named volumes to back up — its Storage tab lists only its binds and tmpfs mounts. Use `hostPath` under an allowed prefix, or deploy that part as a compose service. |
+| `persistentVolumeClaim` | A named Podman volume on the worker, called `claimName` — the same thing a compose file's `models:/models` is. An existing volume of that name is mounted as it stands, which is how a manifest reuses one; otherwise it is created empty on first use and kept across redeploys. The name is used as written, so a name Rudder generated for another application is refused. A `PersistentVolumeClaim` document is accepted and needs nothing done. |
+| `nfs`, `projected`, `downwardAPI`, `csi`, `ephemeral` | Refused, naming the kind. |
 | `fieldRef`, `resourceFieldRef` | Refused. They describe a Pod that does not exist here. |
 | `subPath` on a volume mount | Refused. |
 | `command` / `args` | Mapped onto the container's entrypoint and command — the same split OCI makes, under swapped names. |

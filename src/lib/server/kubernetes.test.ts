@@ -510,13 +510,34 @@ data:
     expect(c.mounts).toHaveLength(1);
   });
 
+  test('mounts a persistentVolumeClaim as the named volume it claims', () => {
+    // The claim is the volume: an existing one on the worker is mounted as it
+    // stands, which is how a Kubernetes application reuses one.
+    const [c] = parseK8sManifest(
+      podWith('    - name: data\n      persistentVolumeClaim:\n        claimName: models'),
+      'store',
+    );
+    expect(c.mounts).toEqual([{ kind: 'volume', name: 'models', target: '/data', mode: 'rw' }]);
+  });
+
+  test('mounts a read-only claim read-only', () => {
+    const [c] = parseK8sManifest(
+      podWith('    - name: data\n      persistentVolumeClaim:\n        claimName: models\n        readOnly: true'),
+      'store',
+    );
+    expect(c.mounts).toEqual([{ kind: 'volume', name: 'models', target: '/data', mode: 'ro' }]);
+  });
+
+  test('refuses a claim with no name', () => {
+    expect(() =>
+      parseK8sManifest(podWith('    - name: data\n      persistentVolumeClaim: {}'), 'store'),
+    ).toThrow(/no claimName/);
+  });
+
   test('refuses a volume kind that needs a cluster behind it', () => {
     expect(() =>
-      parseK8sManifest(
-        podWith('    - name: data\n      persistentVolumeClaim:\n        claimName: pvc'),
-        'store',
-      ),
-    ).toThrow(/persistentVolumeClaim volume/);
+      parseK8sManifest(podWith('    - name: data\n      nfs:\n        server: nas\n        path: /x'), 'store'),
+    ).toThrow(/nfs volume/);
   });
 
   test('refuses a mount of a volume the Pod never declared', () => {

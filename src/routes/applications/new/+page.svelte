@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import { formatBytes } from '$lib/format';
   import { enhance } from '$app/forms';
@@ -7,6 +8,7 @@
   import PortMappingEditor from '$lib/components/form/PortMappingEditor.svelte';
   import VolumeMountEditor from '$lib/components/form/VolumeMountEditor.svelte';
   import ImageUpdateSettings from '$lib/components/form/ImageUpdateSettings.svelte';
+  import ExistingVolumes from '$lib/components/form/ExistingVolumes.svelte';
   import { DEFAULT_IMAGE_UPDATE_INTERVAL_MINUTES } from '$lib/image-update-settings';
   import type { EnvVar, PortMapping, VolumeMount } from '$lib/components/form/types';
 
@@ -82,6 +84,10 @@
 
   // Auto-selected worker
   let selectedWorker = $derived(data.selectedWorker);
+  // Bound to the selects so the existing-volume suggestions can follow them.
+  // The recommendation is only the starting value; after that the select owns it.
+  let teamId = $state('');
+  let workerId = $state(untrack(() => data.selectedWorker?.id ?? ''));
   let previewDomain = $derived(
     appName && selectedWorker?.baseDomain
       ? `${appName}.${selectedWorker.baseDomain}`
@@ -212,9 +218,9 @@ spec:
       volumes:
         # emptyDir, configMap and secret work as written. A hostPath works too,
         # but only under a prefix an operator has allow-listed on the worker.
-        # There is no persistentVolumeClaim: Rudder has no storage layer behind
-        # one, and a manifest using it is refused at deploy time rather than
-        # deployed with the mount quietly missing.
+        # For storage that outlives the container, a persistentVolumeClaim's
+        # claimName is a named volume on the worker — an existing one is
+        # mounted as it stands, a new one is created empty on first deploy.
         - name: cache
           emptyDir:
             sizeLimit: 64Mi
@@ -337,7 +343,7 @@ stringData:
       <div class="form-row">
         <div class="form-group">
           <label for="teamId">Team <span class="required">*</span></label>
-          <select id="teamId" name="teamId" required>
+          <select id="teamId" name="teamId" required bind:value={teamId}>
             <option value="">Select a team…</option>
             {#each data.teams as team}
               <option value={team.id}>{team.name}</option>
@@ -353,9 +359,9 @@ stringData:
               <p class="no-worker-hint">All workers are above 85% utilization or offline. Contact an admin to add capacity.</p>
             </div>
           {:else}
-            <select id="workerId" name="workerId" class="worker-select">
+            <select id="workerId" name="workerId" class="worker-select" bind:value={workerId}>
               {#each data.allWorkers as w}
-                <option value={w.worker.id} selected={w.worker.id === selectedWorker?.id}>
+                <option value={w.worker.id}>
                   {w.worker.name} — {w.worker.baseDomain}
                   {w.worker.id === selectedWorker?.id ? ' (recommended)' : ''}
                 </option>
@@ -559,6 +565,13 @@ stringData:
           </div>
         {/if}
       </div>
+
+      <ExistingVolumes
+        {workerId}
+        {teamId}
+        appType={appType === 'k8s' ? 'k8s' : 'compose'}
+        bind:manifest={manifestContent}
+      />
     {/if}
 
     <ImageUpdateSettings

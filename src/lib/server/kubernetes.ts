@@ -84,8 +84,9 @@ export interface K8sVolume {
   hostPath?: { path: string };
   configMap?: { name: string; items?: K8sKeyToPath[]; defaultMode?: number; optional?: boolean };
   secret?: { secretName: string; items?: K8sKeyToPath[]; defaultMode?: number; optional?: boolean };
+  /** A named Podman volume on the worker, called `claimName`. */
+  persistentVolumeClaim?: { claimName?: string; readOnly?: boolean };
   // Declared so they can be refused by name rather than dropped.
-  persistentVolumeClaim?: { claimName?: string };
   nfs?: unknown;
   projected?: unknown;
   downwardAPI?: unknown;
@@ -139,7 +140,6 @@ function collectManifestObjects(docs: any[]): ManifestObjects {
  * the user to work out which of their volumes went missing.
  */
 const UNSUPPORTED_VOLUME_KINDS = [
-  'persistentVolumeClaim',
   'nfs',
   'projected',
   'downwardAPI',
@@ -542,6 +542,27 @@ function parseK8sContainer(
       continue;
     }
 
+    if (declared.persistentVolumeClaim) {
+      // There is no storage layer to bind a claim against, so the claim *is* the
+      // volume: `claimName` names a Podman volume on the worker, exactly as a
+      // compose file's `models:/models` does — an existing one is mounted as it
+      // stands, and a new one is created empty on first use and kept across
+      // redeploys. The name is used as written, so it goes through the same
+      // ownership check as a compose source: a name Rudder generated for
+      // another application is refused at deploy time.
+      const claim = declared.persistentVolumeClaim.claimName;
+      if (!claim) {
+        throw new ManifestError(`${at}, a persistentVolumeClaim with no claimName.`);
+      }
+      mounts.push({
+        kind: 'volume',
+        name: claim,
+        target: vm.mountPath,
+        mode: vm.readOnly || declared.persistentVolumeClaim.readOnly ? 'ro' : 'rw',
+      });
+      continue;
+    }
+
     if (declared.emptyDir !== undefined && declared.emptyDir !== null) {
       // An emptyDir is shared between the containers of a Pod. Rudder's
       // containers do not share a namespace, so two of them mounting one
@@ -598,8 +619,8 @@ function parseK8sContainer(
     throw new ManifestError(
       kind
         ? `${at}, which is a ${kind} volume. Rudder has no storage layer behind that — ` +
-          `use a hostPath under an allowed prefix, an emptyDir, or a ConfigMap or Secret ` +
-          `declared in this manifest.`
+          `use a persistentVolumeClaim (a named volume on the worker), a hostPath under an ` +
+          `allowed prefix, an emptyDir, or a ConfigMap or Secret declared in this manifest.`
         : `${at}, but that volume declares no source Rudder recognises.`,
     );
   }
@@ -731,7 +752,9 @@ export function validateK8sManifest(manifest: string): { valid: boolean; errors:
       return { valid: false, errors };
     }
     
-    const supportedKinds = ['pod', 'deployment', 'service', 'configmap', 'secret', 'ingress'];
+    // A PersistentVolumeClaim document is accepted and needs nothing done: the
+    // volume a Pod's claim names is created on first use. See `parseK8sContainer`.
+    const supportedKinds = ['pod', 'deployment', 'service', 'configmap', 'secret', 'ingress', 'persistentvolumeclaim'];
     
     for (const doc of docs) {
       if (!doc.kind) {

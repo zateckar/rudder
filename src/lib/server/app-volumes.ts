@@ -362,54 +362,88 @@ export async function appStorage(
   worker: typeof workers.$inferSelect | null,
   { sizes = false }: { sizes?: boolean } = {},
 ): Promise<AppStorage> {
-  const registry = await referencedRegistry(app.id, app.volumes);
-
   const team = app.teamId
     ? await db.select().from(teams).where(eq(teams.id, app.teamId)).get()
     : null;
 
-  let desired: DesiredApp | null = null;
-  let manifestError: string | null = null;
-  if (worker) {
-    try {
-      desired = desiredState({
-        app,
-        worker,
-        team: team ?? null,
-        volumeRegistry: registry.forDesiredState,
-      });
-    } catch (e: unknown) {
-      // A manifest that stopped parsing must not hide the data it left behind.
-      manifestError =
-        e instanceof ManifestError || e instanceof Error ? e.message : String(e);
-    }
-  }
+  if (!worker) return storageFromSnapshot(app, null, team ?? null, null);
 
-  if (!worker) {
-    return buildAppStorage({
-      appId: app.id,
-      desired: null,
-      manifestError,
-      registry: registry.entries,
-      snapshot: null,
-      unreachable: 'This application is not assigned to a worker, so it has no storage yet.',
-    });
-  }
+  const read = await readWorkerVolumes(worker, sizes);
+  return storageFromSnapshot(app, worker, team ?? null, read);
+}
 
-  let snapshot: WorkerVolumeSnapshot | null = null;
-  let unreachable: string | null = null;
+/** One worker's volumes, or why they could not be listed. */
+interface WorkerVolumeRead {
+  snapshot: WorkerVolumeSnapshot | null;
+  unreachable: string | null;
+}
+
+/**
+ * `listVolumes`, and `system/df` when sizes are wanted, sent together.
+ *
+ * Never throws: a worker that cannot be asked is described rather than raised,
+ * because every caller still has a declared list worth showing.
+ */
+async function readWorkerVolumes(
+  worker: typeof workers.$inferSelect,
+  sizes: boolean,
+): Promise<WorkerVolumeRead> {
   try {
-    snapshot = await withPodman(worker, async (client) => {
+    const snapshot = await withPodman(worker, async (client) => {
       const [volumes, usage] = await Promise.all([
         client.listVolumes(),
         sizes ? client.volumeUsage() : Promise.resolve(null),
       ]);
       return { volumes, usage };
     });
+    return { snapshot, unreachable: null };
   } catch (e: unknown) {
-    unreachable =
-      `Worker "${worker.name}" could not be reached, so sizes and any volumes left behind by a ` +
-      `previous configuration are not shown: ${e instanceof Error ? e.message : String(e)}`;
+    return {
+      snapshot: null,
+      unreachable:
+        `Worker "${worker.name}" could not be reached, so sizes and any volumes left behind by a ` +
+        `previous configuration are not shown: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+}
+
+/**
+ * An application's storage against a worker listing that has already been
+ * taken — the half of `appStorage` that does not talk to the worker, so a
+ * caller covering many applications on one worker asks it once.
+ */
+async function storageFromSnapshot(
+  app: typeof applications.$inferSelect,
+  worker: typeof workers.$inferSelect | null,
+  team: typeof teams.$inferSelect | null,
+  read: WorkerVolumeRead | null,
+): Promise<AppStorage> {
+  const registry = await referencedRegistry(app.id, app.volumes);
+
+  if (!worker) {
+    return buildAppStorage({
+      appId: app.id,
+      desired: null,
+      manifestError: null,
+      registry: registry.entries,
+      snapshot: null,
+      unreachable: 'This application is not assigned to a worker, so it has no storage yet.',
+    });
+  }
+
+  let desired: DesiredApp | null = null;
+  let manifestError: string | null = null;
+  try {
+    desired = desiredState({
+      app,
+      worker,
+      team,
+      volumeRegistry: registry.forDesiredState,
+    });
+  } catch (e: unknown) {
+    // A manifest that stopped parsing must not hide the data it left behind.
+    manifestError =
+      e instanceof ManifestError || e instanceof Error ? e.message : String(e);
   }
 
   return buildAppStorage({
@@ -417,9 +451,106 @@ export async function appStorage(
     desired,
     manifestError,
     registry: registry.entries,
-    snapshot,
-    unreachable,
+    snapshot: read?.snapshot ?? null,
+    unreachable: read?.unreachable ?? null,
   });
+}
+
+/** One application's storage, as `storageForApplications` returns it. */
+export interface ApplicationStorage {
+  app: typeof applications.$inferSelect;
+  worker: typeof workers.$inferSelect | null;
+  storage: AppStorage;
+}
+
+/** What `storageForApplications` found, per application and per worker. */
+export interface FleetStorage {
+  applications: ApplicationStorage[];
+  /** Keyed by worker id. Absent for a worker none of the applications run on. */
+  workers: Map<string, { worker: typeof workers.$inferSelect } & WorkerVolumeRead>;
+}
+
+/**
+ * `appStorage` for many applications at once, asking each worker one time.
+ *
+ * The per-application route asks its worker for every call, which is right for
+ * one application and wasteful for a page listing a whole fleet: ten compose
+ * applications on one worker would be ten `system/df` sweeps of the same
+ * storage tree. Workers are asked in parallel; one that cannot be reached marks
+ * its own applications unreachable and leaves the rest alone.
+ */
+export async function storageForApplications(
+  apps: (typeof applications.$inferSelect)[],
+  { sizes = false }: { sizes?: boolean } = {},
+): Promise<FleetStorage> {
+  const workerIds = [...new Set(apps.map((a) => a.workerId).filter((id): id is string => !!id))];
+  const teamIds = [...new Set(apps.map((a) => a.teamId).filter((id): id is string => !!id))];
+
+  const [workerRows, teamRows] = await Promise.all([
+    workerIds.length
+      ? db.select().from(workers).where(inArray(workers.id, workerIds)).all()
+      : Promise.resolve([]),
+    teamIds.length
+      ? db.select().from(teams).where(inArray(teams.id, teamIds)).all()
+      : Promise.resolve([]),
+  ]);
+  const teamById = new Map(teamRows.map((t) => [t.id, t]));
+
+  const reads = new Map<string, { worker: typeof workers.$inferSelect } & WorkerVolumeRead>();
+  await Promise.all(
+    workerRows.map(async (worker) => {
+      reads.set(worker.id, { worker, ...(await readWorkerVolumes(worker, sizes)) });
+    }),
+  );
+
+  const results: ApplicationStorage[] = [];
+  for (const app of apps) {
+    const read = app.workerId ? reads.get(app.workerId) ?? null : null;
+    const worker = read?.worker ?? null;
+    const team = app.teamId ? teamById.get(app.teamId) ?? null : null;
+    results.push({ app, worker, storage: await storageFromSnapshot(app, worker, team, read) });
+  }
+  return { applications: results, workers: reads };
+}
+
+/**
+ * The volumes on a worker that every one of `fleet`'s applications passed over:
+ * not declared by any of them, not left behind by any of them, and not one of
+ * their copies.
+ *
+ * Only meaningful when `fleet` covers *every* application on the worker — a
+ * partial list would report its neighbours' volumes as unclaimed — which is why
+ * the Volumes page asks it for administrators only.
+ */
+export function unclaimedVolumes(
+  fleet: FleetStorage,
+): { worker: typeof workers.$inferSelect; name: string; sizeBytes: number | null; createdAt: string | null }[] {
+  const claimed = new Map<string, Set<string>>();
+  for (const { worker, storage } of fleet.applications) {
+    if (!worker) continue;
+    const names = claimed.get(worker.id) ?? new Set<string>();
+    for (const v of storage.volumes) {
+      names.add(v.name);
+      for (const c of v.copies) names.add(c.name);
+    }
+    claimed.set(worker.id, names);
+  }
+
+  const out: ReturnType<typeof unclaimedVolumes> = [];
+  for (const { worker, snapshot } of fleet.workers.values()) {
+    if (!snapshot) continue;
+    const names = claimed.get(worker.id) ?? new Set<string>();
+    for (const v of snapshot.volumes) {
+      if (names.has(v.name)) continue;
+      out.push({
+        worker,
+        name: v.name,
+        sizeBytes: snapshot.usage ? (snapshot.usage.get(v.name) ?? 0) : null,
+        createdAt: v.createdAt,
+      });
+    }
+  }
+  return out.sort((a, b) => a.worker.name.localeCompare(b.worker.name) || a.name.localeCompare(b.name));
 }
 
 /**
