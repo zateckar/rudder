@@ -94,7 +94,9 @@ async function fixture(options: {
     status: 'online', createdAt: now,
   });
   await db.insert(applications).values({
-    id: appId, workerId, name: 'update-test', authType: 'none',
+    // Unique per fixture: the name derives the app's domain, and deploys refuse
+    // a domain another application already holds.
+    id: appId, workerId, name: `update-test-${appId.slice(0, 8)}`, authType: 'none',
     type: options.type ?? 'single', replicas: options.replicas ?? 1,
     manifest: options.manifest ?? JSON.stringify({ image: 'nginx:latest' }),
     autoUpdateEnabled: true, createdAt: now, updatedAt: now,
