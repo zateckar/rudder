@@ -1,47 +1,15 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { applications, workers, containers, deployments, deployWebhooks, applicationTemplates } from '$lib/db/schema';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { getRestPodmanClient } from '$lib/server/podman-client';
 import { executeApplicationDeploy, resolveWorkerSSHConfig } from '$lib/server/deploy';
-import {
-  applyToContainers,
-  lifecycleMessage,
-  type LifecycleVerb,
-} from '$lib/server/deploy/lifecycle';
+import { isLifecycleAction, runLifecycleAction } from '$lib/server/app-lifecycle';
 import { teardownAppNetwork } from '$lib/server/networks';
 import { canAccessApplication } from '$lib/server/auth';
 import { LockError, withLock, workerDeployLock } from '$lib/server/locks';
-import { suppressContainerRestart, restoreContainerRestart } from '$lib/server/runtime-policy';
 
 type PodmanClient = ReturnType<typeof getRestPodmanClient>;
-
-type LifecycleAction = 'start' | 'stop' | 'restart';
-
-/**
- * The three actions that act on containers already on the worker.
- *
- * One table rather than three near-identical branches: they differed only in
- * the Podman call and the status to write, and keeping them apart is how the
- * same six-line comment came to be pasted three times.
- */
-const LIFECYCLE: Record<
-  LifecycleAction,
-  {
-    verb: LifecycleVerb;
-    /** What the container's status becomes once the call lands. */
-    status: string;
-    run: (client: PodmanClient, containerId: string) => Promise<void>;
-  }
-> = {
-  start: { verb: 'started', status: 'running', run: (c, id) => c.startContainer(id) },
-  stop: { verb: 'stopped', status: 'exited', run: (c, id) => c.stopContainer(id) },
-  restart: { verb: 'restarted', status: 'running', run: (c, id) => c.restartContainer(id) },
-};
-
-function isLifecycleAction(action: unknown): action is LifecycleAction {
-  return action === 'start' || action === 'stop' || action === 'restart';
-}
 
 export async function POST({ request, cookies }: { request: Request; cookies: any }) {
   const body = await request.json();
@@ -104,71 +72,13 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
 
     // ──────── START / STOP / RESTART ───────────────────────
     } else if (isLifecycleAction(action)) {
-      return await withLock(workerDeployLock(worker.id), {
-        operation: `${action} ${app.name}`,
-        holder: crypto.randomUUID(),
-      }, async () => {
-        if (!db.select({ id: applications.id }).from(applications).where(eq(applications.id, applicationId)).get()) {
-          return json({ error: 'Application not found' }, { status: 404 });
-        }
-        const lifecycle = LIFECYCLE[action];
-
-        // Only the generation that is serving. A superseded generation retained
-        // for a fast rollback is deliberately stopped, and starting or restarting
-        // it here would resurrect the old version's processes without routing any
-        // traffic to them.
-        const appContainers = await db
-          .select()
-          .from(containers)
-          .where(and(eq(containers.applicationId, applicationId), eq(containers.state, 'active')))
-          .all();
-
-        // Persist the request before contacting Podman, including failed stops.
-        // A status sweep may change what is observed, never what was requested.
-        const desiredStatus = action === 'stop' ? 'stopped' : 'running';
-        db.transaction((tx) => {
-          tx.update(applications).set({ desiredStatus, updatedAt: new Date() })
-            .where(eq(applications.id, applicationId)).run();
-          tx.update(containers).set({ desiredStatus: null })
-            .where(and(eq(containers.applicationId, applicationId), eq(containers.state, 'active'))).run();
-          tx.update(workers).set({ routingRevision: sql`${workers.routingRevision} + 1`, configAppliedHash: null })
-            .where(eq(workers.id, worker.id)).run();
-        });
-
-        const client = getRestPodmanClient(worker);
-        podmanClient = client;
-        const outcome = await applyToContainers(appContainers, async (id) => {
-          const row = appContainers.find((container) => container.containerId === id)!;
-          if (action === 'stop') await suppressContainerRestart(client, row);
-          else await restoreContainerRestart(client, row);
-          await lifecycle.run(client, id);
-        });
-
-        // One statement for everything that took it, rather than one per
-        // container — and only for those, so a container Podman refused keeps the
-        // status it really has instead of the one that was asked for.
-        if (outcome.succeeded.length > 0) {
-          db.transaction((tx) => {
-            tx.update(containers).set({ status: lifecycle.status, updatedAt: new Date() })
-              .where(inArray(containers.id, outcome.succeeded)).run();
-            tx.update(workers).set({ routingRevision: sql`${workers.routingRevision} + 1`, configAppliedHash: null })
-              .where(eq(workers.id, worker.id)).run();
-          });
-        }
-
-        if (outcome.failures.length > 0) {
-          console.error(`[applications] ${action} "${app.name}":`, outcome.failures);
-        }
-
-        // 200 even when some containers refused: something did happen, and the
-        // message says exactly what. `success` and `failures` are what the caller
-        // reads to decide whether to say so in red.
-        return json({
-          success: outcome.failures.length === 0,
-          message: lifecycleMessage(lifecycle.verb, appContainers.length, outcome),
-          failures: outcome.failures,
-        });
-      });
+      // Shared with the MCP server — see $lib/server/app-lifecycle.
+      const result = await runLifecycleAction(app, worker, action);
+      if (!result.found) return json({ error: 'Application not found' }, { status: 404 });
+      // 200 even when some containers refused: something did happen, and the
+      // message says exactly what. `success` and `failures` are what the caller
+      // reads to decide whether to say so in red.
+      return json({ success: result.success, message: result.message, failures: result.failures });
 
     // ──────────────────────── DELETE ───────────────────────
     } else if (action === 'delete') {

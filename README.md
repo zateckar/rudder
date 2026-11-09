@@ -220,6 +220,9 @@ The GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatical
 | `OIDC_AUTH0_CLIENT_ID` | No | — | Auth0 client ID. |
 | `OIDC_AUTH0_CLIENT_SECRET` | No | — | Auth0 client secret. |
 | `OIDC_AUTH0_DOMAIN` | No | — | Auth0 domain (e.g. `company.auth0.com`). |
+| `MCP_OIDC_ISSUER` | No | — | Enables the [MCP server](#mcp-server) at `/mcp`. The exact `iss` of the identity provider whose access tokens are accepted, e.g. `https://idp.example.com/realms/skoda`. Unset, `/mcp` answers 404. |
+| `MCP_OIDC_JWKS_URI` | No | discovered | Signing-key set URL. Only needed when the provider's discovery document is unreachable from Rudder. |
+| `MCP_ALLOWED_ORIGINS` | No | — | Comma-separated browser origins allowed to call `/mcp` besides `PUBLIC_URL`'s. Native clients send no `Origin` and need nothing here. |
 
 ---
 
@@ -811,6 +814,76 @@ spec:
 `rudder.dev/expose-ports` is emitted by `kubectl get -o yaml` as well as read, so
 piping that output back into `kubectl apply` keeps the declaration rather than
 silently dropping the extra ports.
+
+---
+
+## MCP Server
+
+Rudder serves a [Model Context Protocol](https://modelcontextprotocol.io) endpoint
+at `/mcp` (Streamable HTTP, stateless, JSON responses) so an AI agent can operate a
+team's applications. It is for applications only: there are no tools for workers,
+users, teams, secrets or settings, and none that create or delete an application.
+
+| Tool | What it does |
+|------|--------------|
+| `list_teams` | The teams the token acts for |
+| `list_applications` | Applications with URL, desired state, running containers, latest deployment |
+| `get_application` | Containers, URLs, recent deployments and tasks of one application |
+| `deploy_application` | Deploy the current configuration — **returns a task** |
+| `rollback_application` | Roll back to a recorded deployment — **returns a task** |
+| `control_application` | Start, stop or restart — **returns a task** |
+| `scale_application` | Set replicas (1–10) and redeploy — **returns a task** |
+| `get_task` / `list_tasks` | Progress of those tasks: `running`, `succeeded`, `failed`, plus the deployment row being written |
+| `list_deployments` / `get_deployment` | Deployment history; a failed one includes what its containers printed |
+| `get_application_logs` | Recent output of the serving containers |
+
+Applications are addressed by id or by name. Anything outside the token's teams is
+reported as not found.
+
+**Tasks** run in the background because a deploy takes as long as an image pull
+plus the health timeout — longer than an MCP client will wait on one call. They
+live in memory for 24 hours and do not survive a restart of Rudder; the
+deployment history is the durable record. Only one task per application runs at a
+time.
+
+### Authentication
+
+Every request carries `Authorization: Bearer <access token>` from the provider in
+`MCP_OIDC_ISSUER`. A token is accepted when the provider signed it (RS/PS/ES
+algorithms, keys from its JWKS), it is unexpired, and it is an access token —
+Keycloak ID and refresh tokens (`typ` other than `Bearer`) are refused. Session
+cookies and Rudder API keys are not accepted here.
+
+**Teams come from the token's audience.** Each `aud` entry of the form
+`<team>_<anything>` grants that team: `podp_x7f2` → team `podp`. The part before
+the *first* underscore is the team; entries without one (Keycloak's `account`) are
+ignored. The team is matched to an existing one by name or slug,
+case-insensitively, and **created automatically** if there is none. A token with no
+team-shaped audience is refused with 403.
+
+In Keycloak, that means one client per team named `<team>_<suffix>`, and an
+*Audience* protocol mapper so the client's id lands in `aud` of the tokens the agent
+uses. Because any client in the realm whose id has that shape gets the team, who may
+create clients in the realm decides who may operate Rudder applications.
+
+An unauthenticated request gets a 401 whose `WWW-Authenticate` points at
+`/.well-known/oauth-protected-resource/mcp` (RFC 9728), which names the provider, so
+MCP clients can discover where to get a token.
+
+Actions are written to the audit log with `via: "mcp"`, the token's `sub`, `azp`
+and `preferred_username`. Requests are limited to 300 per minute per token subject.
+
+```json
+{
+  "mcpServers": {
+    "rudder": {
+      "type": "http",
+      "url": "https://rudder.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${RUDDER_TOKEN}" }
+    }
+  }
+}
+```
 
 ---
 

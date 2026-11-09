@@ -1,11 +1,11 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
-import { applications, deployments, users } from '$lib/db/schema';
+import { deployments, users } from '$lib/db/schema';
 import { eq, desc } from 'drizzle-orm';
-import { executeFastRollback, fastRollbackTargets } from '$lib/server/deploy';
+import { fastRollbackTargets } from '$lib/server/deploy';
 import { parseCapturedOutput } from '$lib/server/deploy/failure-logs';
 import { canAccessApplication } from '$lib/server/auth';
-import { withApplicationDomainWrite } from '$lib/server/domains';
+import { rollbackToDeployment } from '$lib/server/rollback';
 
 /** Read the notes column, tolerating rows written before it existed. */
 function parseNotes(raw: string | null): string[] {
@@ -93,102 +93,13 @@ export async function POST({ params, request, cookies }: { params: { id: string 
     return json({ error: 'deploymentId is required' }, { status: 400 });
   }
 
-  // Load the source deployment
-  const source = await db.select().from(deployments).where(eq(deployments.id, deploymentId)).get();
-  if (!source) return json({ error: 'Deployment not found' }, { status: 404 });
-  if (source.applicationId !== params.id) {
-    return json({ error: 'Deployment does not belong to this application' }, { status: 400 });
+  // Shared with the MCP server — see $lib/server/rollback.
+  const result = await rollbackToDeployment(access.application, deploymentId, userId);
+  if (!result.success) {
+    return json(
+      { error: result.message, deploymentId: result.deploymentId },
+      { status: result.statusCode ?? 500 },
+    );
   }
-
-  // Update the application record with the old deployment's config
-  const reservationConflict = await withApplicationDomainWrite({
-    ...access.application, manifest: source.manifest, environment: source.environment,
-  }, async () => {
-  await db.update(applications)
-    .set({
-      manifest: source.manifest,
-      environment: source.environment,
-      volumes: source.volumes,
-      updatedAt: new Date(),
-    })
-    .where(eq(applications.id, params.id));
-  });
-  if (reservationConflict) return json({ error: reservationConflict }, { status: 409 });
-
-  // Determine next version number
-  const lastDeployment = await db.select({ version: deployments.version })
-    .from(deployments)
-    .where(eq(deployments.applicationId, params.id))
-    .orderBy(desc(deployments.version))
-    .limit(1)
-    .get();
-  const nextVersion = (lastDeployment?.version ?? 0) + 1;
-
-  // Create a new deployment record for the rollback
-  const rollbackDeploymentId = crypto.randomUUID();
-  await db.insert(deployments).values({
-    id: rollbackDeploymentId,
-    applicationId: params.id,
-    version: nextVersion,
-    manifest: source.manifest,
-    environment: source.environment,
-    volumes: source.volumes,
-    image: source.image,
-    // Carried forward so this row records the same bytes the redeploy below is
-    // pinned to; without it the rollback's own history entry would claim only
-    // a tag, and rolling back to *it* later would resolve the tag afresh.
-    imageDigest: source.imageDigest,
-    status: 'rolled_back',
-    deployedBy: userId,
-    createdAt: new Date(),
-    finishedAt: new Date(),
-  });
-
-  // If that version's containers are still on the worker, stopped, starting
-  // them and repointing the service is the whole rollback — no pull, no
-  // recreate. A failure here is not fatal: it falls through to the redeploy
-  // below, which is what would have happened anyway.
-  if ((await fastRollbackTargets(params.id)).includes(source.id)) {
-    const fast = await executeFastRollback(params.id, source.id);
-    if (fast.success) {
-      return json({
-        success: true,
-        fast: true,
-        message: `Rolled back to version ${source.version} from the retained generation`,
-      });
-    }
-    console.warn(`[rollback] Fast path unavailable for ${params.id}: ${fast.message}`);
-  }
-
-  // Trigger a redeploy by calling the deploy endpoint internally
-  try {
-    const deployRes = await fetch(new URL('/api/applications/deploy', request.url), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Cookie: request.headers.get('Cookie') || '',
-      },
-      // fromDeploymentId, not the digest itself: the deploy endpoint reads the
-      // digest out of the row it names, so a caller cannot pin arbitrary bytes.
-      body: JSON.stringify({
-        applicationId: params.id,
-        action: 'deploy',
-        fromDeploymentId: source.id,
-      }),
-    });
-
-    if (!deployRes.ok) {
-      const errBody = await deployRes.json();
-      return json({ error: errBody.error || 'Redeploy failed' }, { status: 500 });
-    }
-
-    return json({ success: true, message: `Rolled back to version ${source.version}` });
-  } catch (error: any) {
-    // Mark rollback deployment as failed
-    await db.update(deployments)
-      .set({ status: 'failed', errorMessage: error.message, finishedAt: new Date() })
-      .where(eq(deployments.id, rollbackDeploymentId));
-
-    return json({ error: error.message }, { status: 500 });
-  }
+  return json({ success: true, ...(result.fast ? { fast: true } : {}), message: result.message });
 }
