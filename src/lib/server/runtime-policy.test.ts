@@ -22,7 +22,30 @@ test.skipIf(!existsSync(bash))('runtime helper atomically installs the current g
     const shellPath = (path: string) => path.replaceAll('\\', '/').replace(/^([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`);
     const script = command[2].replaceAll('/rudder-host-bin', shellPath(bin))
       .replaceAll('/rudder-var-lib', shellPath(lib));
-    execFileSync(bash, ['-c', script, ...command.slice(3)]);
+    // Observe each durability barrier without flushing the shared runner's disks.
+    const observeSync = `
+sync() {
+  if [[ $(<"$TEST_GUARD") == "old unsafe guard" ]]; then
+    [[ -s "$guard" ]] || return 1
+    printf '%s\\n' 'guard staged'
+  elif [[ -f "$TEST_INTENT" ]]; then
+    printf '%s\\n' 'intent installed'
+  elif [[ -n "$tmp" && -s "$tmp" ]]; then
+    printf '%s\\n' 'intent staged'
+  else
+    printf '%s\\n' 'guard installed'
+  fi
+}
+`;
+    const barriers = execFileSync(bash, ['-c', observeSync + script, ...command.slice(3)], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        TEST_GUARD: shellPath(join(bin, 'rudder-container-boot.sh')),
+        TEST_INTENT: shellPath(join(lib, 'rudder/runtime-intent/container0123')),
+      },
+    });
+    expect(barriers.trim().split(/\r?\n/)).toEqual(['guard staged', 'guard installed', 'intent staged', 'intent installed']);
     expect(readFileSync(join(bin, 'rudder-container-boot.sh'), 'utf8')).toBe(
       readFileSync(resolve('src/lib/server/provisioning/shell/scripts/rudder-container-boot.sh'), 'utf8'));
     expect(readFileSync(join(lib, 'rudder/runtime-intent/container0123'), 'utf8')).toBe('stopped\n');
