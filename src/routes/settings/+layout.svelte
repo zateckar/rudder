@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { page } from '$app/stores';
+  import { page } from '$app/state';
   import PageHeader from '$lib/components/PageHeader.svelte';
 
   let { children } = $props();
@@ -14,12 +14,12 @@
     { href: '/settings/backup', label: 'Backups', subtitle: 'Automated daily backups of the database to Azure Blob Storage.' },
   ];
 
-  const pathname = $derived($page.url.pathname);
+  const pathname = $derived(page.url.pathname);
   const active = $derived(TABS.find((t) => t.href === pathname));
 
   // Notifications scopes its alert rules by `?team=`, so tabs carry the
   // selected team across rather than dropping it on the way in.
-  const search = $derived($page.url.search);
+  const search = $derived(page.url.search);
 </script>
 
 <PageHeader title="Settings" subtitle={active?.subtitle} />

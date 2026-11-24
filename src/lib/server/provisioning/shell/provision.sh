@@ -429,8 +429,7 @@ get_latest_github_tag() {
     installed=$(grep -A2 "${pin_pattern}" /etc/traefik/traefik.yml \
                 | sed -E -n 's/^[[:space:]]*version:[[:space:]]*(.+)$/\1/p' | head -1)
   fi
-  if [ -n "$installed" ] && [ "$installed" != "BOUNCER_VERSION_PLACEHOLDER" ] \
-     && [ "$installed" != "OIDC_VERSION_PLACEHOLDER" ]; then
+  if [ -n "$installed" ] && [ "$installed" != "OIDC_VERSION_PLACEHOLDER" ]; then
     echo "WARNING: could not reach GitHub for ${repo}; keeping the installed version ${installed}" >&2
     echo "$installed"
     return 0
@@ -456,7 +455,29 @@ TRAEFIK_VERSION="{{TRAEFIK_IMAGE_VERSION}}"
 # by the time the unit next starts.
 resolve_image_digest() {
   local ref=$1
-  podman image inspect "$ref" --format '{{index .RepoDigests 0}}' 2>/dev/null | head -1
+  local digest
+  digest=$(podman image inspect "$ref" --format '{{.Digest}}') || return 1
+  [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+  printf '%s@%s\n' "${ref%:*}" "$digest"
+}
+
+step_platform_images() {
+  local crowdsec_ref="docker.io/crowdsecurity/crowdsec:${CROWDSEC_VERSION}"
+  local traefik_ref="docker.io/library/traefik:${TRAEFIK_VERSION}"
+  local ref
+  for ref in "$crowdsec_ref" "$traefik_ref"; do
+    if ! podman pull "$ref"; then
+      podman image exists "$ref" || return 1
+      echo "WARNING: pulling $ref failed; using the cached image"
+    fi
+  done
+  CROWDSEC_IMAGE=$(resolve_image_digest "$crowdsec_ref") || return 1
+  TRAEFIK_IMAGE=$(resolve_image_digest "$traefik_ref") || return 1
+  podman image exists "$CROWDSEC_IMAGE" && podman image exists "$TRAEFIK_IMAGE"
+}
+
+step_plugin_version() {
+  OIDC_VERSION=$(get_latest_github_tag "sevensolutions/traefik-oidc-auth" "sevensolutions/traefik-oidc-auth")
 }
 
 step_traefik_config() {
@@ -464,19 +485,14 @@ step_traefik_config() {
   echo "Using CrowdSec version: ${CROWDSEC_VERSION}"
   echo "Using Traefik version: ${TRAEFIK_VERSION}"
 
-  echo "Detecting latest plugin versions..."
-  BOUNCER_VERSION=$(get_latest_github_tag "maxlerebourg/crowdsec-bouncer-traefik-plugin" "crowdsec-bouncer-traefik-plugin") || return 1
-  OIDC_VERSION=$(get_latest_github_tag "sevensolutions/traefik-oidc-auth" "sevensolutions/traefik-oidc-auth") || return 1
-  echo "Using bouncer version: ${BOUNCER_VERSION}"
   echo "Using OIDC version: ${OIDC_VERSION}"
 
   mkdir -p /etc/traefik/dynamic /etc/traefik/acme /var/log/traefik
   echo "{{TRAEFIK_YML_B64}}" | base64 -d > /etc/traefik/traefik.yml
   echo "{{ROUTING_ADMIN_B64}}" | base64 -d > /etc/traefik/dynamic/routing-admin.yml
   echo "traefik.yml written (443 + 1443-4443, TLS-ALPN-01, CrowdSec plugin)"
-  sed -i "s/BOUNCER_VERSION_PLACEHOLDER/${BOUNCER_VERSION}/g" /etc/traefik/traefik.yml
   sed -i "s/OIDC_VERSION_PLACEHOLDER/${OIDC_VERSION}/g" /etc/traefik/traefik.yml
-  echo "traefik.yml updated with latest plugin versions"
+  echo "traefik.yml updated with the OIDC plugin version"
   # Only written when there is a base domain to bind the router to. Traefik ties
   # tls.options (and so RequireAndVerifyClientCert) to a router's SNI, so there
   # is no way to require a client certificate on a catch-all route — the
@@ -529,6 +545,18 @@ step_crowdsec() {
   echo "{{CROWDSEC_ACQUIS_B64}}" | base64 -d > /etc/crowdsec/acquis.yaml
   echo "{{CROWDSEC_APPSEC_ACQUIS_B64}}" | base64 -d > /etc/crowdsec/acquis.d/appsec.yaml
   echo "{{CROWDSEC_CONFIG_LOCAL_B64}}" | base64 -d > /etc/crowdsec/config.yaml.local
+  local profiles=/etc/crowdsec/profiles.yaml.local
+  if ! grep -qx 'name: rudder_observe_appsec_outofband' "$profiles" 2>/dev/null; then
+    local updated_profiles
+    updated_profiles=$(mktemp /etc/crowdsec/profiles.yaml.local.XXXXXX) || return 1
+    if ! {
+      echo "{{CROWDSEC_PROFILES_LOCAL_B64}}" | base64 -d &&
+      { [ ! -s "$profiles" ] || { printf '\n---\n' && cat "$profiles"; }; }
+    } > "$updated_profiles" || ! mv -- "$updated_profiles" "$profiles"; then
+      rm -f -- "$updated_profiles"
+      return 1
+    fi
+  fi
 
   # The per-application rule exclusions, bind-mounted into the container.
   #
@@ -536,17 +564,12 @@ step_crowdsec() {
   # creates a *directory* at a bind-mount source that does not exist, and
   # CrowdSec would then fail to load an AppSec configuration the acquisition
   # references by name — taking the whole AppSec component down rather than just
-  # the exclusions. An empty-but-valid document is the safe resting state, and
-  # it is what a worker with no exclusions legitimately has.
+  # the exclusions. Start with the fleet baseline until the control plane
+  # supplies the generated configuration with any additional exclusions.
   mkdir -p /etc/rudder/appsec
   chmod 755 /etc/rudder/appsec
   if [ ! -f /etc/rudder/appsec/rudder-exclusions.yaml ]; then
-    cat > /etc/rudder/appsec/rudder-exclusions.yaml <<'RXEOF'
-# Placeholder until the first fetch from the control plane. Replaced by
-# rudder-appsec-config.sh; edits here are overwritten.
-name: rudder/exclusions
-default_remediation: ban
-RXEOF
+    echo "{{CROWDSEC_APPSEC_BASELINE_B64}}" | base64 -d > /etc/rudder/appsec/rudder-exclusions.yaml
   fi
   chmod 644 /etc/rudder/appsec/rudder-exclusions.yaml
 
@@ -563,77 +586,33 @@ step_systemd_services() {
   echo "{{TRAEFIK_SERVICE_B64}}" | base64 -d > /etc/systemd/system/traefik-container.service
   echo "{{CROWDSEC_SERVICE_B64}}" | base64 -d > /etc/systemd/system/crowdsec-container.service
 
-  # Pull before writing the version into the units: the digest we pin is the
-  # one this run actually fetched and is about to start.
-  echo "Pulling container images..."
-  podman pull docker.io/crowdsecurity/crowdsec:${CROWDSEC_VERSION} 2>&1 || echo "WARNING: Failed to pull CrowdSec image, using cached"
-  podman pull docker.io/traefik:${TRAEFIK_VERSION} 2>&1 || echo "WARNING: Failed to pull Traefik image, using cached"
-
-  # `image@sha256:…` in the unit, so a restart three months from now runs the
-  # same bytes even if the tag has been moved under us. Falls back to the
-  # pinned tag — still a fixed version, just not byte-exact — when the local
-  # image carries no repo digest (built locally, or pulled by digest already).
-  local crowdsec_ref="docker.io/crowdsecurity/crowdsec:${CROWDSEC_VERSION}"
-  local traefik_ref="docker.io/traefik:${TRAEFIK_VERSION}"
-  local crowdsec_digest traefik_digest
-  crowdsec_digest=$(resolve_image_digest "$crowdsec_ref")
-  traefik_digest=$(resolve_image_digest "$traefik_ref")
-  if [ -n "$crowdsec_digest" ]; then
-    echo "CrowdSec image pinned to ${crowdsec_digest}"
-    crowdsec_ref="$crowdsec_digest"
-  else
-    echo "WARNING: no repo digest for ${crowdsec_ref}; pinning by tag only"
-  fi
-  if [ -n "$traefik_digest" ]; then
-    echo "Traefik image pinned to ${traefik_digest}"
-    traefik_ref="$traefik_digest"
-  else
-    echo "WARNING: no repo digest for ${traefik_ref}; pinning by tag only"
-  fi
-
   # The units carry `docker.io/<repo>:PLACEHOLDER`, so the substitution has to
   # swallow the tag separator along with the placeholder to leave a bare
   # `docker.io/<repo>@sha256:…`. `|` as the sed delimiter: digests contain `/`.
-  sed -i "s|docker.io/crowdsecurity/crowdsec:CROWDSEC_VERSION_PLACEHOLDER|${crowdsec_ref}|g" /etc/systemd/system/crowdsec-container.service
-  sed -i "s|docker.io/traefik:TRAEFIK_VERSION_PLACEHOLDER|${traefik_ref}|g" /etc/systemd/system/traefik-container.service
+  sed -i "s|docker.io/crowdsecurity/crowdsec:CROWDSEC_VERSION_PLACEHOLDER|${CROWDSEC_IMAGE}|g" /etc/systemd/system/crowdsec-container.service || return 1
+  sed -i "s|docker.io/traefik:TRAEFIK_VERSION_PLACEHOLDER|${TRAEFIK_IMAGE}|g" /etc/systemd/system/traefik-container.service || return 1
 
   systemctl daemon-reload
   systemctl enable traefik-container.service
   systemctl enable crowdsec-container.service
   echo "Starting CrowdSec..."
-  systemctl start crowdsec-container.service
-  sleep 5
-  # Verify CrowdSec is running; if not, clean stale data and retry
-  if ! podman ps --filter name=crowdsec --format "{{.Names}}" 2>/dev/null | grep -q crowdsec; then
-    echo "WARNING: CrowdSec container not running after first attempt"
-    echo "CrowdSec container logs:"
-    podman logs --tail 30 crowdsec 2>&1 || true
-    echo "CrowdSec service journal:"
-    journalctl -u crowdsec-container.service --no-pager -n 20 2>/dev/null || true
-    echo "Cleaning CrowdSec state and retrying..."
-    systemctl stop crowdsec-container.service 2>/dev/null || true
-    systemctl reset-failed crowdsec-container.service 2>/dev/null || true
-    podman rm -f crowdsec 2>/dev/null || true
-    rm -f /var/lib/crowdsec/data/crowdsec.db 2>/dev/null || true
-    rm -f /var/lib/crowdsec/data/crowdsec.db-wal 2>/dev/null || true
-    rm -f /var/lib/crowdsec/data/crowdsec.db-shm 2>/dev/null || true
-    fuser -k 8081/tcp 2>/dev/null || true
-    fuser -k 7422/tcp 2>/dev/null || true
-    sleep 2
-    systemctl start crowdsec-container.service
-    sleep 5
-    if podman ps --filter name=crowdsec --format "{{.Names}}" 2>/dev/null | grep -q crowdsec; then
-      echo "CrowdSec container: running (after retry with clean state)"
-    else
-      echo "WARNING: CrowdSec still not running after retry"
+  systemctl start crowdsec-container.service || return 1
+  local attempt
+  for attempt in $(seq 1 45); do
+    if timeout 3 podman exec crowdsec cscli lapi status >/dev/null 2>&1 &&
+       ss -H -lnt 'sport = :7422' | grep -q '127.0.0.1:7422'; then
+      break
+    fi
+    if [ "$attempt" = 45 ]; then
+      echo "ERROR: CrowdSec or AppSec did not become ready; existing decisions and data are preserved."
       podman logs --tail 30 crowdsec 2>&1 || true
       journalctl -u crowdsec-container.service --no-pager -n 30 2>/dev/null || true
+      return 1
     fi
-  else
-    echo "CrowdSec container: running"
-  fi
+    sleep 1
+  done
   echo "Starting Traefik..."
-  systemctl start traefik-container.service
+  systemctl start traefik-container.service || return 1
   echo "Services started"
 }
 
@@ -645,6 +624,8 @@ step_systemd_services() {
 soft_step "updates" step_updates
 step "podman" step_podman
 step "registries" step_registries
+step "platform-images" step_platform_images
+step "plugin-version" step_plugin_version
 step "podman-socket" step_podman_socket
 step "cleanup-old" step_cleanup_old
 soft_step "firewall" step_firewall

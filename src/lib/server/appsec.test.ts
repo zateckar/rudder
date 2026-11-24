@@ -141,11 +141,16 @@ describe('parseAppsecRules / serializeAppsecRules', () => {
 describe('generateAppsecConfig', () => {
   const one = { host: 'projectsend.gamma.apps.skoda-api.com', rules: [942100] };
 
-  test('is a loadable config even when nothing is excluded', () => {
+  test('applies the fleet baseline with no application exclusions', () => {
     // The acquisition references this config by name. If it vanished when the
     // last exclusion was removed, AppSec would fail to start at all.
     const yaml = generateAppsecConfig([]);
     expect(yaml).toContain(`name: ${APPSEC_CONFIG_NAME}`);
+    expect(yaml).toContain('on_load:');
+    expect(yaml).toContain('RemoveOutBandRuleByName("crowdsecurity/experimental-no-user-agent")');
+    expect(yaml).toContain('RemoveOutBandRuleByID(911100)');
+    expect(yaml).toContain('RemoveOutBandRuleByID(920420)');
+    expect(yaml).not.toContain('RemoveInBand');
     expect(yaml).not.toContain('pre_eval:');
   });
 
@@ -169,7 +174,7 @@ describe('generateAppsecConfig', () => {
       { host: 'app.example.com', rules: ['crowdsecurity/vpatch-git-config'] },
     ]);
     expect(yaml).toContain('RemoveInBandRuleByName("crowdsecurity/vpatch-git-config")');
-    expect(yaml).not.toContain('ByID');
+    expect(yaml.split('pre_eval:')[1]).not.toContain('ByID');
   });
 
   test('one application excluding a rule does not exclude it for another', () => {
@@ -196,7 +201,7 @@ describe('generateAppsecConfig', () => {
     expect(yaml).toContain('RemoveInBandRuleByTag("attack-lfi")');
     expect(yaml).toContain('RemoveOutBandRuleByTag("attack-lfi")');
     // Not ByName, which is what a rule name gets and would match nothing here.
-    expect(yaml).not.toContain('ByName');
+    expect(yaml.split('pre_eval:')[1]).not.toContain('ByName');
   });
 
   test('the prefix does not leak into the emitted tag', () => {

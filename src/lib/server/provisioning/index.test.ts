@@ -700,8 +700,8 @@ describe('generateProvisioningScript', () => {
   });
 
   test('preserves Go template syntax used by podman commands', () => {
-    // The substitution regex must not eat `{{.Names}}` / `{{.Status}}`.
-    expect(script).toContain('{{.Names}}');
+    // The substitution regex must not consume Podman's Go template fields.
+    expect(script).toContain('{{.Digest}}');
     expect(script).toContain('{{.Status}}');
   });
 
@@ -810,6 +810,17 @@ describe('generateProvisioningScript', () => {
     return blobIn(script, target);
   }
 
+  test('observes only the out-of-band AppSec scenario before evaluating default profiles', () => {
+    const encoded = script.match(/echo "([A-Za-z0-9+/=]+)" \| base64 -d &&\n\s*\{ \[ ! -s "\$profiles"/)?.[1];
+    expect(encoded).toBeDefined();
+    const profile = Buffer.from(encoded!, 'base64').toString('utf8');
+    const unit = blobFor('/etc/systemd/system/crowdsec-container.service');
+    expect(profile).toContain('Alert.GetScenario() == "crowdsecurity/crowdsec-appsec-outofband"');
+    expect(profile).toContain('on_success: break');
+    expect(profile).not.toContain('decisions:');
+    expect(unit).toContain('/etc/crowdsec/profiles.yaml.local:/etc/crowdsec/profiles.yaml.local:ro,z');
+  });
+
   test('installs every AppSec config the acquisition references', () => {
     // The CrowdSec container re-fetches the hub on every start and does not
     // persist /etc/crowdsec, so an appsec_config that is not in COLLECTIONS is
@@ -853,20 +864,18 @@ describe('generateProvisioningScript', () => {
     test('the file exists before the container that mounts it starts', () => {
       // Podman creates a *directory* at a bind-mount source that does not
       // exist, and CrowdSec then fails to load the config the acquisition names.
-      const created = script.indexOf('/etc/rudder/appsec/rudder-exclusions.yaml <<');
+      const created = script.indexOf('base64 -d > /etc/rudder/appsec/rudder-exclusions.yaml');
       const started = script.indexOf('systemctl start crowdsec-container.service');
       expect(created).toBeGreaterThan(-1);
       expect(started).toBeGreaterThan(created);
     });
 
-    test('the placeholder it writes is a config CrowdSec can load', () => {
-      // An empty file is not a valid appsec-config, and "no exclusions" is the
-      // resting state of almost every worker — so the placeholder has to be a
-      // real document, not a touch.
-      const at = script.indexOf('/etc/rudder/appsec/rudder-exclusions.yaml <<');
-      const open = script.indexOf('RXEOF', at);
-      const close = script.indexOf('RXEOF', open + 'RXEOF'.length);
-      expect(script.slice(open, close)).toContain('name: rudder/exclusions');
+    test('new workers start with the fleet baseline before their first config fetch', () => {
+      const baseline = blobFor('/etc/rudder/appsec/rudder-exclusions.yaml');
+      expect(baseline).toContain('name: rudder/exclusions');
+      expect(baseline).toContain('on_load:');
+      expect(baseline).toContain('RemoveOutBandRuleByID(911100)');
+      expect(baseline).toContain('RemoveOutBandRuleByID(920420)');
     });
 
     test('the fetch timer is installed in labels mode too', () => {
@@ -1042,12 +1051,24 @@ describe('generateProvisioningScript', () => {
   });
 
   test('pulls before pinning the unit, so the digest is the one this run fetched', () => {
-    const pullAt = script.indexOf('podman pull docker.io/traefik');
+    const pullAt = script.indexOf('podman pull "$ref"');
     const digestAt = script.indexOf('resolve_image_digest "$traefik_ref"');
     const sedAt = script.indexOf('s|docker.io/traefik:TRAEFIK_VERSION_PLACEHOLDER|');
     expect(pullAt).toBeGreaterThan(-1);
     expect(digestAt).toBeGreaterThan(pullAt);
     expect(sedAt).toBeGreaterThan(digestAt);
+    expect(script.indexOf('step "platform-images"')).toBeLessThan(script.indexOf('step "cleanup-old"'));
+    expect(script.indexOf('step "plugin-version"')).toBeLessThan(script.indexOf('step "cleanup-old"'));
+    expect(script).toContain('podman image exists "$CROWDSEC_IMAGE" && podman image exists "$TRAEFIK_IMAGE"');
+  });
+
+  test('waits for CrowdSec and AppSec without removing their database on startup failure', () => {
+    const services = script.slice(script.indexOf('step_systemd_services() {'), script.indexOf('# ── Execute steps'));
+    const checks = services.indexOf('podman exec crowdsec cscli lapi status');
+    expect(checks).toBeGreaterThan(services.indexOf('systemctl start crowdsec-container.service'));
+    expect(services.indexOf('systemctl start traefik-container.service')).toBeGreaterThan(checks);
+    expect(services).toContain("ss -H -lnt 'sport = :7422'");
+    expect(services).not.toMatch(/crowdsec\.db|fuser -k/);
   });
 
   test('an unreachable GitHub does not silently downgrade a plugin', () => {

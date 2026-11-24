@@ -503,6 +503,18 @@ describe('admin-only APIs', () => {
  * the thing it used to hand over.
  */
 describe('cross-team resource access', () => {
+  test('learning session mutations require the application team and the same origin', async () => {
+    const { POST, DELETE } = await import('./api/applications/[id]/appsec/learning/+server');
+    const url = new URL('https://rudder.example.test/api/applications/' + otherAppId + '/appsec/learning');
+    for (const [method, handler] of [['POST', POST], ['DELETE', DELETE]] as const) {
+      const event = (origin: string) => ({
+        url, request: new Request(url, { method, headers: { origin } }),
+        params: { id: otherAppId }, locals: member.locals,
+      }) as Parameters<typeof handler>[0];
+      expect((await handler(event('https://apps.example.test'))).status).toBe(403);
+      expect((await handler(event(url.origin))).status).toBe(404);
+    }
+  });
   const jsonRequest = (url: string, method: string, body?: unknown) =>
     new Request(url, {
       method,

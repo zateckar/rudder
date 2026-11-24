@@ -1,5 +1,6 @@
 import { ROUTE_ENTRYPOINTS } from '../deploy/plan';
 import { routerName } from '../domains';
+import { generateAppsecConfig } from '../appsec';
 import {
   FORWARDED_IDENTITY_HEADERS,
   OIDC_CALLBACK_PATH,
@@ -23,6 +24,7 @@ import globalOidcCallbackRouterTemplate from './shell/templates/global-oidc-call
 import crowdsecAcquisTemplate from './shell/templates/crowdsec-acquis.yml?raw';
 import crowdsecAppsecAcquisTemplate from './shell/templates/crowdsec-appsec-acquis.yml?raw';
 import crowdsecConfigLocalTemplate from './shell/templates/crowdsec-config-local.yml?raw';
+import crowdsecProfilesLocalTemplate from './shell/templates/crowdsec-profiles-local.yml?raw';
 import registriesTemplate from './shell/templates/registries.conf?raw';
 import unattendedUpgradesTemplate from './shell/templates/unattended-upgrades.conf?raw';
 
@@ -103,9 +105,10 @@ function shellQuote(value: string): string {
  * to a repo digest after the pull and that digest goes into the systemd unit.
  */
 export const PLATFORM_IMAGES = {
-  traefik: { repo: 'docker.io/traefik', version: 'v3.7.10' },
-  crowdsec: { repo: 'docker.io/crowdsecurity/crowdsec', version: 'v1.7.8' },
+  traefik: { repo: 'docker.io/traefik', version: 'v3.8.0' },
+  crowdsec: { repo: 'docker.io/crowdsecurity/crowdsec', version: 'v1.8.2' },
 } as const;
+export const CROWDSEC_BOUNCER_VERSION = 'v1.8.2';
 
 export type PlatformComponent = keyof typeof PLATFORM_IMAGES;
 
@@ -450,6 +453,7 @@ export function generateProvisioningScript(
   const templateVars: Record<string, string> = {
     ACME_EMAIL: acmeEmail,
     BOUNCER_KEY: bouncerKey,
+    BOUNCER_VERSION: CROWDSEC_BOUNCER_VERSION,
     BASE_DOMAIN: baseDomain || '',
     PODMAN_API_DOMAIN: podmanApiDomain,
     WORKER_NAME: workerName,
@@ -517,6 +521,8 @@ export function generateProvisioningScript(
     GLOBAL_OIDC_MIDDLEWARE_B64: globalOidcMiddleware ? toBase64(globalOidcMiddleware) : '',
     CROWDSEC_ACQUIS_B64: toBase64(crowdsecAcquisTemplate),
     CROWDSEC_APPSEC_ACQUIS_B64: toBase64(crowdsecAppsecAcquisTemplate),
+    CROWDSEC_APPSEC_BASELINE_B64: toBase64(generateAppsecConfig([])),
+    CROWDSEC_PROFILES_LOCAL_B64: toBase64(crowdsecProfilesLocalTemplate),
     CROWDSEC_CONFIG_LOCAL_B64: toBase64(crowdsecConfigLocalTemplate),
     REGISTRIES_B64: toBase64(registriesTemplate),
     UNATTENDED_UPGRADES_B64: toBase64(unattendedUpgradesTemplate),

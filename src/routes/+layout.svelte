@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { page } from '$app/stores';
+  import { page } from '$app/state';
   import AppLayout from '$lib/components/AppLayout.svelte';
   import Toasts from '$lib/components/Toasts.svelte';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
@@ -17,14 +17,14 @@
   } = $props();
   
   let showLayout = $derived(
-    String($page.url.pathname) !== '/login' && 
-    String($page.url.pathname) !== '/' &&
+    String(page.url.pathname) !== '/login' &&
+    String(page.url.pathname) !== '/' &&
     data.user
   );
 </script>
 
 {#if showLayout}
-  <AppLayout user={data.user} teams={data.teams} pathname={$page.url.pathname}>
+  <AppLayout user={data.user} teams={data.teams} pathname={page.url.pathname}>
     {@render children()}
   </AppLayout>
 {:else}

@@ -1,0 +1,27 @@
+diff --git a/pkg/acquisition/modules/appsec/utils.go b/pkg/acquisition/modules/appsec/utils.go
+--- a/pkg/acquisition/modules/appsec/utils.go
++++ b/pkg/acquisition/modules/appsec/utils.go
+@@ -7,6 +7,7 @@
+ 	"strings"
+ 	"time"
+ 
++	"github.com/google/uuid"
+ 	"github.com/prometheus/client_golang/prometheus"
+ 	log "github.com/sirupsen/logrus"
+ 
+@@ -138,6 +139,14 @@
+ 		}
+ 	}
+ 
++	// Rudder sets this reserved ID at the isolated, trusted gateway.
++	// Append it after rule evaluation and after generating ordinary context.
++	if id := inEvt.Parsed["req_uuid"]; strings.HasPrefix(id, "rudder-") {
++		if parsed, err := uuid.Parse(strings.TrimPrefix(id, "rudder-")); err == nil && parsed.Version() == 4 {
++			metas = append(metas, &models.MetaItems0{Key: "rudder_request_id", Value: id})
++		}
++	}
++
+ 	alert.Meta = metas
+ 
+ 	alert.EventsCount = new(int32(len(alert.Events)))
+

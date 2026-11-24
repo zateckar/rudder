@@ -1,12 +1,10 @@
-import { sequence } from '@sveltejs/kit/hooks';
-import type { Handle } from '@sveltejs/kit';
+import { sequence, type Handle } from '@sveltejs/kit/hooks';
 import { db } from '$lib/db';
 import { users, auditLogs, apiKeys } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { getSessionIdFromCookies, validateSession } from '$lib/auth';
 import { AUDITED_READS, classifyRequest, isAuditable } from '$lib/server/audit';
 import { touchApiKey } from '$lib/server/api-keys';
-import { env } from '$env/dynamic/private';
 import { hashKey } from '$lib/server/encryption';
 
 const securityHeaders: Handle = async ({ event, resolve }) => {
@@ -25,7 +23,7 @@ const securityHeaders: Handle = async ({ event, resolve }) => {
   response.headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
 
   // HSTS: only set in production to avoid breaking local dev (HTTP)
-  if (env.NODE_ENV === 'production') {
+  if (process.env.NODE_ENV === 'production') {
     response.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   }
 

@@ -1,0 +1,6 @@
+# Keep the aggregate out-of-band AppSec alert for review. Other scenarios
+# continue through the profiles shipped with CrowdSec.
+name: rudder_observe_appsec_outofband
+filters:
+  - 'Alert.GetScenario() == "crowdsecurity/crowdsec-appsec-outofband"'
+on_success: break

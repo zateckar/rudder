@@ -1,7 +1,7 @@
 <script lang="ts">
   import PageHeader from '$lib/components/PageHeader.svelte';
   import { formatDateTime as formatDate } from '$lib/format';
-  import { browser } from '$app/environment';
+  import { browser } from '$app/env';
   import { showToast } from '$lib/client/toast.svelte';
   import { confirmAction } from '$lib/client/dialog.svelte';
 

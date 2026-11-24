@@ -5,7 +5,7 @@ on:
     branches: [master]
     tags: ["v*"]
   pull_request:
-    branches: [maaster]
+    branches: [master]
   workflow_dispatch:
     inputs:
       base_path:
@@ -35,6 +35,9 @@ jobs:
 
       - name: Type check
         run: bun run check
+
+      - name: Tests
+        run: bun test src
 
   build-and-push:
     name: Build & Push Docker Image
@@ -73,16 +76,41 @@ jobs:
             type=sha,prefix=sha-
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push Docker image
-        id: push
+      - name: Build release image
         uses: docker/build-push-action@v7
         with:
           context: .
-          push: ${{ github.event_name != 'pull_request' }}
+          load: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Check the release image starts
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          image=${IMAGE_TAGS%%$'\n'*}
+          ADMIN_PASSWORD=$(openssl rand -hex 24)
+          export ADMIN_PASSWORD
+          container=$(docker run --detach --publish 127.0.0.1::3000 --env NODE_ENV=production --env ADMIN_PASSWORD "$image")
+          trap 'docker logs "$container"; docker rm --force "$container" >/dev/null' EXIT
+          address=$(docker port "$container" 3000/tcp)
+          curl --fail --silent --show-error --retry 20 --retry-connrefused "http://$address/api/health"
+          curl --fail --silent --show-error "http://$address/login" --output /dev/null
+
+      - name: Push the tested release image
+        if: github.event_name != 'pull_request'
+        id: push
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          while IFS= read -r tag; do
+            docker push "$tag"
+          done <<< "$IMAGE_TAGS"
+          image=${IMAGE_TAGS%%$'\n'*}
+          reference=$(docker image inspect "$image" --format '{{index .RepoDigests 0}}')
+          echo "digest=${reference##*@}" >> "$GITHUB_OUTPUT"
 
       - name: Generate artifact attestation
         if: github.event_name != 'pull_request'

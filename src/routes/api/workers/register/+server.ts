@@ -2,7 +2,6 @@ import { json } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { workers } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { env } from '$env/dynamic/private';
 import { timingSafeEqual, createHash } from 'crypto';
 import { decryptField, encryptField } from '$lib/server/encryption';
 
@@ -31,7 +30,7 @@ function secretsMatch(a: string, b: string): boolean {
  */
 export async function POST({ request }: { request: Request }) {
   // Require a shared secret for worker self-registration
-  const registrationSecret = env.WORKER_REGISTRATION_SECRET;
+  const registrationSecret = process.env.WORKER_REGISTRATION_SECRET;
   if (!registrationSecret) {
     return json({ error: 'Worker registration is not configured' }, { status: 503 });
   }

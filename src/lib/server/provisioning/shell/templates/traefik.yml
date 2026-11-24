@@ -70,7 +70,7 @@ experimental:
   plugins:
     bouncer:
       moduleName: github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
-      version: BOUNCER_VERSION_PLACEHOLDER
+      version: {{BOUNCER_VERSION}}
     traefik-oidc-auth:
       moduleName: github.com/sevensolutions/traefik-oidc-auth
       version: OIDC_VERSION_PLACEHOLDER

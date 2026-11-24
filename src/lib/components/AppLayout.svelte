@@ -1,8 +1,8 @@
 <script lang="ts">
   import { enhance } from '$app/forms';
   import { goto } from '$app/navigation';
-  import { page } from '$app/stores';
-  import { browser } from '$app/environment';
+  import { page } from '$app/state';
+  import { browser } from '$app/env';
 
   let {
     children,
@@ -33,7 +33,7 @@
   const selectedTeam = $derived.by(() => {
     if (teams.length === 0) return null;
 
-    const fromUrl = $page.url.searchParams.get('team');
+    const fromUrl = page.url.searchParams.get('team');
     if (fromUrl && (fromUrl === 'all' || teams.some((t) => t.id === fromUrl))) return fromUrl;
 
     if (browser) {
@@ -55,7 +55,7 @@
     // `goto`, not `window.location.href`: this is a same-app navigation, and a
     // full document load discards the page and re-downloads every asset to
     // change one query parameter.
-    const url = new URL($page.url);
+    const url = new URL(page.url.href);
     url.searchParams.set('team', target.value);
     goto(`${url.pathname}${url.search}`, { invalidateAll: true });
   }

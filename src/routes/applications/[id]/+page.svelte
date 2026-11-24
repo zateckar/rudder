@@ -10,6 +10,7 @@
   import { confirmAction, type ConfirmRequest } from '$lib/client/dialog.svelte';
   import { lifecycleControls, lifecycleLabel } from '$lib/client/lifecycle-controls';
   import AppsecMatches from '$lib/components/AppsecMatches.svelte';
+  import CrowdsecLearning from '$lib/components/CrowdsecLearning.svelte';
 
   /** One failed container's output, as the deployment recorded it. */
   interface ContainerOutput {
@@ -2320,6 +2321,9 @@
 
   <!-- ── Firewall tab ───────────────────────────────────────────────────── -->
   {:else if activeTab === 'firewall'}
+    {#key data.application.id}
+      <CrowdsecLearning applicationId={data.application.id} />
+    {/key}
     <div class="section">
       <div class="section-head">
         <h3>Web firewall matches</h3>
