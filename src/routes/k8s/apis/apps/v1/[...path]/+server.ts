@@ -20,28 +20,28 @@ import {
   k8sJson,
   resolveTeamBySlug,
   getAccessibleTeams,
-} from '$lib/server/k8s/auth';
-import type { K8sAuthContext } from '$lib/server/k8s/auth';
+} from '#lib/server/k8s/auth.ts';
+import type { K8sAuthContext } from '#lib/server/k8s/auth.ts';
 import {
   applicationToDeployment,
   deploymentToScale,
   parseDeploymentBody,
   k8sList,
   matchPath,
-} from '$lib/server/k8s/mapper';
-import { db, sqlite } from '$lib/db';
+} from '#lib/server/k8s/mapper.ts';
+import { db, sqlite } from '#lib/db/index.ts';
 import {
   applications,
   containers,
   workers,
-} from '$lib/db/schema';
+} from '#lib/db/schema.ts';
 import { eq, and } from 'drizzle-orm';
-import { executeApplicationDeploy } from '$lib/server/deploy';
-import { getRestPodmanClient } from '$lib/server/podman-client';
-import { createApplicationWithQuota } from '$lib/server/quota';
-import { buildAppDomain, assertDomainAvailable, withApplicationDomainWrite } from '$lib/server/domains';
-import { serializeExposedPorts } from '$lib/server/deploy/plan';
-import { serializeAppsecRules } from '$lib/server/appsec';
+import { executeApplicationDeploy } from '#lib/server/deploy.ts';
+import { getRestPodmanClient } from '#lib/server/podman-client.ts';
+import { createApplicationWithQuota } from '#lib/server/quota.ts';
+import { buildAppDomain, assertDomainAvailable, withApplicationDomainWrite } from '#lib/server/domains.ts';
+import { serializeExposedPorts } from '#lib/server/deploy/plan.ts';
+import { serializeAppsecRules } from '#lib/server/appsec.ts';
 
 // ── GET ────────────────────────────────────────────────────────
 

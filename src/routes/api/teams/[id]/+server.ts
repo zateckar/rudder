@@ -1,9 +1,9 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db, sqlite } from '$lib/db';
-import { teams, teamMembers, users, applications } from '$lib/db/schema';
+import { db, sqlite } from '#lib/db/index.ts';
+import { teams, teamMembers, users, applications } from '#lib/db/schema.ts';
 import { eq, and } from 'drizzle-orm';
-import { AuthorizationError, requireAdminUser, requireUser, route } from '$lib/server/auth';
+import { AuthorizationError, requireAdminUser, requireUser, route } from '#lib/server/auth.ts';
 
 /** A team the caller belongs to, or any team if they are an admin. */
 async function readableTeam(

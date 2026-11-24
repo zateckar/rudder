@@ -31,7 +31,7 @@ import {
   metaRuleNote,
   splitRuleSource,
   tagOf,
-} from '$lib/appsec-rules';
+} from '#lib/appsec-rules.ts';
 
 /**
  * One entry in an application's exclusion list. Three kinds, deliberately kept
@@ -322,8 +322,8 @@ export function generateAppsecConfig(exclusions: AppsecExclusion[]): string {
  */
 export async function applicationHostnames(applicationId: string): Promise<string[]> {
   const [{ db }, { applications, containers }, { eq }] = await Promise.all([
-    import('$lib/db'),
-    import('$lib/db/schema'),
+    import('#lib/db/index.ts'),
+    import('#lib/db/schema.ts'),
     import('drizzle-orm'),
   ]);
 
@@ -368,8 +368,8 @@ export async function applicationIdForHostname(host: string): Promise<string | n
   if (!bare) return null;
 
   const [{ db }, { applications, containers }, { eq }] = await Promise.all([
-    import('$lib/db'),
-    import('$lib/db/schema'),
+    import('#lib/db/index.ts'),
+    import('#lib/db/schema.ts'),
     import('drizzle-orm'),
   ]);
 
@@ -397,8 +397,8 @@ export async function appsecExclusionsForWorker(workerId: string): Promise<Appse
   // modules that must not open the database — the same reason
   // `routeGroupsForWorker` does it.
   const [{ db }, { applications, containers }, { eq }] = await Promise.all([
-    import('$lib/db'),
-    import('$lib/db/schema'),
+    import('#lib/db/index.ts'),
+    import('#lib/db/schema.ts'),
     import('drizzle-orm'),
   ]);
 

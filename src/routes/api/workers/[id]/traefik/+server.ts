@@ -1,11 +1,11 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { containers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { containers } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { withPodman } from '$lib/server/podman-client';
-import { requireWorker, route } from '$lib/server/auth';
-import type { PodmanClient } from '$lib/server/podman';
+import { withPodman } from '#lib/server/podman-client.ts';
+import { requireWorker, route } from '#lib/server/auth.ts';
+import type { PodmanClient } from '#lib/server/podman.ts';
 
 /** Run a command in the Traefik container; empty string on any failure. */
 async function restExec(client: PodmanClient, containerId: string, cmd: string[]): Promise<string> {

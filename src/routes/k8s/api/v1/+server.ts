@@ -1,4 +1,4 @@
-import { authenticateK8s, k8sError, k8sJson } from '$lib/server/k8s/auth';
+import { authenticateK8s, k8sError, k8sJson } from '#lib/server/k8s/auth.ts';
 
 export async function GET({ request }: { request: Request }) {
   const ctx = await authenticateK8s(request);

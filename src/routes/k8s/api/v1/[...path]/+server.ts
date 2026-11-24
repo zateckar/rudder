@@ -21,7 +21,7 @@ import {
   k8sJson,
   resolveTeamBySlug,
   getAccessibleTeams,
-} from '$lib/server/k8s/auth';
+} from '#lib/server/k8s/auth.ts';
 import {
   teamToNamespace,
   containerToPod,
@@ -29,11 +29,11 @@ import {
   matchPath,
   parseTailLines,
   podNameOf,
-} from '$lib/server/k8s/mapper';
-import { db } from '$lib/db';
-import { applications, containers, deployments, workers } from '$lib/db/schema';
+} from '#lib/server/k8s/mapper.ts';
+import { db } from '#lib/db/index.ts';
+import { applications, containers, deployments, workers } from '#lib/db/schema.ts';
 import { desc, eq } from 'drizzle-orm';
-import { getRestPodmanClient } from '$lib/server/podman-client';
+import { getRestPodmanClient } from '#lib/server/podman-client.ts';
 
 // ── GET ────────────────────────────────────────────────────────
 

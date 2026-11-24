@@ -1,8 +1,8 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { executeSSHCommand, type SSHConnectionConfig } from '$lib/server/ssh';
-import { parseJsonBody, schemas } from '$lib/server/validation';
-import { requireWorker, route } from '$lib/server/auth';
+import { executeSSHCommand, type SSHConnectionConfig } from '#lib/server/ssh.ts';
+import { parseJsonBody, schemas } from '#lib/server/validation.ts';
+import { requireWorker, route } from '#lib/server/auth.ts';
 
 export const POST: RequestHandler = route(async (event) => {
   const { worker } = await requireWorker(event, event.params.id!);

@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { executeSSHCommand } from '$lib/server/ssh';
-import { requireWorker, route } from '$lib/server/auth';
+import { executeSSHCommand } from '#lib/server/ssh.ts';
+import { requireWorker, route } from '#lib/server/auth.ts';
 
 /**
  * POST /api/workers/caddy — restart Traefik on a worker.

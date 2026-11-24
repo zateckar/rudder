@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, describe, expect, test } from 'bun:test';
-import { db, sqlite } from '$lib/db';
-import { applications, containers, deployments, workers } from '$lib/db/schema';
+import { db, sqlite } from '#lib/db/index.ts';
+import { applications, containers, deployments, workers } from '#lib/db/schema.ts';
 import { desc, eq } from 'drizzle-orm';
 import { commitGenerationCutover, revertGenerationCutover, revertRetainedGenerationCutover } from './lifecycle-cutover';
 import { executeApplicationDeploy, executeFastRollback, sweepExpiredGenerations, sweepInterruptedGenerations } from './deploy';

@@ -1,11 +1,11 @@
 import { json } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { backupConfig } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { backupConfig } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { encrypt } from '$lib/server/encryption';
-import { performBackup, listBackups, restoreBackup, restoreIsPending, testConnection } from '$lib/server/backup';
+import { encrypt } from '#lib/server/encryption.ts';
+import { performBackup, listBackups, restoreBackup, restoreIsPending, testConnection } from '#lib/server/backup.ts';
 import type { RequestHandler } from './$types';
-import { requireAdminUser, route } from '$lib/server/auth';
+import { requireAdminUser, route } from '#lib/server/auth.ts';
 
 /** GET: Return backup config (without decrypted access key) + list of available backups */
 export const GET: RequestHandler = route(async (event) => {

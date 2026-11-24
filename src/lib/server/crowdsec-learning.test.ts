@@ -75,12 +75,12 @@ test('only valid, exact and unambiguous stored alert IDs join to the active requ
   ]);
 });
 
-test('a learning pilot is scoped to the installed application and a shared registered origin', async () => {
+test('an ingress learning gateway is scoped to the installed application and its registered origin', async () => {
   const origin = 'https://app.example.test';
   const client = {
     listContainers: async () => ['gateway', 'engine'].map((role) => ({
       Id: role,
-      Names: [`/rudder-learning-pilot-${role}`],
+      Names: [role === 'gateway' ? '/rudder-learning-ingress-installed-app' : '/rudder-learning-pilot-engine'],
       Labels: {
         'io.rudder.crowdsec-learning': role,
         'io.rudder.crowdsec-learning.origin': origin,

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { browser } from '$app/env';
-  import { terminalSubprotocols } from '$lib/terminal-protocol';
+  import { terminalSubprotocols } from '#lib/terminal-protocol.ts';
 
   export let containerId: string;
   export let tokenEndpoint: string = '/api/terminal/token';
@@ -121,7 +121,7 @@
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
     // No credential and no target in the URL. The token goes in the handshake's
-    // subprotocol list (see $lib/terminal-protocol), and the server reads which
+    // subprotocol list (see #lib/terminal-protocol), and the server reads which
     // container to attach to out of the token rather than from the query string,
     // so there is nothing left here worth putting in a proxy's access log.
     const wsUrl = `${protocol}//${host}${wsEndpoint}`;

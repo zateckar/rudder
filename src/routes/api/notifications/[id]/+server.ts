@@ -1,10 +1,10 @@
 /** One notification channel. Admin-only, like the collection endpoint. */
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { notificationChannels } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { notificationChannels } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { requireAdminUser, route } from '$lib/server/auth';
+import { requireAdminUser, route } from '#lib/server/auth.ts';
 
 export const PATCH: RequestHandler = route(async ({ params, request, locals }) => {
   requireAdminUser({ locals });

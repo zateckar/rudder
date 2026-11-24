@@ -1,5 +1,5 @@
 import { json } from '@sveltejs/kit';
-import { getSessionIdFromCookies, destroySession, deleteSessionCookie } from '$lib/auth';
+import { getSessionIdFromCookies, destroySession, deleteSessionCookie } from '#lib/auth/index.ts';
 
 export const POST = async ({ cookies }: { cookies: any }) => {
   const sessionId = getSessionIdFromCookies(cookies);

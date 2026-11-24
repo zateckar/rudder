@@ -1,6 +1,6 @@
 import { json } from '@sveltejs/kit';
-import { executeApplicationDeploy } from '$lib/server/deploy';
-import { canAccessApplication, requireAuth } from '$lib/server/auth';
+import { executeApplicationDeploy } from '#lib/server/deploy.ts';
+import { canAccessApplication, requireAuth } from '#lib/server/auth.ts';
 
 export async function PATCH({ params, request, cookies }: { params: { id: string }; request: Request; cookies: any }) {
   const ctx = await requireAuth(cookies);

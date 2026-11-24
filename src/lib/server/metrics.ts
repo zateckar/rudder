@@ -18,8 +18,8 @@
  * every container's stats — behind one client, workers are swept concurrently,
  * and the container list is handed to reconciliation rather than fetched again.
  */
-import { db, sqlite } from '$lib/db';
-import { containers, workers, containerMetrics, workerMetrics, workerPings } from '$lib/db/schema';
+import { db, sqlite } from '#lib/db/index.ts';
+import { containers, workers, containerMetrics, workerMetrics, workerPings } from '#lib/db/schema.ts';
 import { and, eq, lt, ne, sql } from 'drizzle-orm';
 import { getRestPodmanClient } from './podman-client';
 import { getHostStatsHttp } from './host-metrics-http';

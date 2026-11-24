@@ -88,8 +88,8 @@ export function openLearningState(path: string) {
         FROM sessions WHERE id = ? AND expires_at > ?
       `).get(id, Date.now() - retention);
       if (!session) return null;
-      const requests = db.query<{ id: string; at: number; status: number }, [string]>(`
-        SELECT id, at, status FROM requests WHERE session_id = ? ORDER BY at, id
+      const requests = db.query<{ id: string; at: number; status: number | null }, [string]>(`
+        SELECT id, at, NULLIF(status, 0) AS status FROM requests WHERE session_id = ? ORDER BY at, id
       `).all(id);
       return { ...session, requests };
     }),

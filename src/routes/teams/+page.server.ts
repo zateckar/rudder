@@ -1,7 +1,7 @@
-import { db } from '$lib/db';
-import { teamMembers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { teamMembers } from '#lib/db/schema.ts';
 import { inArray, count } from 'drizzle-orm';
-import { requirePageUser, userTeams } from '$lib/server/auth';
+import { requirePageUser, userTeams } from '#lib/server/auth.ts';
 
 export const load = async (event: { locals: App.Locals }) => {
   const user = requirePageUser(event).user;

@@ -10,9 +10,9 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { parseCompose, validateCompose } from '$lib/server/compose';
-import { parseK8sManifest, validateK8sManifest } from '$lib/server/kubernetes';
-import type { PlanContext } from '$lib/server/deploy/plan';
+import { parseCompose, validateCompose } from '#lib/server/compose.ts';
+import { parseK8sManifest, validateK8sManifest } from '#lib/server/kubernetes.ts';
+import type { PlanContext } from '#lib/server/deploy/plan.ts';
 
 const SOURCE = readFileSync(join(import.meta.dir, '+page.svelte'), 'utf-8');
 

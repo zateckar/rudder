@@ -1,8 +1,8 @@
 import { json } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { applicationTemplates, applications } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applicationTemplates, applications } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { canAccessApplication } from '$lib/server/auth';
+import { canAccessApplication } from '#lib/server/auth.ts';
 
 export const POST = async ({ request, cookies }: { request: Request; cookies: any }) => {
   const formData = await request.formData();

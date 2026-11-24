@@ -7,10 +7,10 @@
  * the part pinned down here.
  */
 import { beforeAll, describe, expect, test } from 'bun:test';
-import { db } from '$lib/db';
-import { teamMembers, teams, users } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { teamMembers, teams, users } from '#lib/db/schema.ts';
 import { and, eq } from 'drizzle-orm';
-import { syncUserTeams } from '$lib/server/oidc-teams';
+import { syncUserTeams } from '#lib/server/oidc-teams.ts';
 
 /** Team ids by name, so assertions can talk about names. */
 const teamIds = new Map<string, string>();

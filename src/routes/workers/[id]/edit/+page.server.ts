@@ -1,10 +1,10 @@
 import { redirect, fail, error } from '@sveltejs/kit';
-import { db, safeWorkerColumns } from '$lib/db';
-import { workers } from '$lib/db/schema';
+import { db, safeWorkerColumns } from '#lib/db/index.ts';
+import { workers } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { domainFormatError } from '$lib/server/domains';
-import { workerTargetError } from '$lib/server/ssh-target';
-import { currentUser, isAdmin, requirePageAdmin } from '$lib/server/auth';
+import { domainFormatError } from '#lib/server/domains.ts';
+import { workerTargetError } from '#lib/server/ssh-target.ts';
+import { currentUser, isAdmin, requirePageAdmin } from '#lib/server/auth.ts';
 
 export const load = async (event: { params: { id: string }; locals: App.Locals }) => {
   const user = requirePageAdmin(event).user;

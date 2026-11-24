@@ -14,7 +14,7 @@ export interface LearningSession {
   enrolledAt: number | null;
   expiresAt: number;
   revokedAt: number | null;
-  requests: { id: string; at: number; status: number }[];
+  requests: { id: string; at: number; status: number | null }[];
 }
 
 export interface LearningAlert {
@@ -35,16 +35,17 @@ export async function openLearningPilot(client: PodmanClient, applicationId: str
   const origins = new Set(hosts.filter((host) => /^[a-z0-9.-]+$/i.test(host))
     .map((host) => `https://${host.toLowerCase()}`));
   const containers = await client.listContainers(false);
-  const byRole = (role: 'gateway' | 'engine') => containers.filter((container) =>
-    container.Labels?.[roleLabel] === role && container.Labels[applicationLabel] === applicationId &&
+  const gateway = containers.filter((container) =>
+    container.Labels?.[roleLabel] === 'gateway' && container.Labels[applicationLabel] === applicationId &&
     origins.has(container.Labels[originLabel]) &&
-    container.Names?.some((name) => name.replace(/^\//, '') === `rudder-learning-pilot-${role}`)
+    container.Names?.some((name) => {
+      const normalized = name.replace(/^\//, '');
+      return normalized === 'rudder-learning-pilot-gateway' ||
+        normalized === `rudder-learning-ingress-${applicationId}`;
+    })
   );
-  const gateway = byRole('gateway');
-  const engine = byRole('engine');
-  if (gateway.length !== 1 || engine.length !== 1) return null;
+  if (gateway.length !== 1) return null;
   const origin = gateway[0].Labels[originLabel];
-  if (engine[0].Labels[originLabel] !== origin) return null;
 
   async function manage<T>(action: string, ...args: string[]): Promise<T> {
     const result = await client.execContainerHttp(gateway[0].Id,
@@ -67,15 +68,8 @@ export async function openLearningPilot(client: PodmanClient, applicationId: str
     },
     revoke: (id: string) => manage<boolean>('revoke', id),
     async read(id: string) {
-      const session = await manage<LearningSession | null>('read', id);
-      if (!session) return null;
-      const result = await client.execContainerHttp(engine[0].Id,
-        ['cscli', 'alerts', 'list', '-a', '--since', '25h', '--limit', '1000', '-o', 'json']);
-      if (result.exitCodeKnown === false || result.exitCode !== 0) throw new Error('Stored CrowdSec alerts unavailable');
-      const alerts: unknown = JSON.parse(result.stdout);
-      if (alerts !== null && !Array.isArray(alerts)) throw new Error('Invalid CrowdSec alert list');
-      const stored = Array.isArray(alerts) ? alerts : [];
-      return { ...joinLearningAlerts(session, stored), alertsTruncated: stored.length >= 1000 };
+      const report = await manage<{ session: LearningSession; alerts: unknown[] } | null>('report', id);
+      return report && joinLearningAlerts(report.session, report.alerts);
     },
   };
 }

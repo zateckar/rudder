@@ -1,14 +1,14 @@
-import { db } from '$lib/db';
-import { systemSettings } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { systemSettings } from '#lib/db/schema.ts';
 import { inArray } from 'drizzle-orm';
-import { requirePageAdmin } from '$lib/server/auth';
+import { requirePageAdmin } from '#lib/server/auth.ts';
 
 /**
  * Each setting and what the code that reads it falls back to when the row is
  * absent.
  *
- * These defaults must agree with the ones in $lib/server/metrics,
- * $lib/server/alerts and $lib/server/retention. Showing a different number here
+ * These defaults must agree with the ones in #lib/server/metrics,
+ * #lib/server/alerts and #lib/server/retention. Showing a different number here
  * would tell an operator the panel runs on a cadence it does not — the control
  * is the only place most of these are ever seen.
  */

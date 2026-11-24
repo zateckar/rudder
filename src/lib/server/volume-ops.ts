@@ -19,7 +19,7 @@
  * the answer is yes.
  */
 import type http from 'http';
-import type { workers } from '$lib/db/schema';
+import type { workers } from '#lib/db/schema.ts';
 import { env } from './env';
 import { realizeMounts, type MountIntent } from './mounts';
 import type { PodmanClient } from './podman';

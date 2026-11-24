@@ -1,16 +1,16 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import Modal from '$lib/components/Modal.svelte';
-  import PageHeader from '$lib/components/PageHeader.svelte';
-  import { formatBytes, formatTime } from '$lib/format';
+  import Modal from '#lib/components/Modal.svelte';
+  import PageHeader from '#lib/components/PageHeader.svelte';
+  import { formatBytes, formatTime } from '#lib/format.ts';
   import { invalidateAll } from '$app/navigation';
-  import ContainerTerminal from '$lib/components/ContainerTerminal.svelte';
-  import YamlEditor from '$lib/components/YamlEditor.svelte';
-  import { showToast } from '$lib/client/toast.svelte';
-  import { confirmAction, type ConfirmRequest } from '$lib/client/dialog.svelte';
-  import { lifecycleControls, lifecycleLabel } from '$lib/client/lifecycle-controls';
-  import AppsecMatches from '$lib/components/AppsecMatches.svelte';
-  import CrowdsecLearning from '$lib/components/CrowdsecLearning.svelte';
+  import ContainerTerminal from '#lib/components/ContainerTerminal.svelte';
+  import YamlEditor from '#lib/components/YamlEditor.svelte';
+  import { showToast } from '#lib/client/toast.svelte.ts';
+  import { confirmAction, type ConfirmRequest } from '#lib/client/dialog.svelte.ts';
+  import { lifecycleControls, lifecycleLabel } from '#lib/client/lifecycle-controls.ts';
+  import AppsecMatches from '#lib/components/AppsecMatches.svelte';
+  import CrowdsecLearning from '#lib/components/CrowdsecLearning.svelte';
 
   /** One failed container's output, as the deployment recorded it. */
   interface ContainerOutput {

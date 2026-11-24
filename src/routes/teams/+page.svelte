@@ -1,5 +1,5 @@
 <script lang="ts">
-  import PageHeader from '$lib/components/PageHeader.svelte';
+  import PageHeader from '#lib/components/PageHeader.svelte';
   import { invalidateAll } from '$app/navigation';
 
   let { data } = $props();

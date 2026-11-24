@@ -1,9 +1,9 @@
 import { fail } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { oidcConfig } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { oidcConfig } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { isAdmin, currentUser as sessionUser, requirePageAdmin } from '$lib/server/auth';
-import { decryptField, encryptField } from '$lib/server/encryption';
+import { isAdmin, currentUser as sessionUser, requirePageAdmin } from '#lib/server/auth.ts';
+import { decryptField, encryptField } from '#lib/server/encryption.ts';
 
 export const load = async (event: { locals: App.Locals; url: URL }) => {
   const currentUser = requirePageAdmin(event).user;

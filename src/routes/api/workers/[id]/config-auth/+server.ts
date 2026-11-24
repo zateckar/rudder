@@ -1,10 +1,10 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { workers } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { encryptField } from '$lib/server/encryption';
-import { requireWorker, route } from '$lib/server/auth';
+import { encryptField } from '#lib/server/encryption.ts';
+import { requireWorker, route } from '#lib/server/auth.ts';
 
 /**
  * HTTP Basic credentials the worker presents to whatever sits in front of the

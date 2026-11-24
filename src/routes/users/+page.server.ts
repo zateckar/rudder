@@ -1,7 +1,7 @@
-import { db } from '$lib/db';
-import { teamMembers, teams, userOidc, users } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { teamMembers, teams, userOidc, users } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { requirePageAdmin } from '$lib/server/auth';
+import { requirePageAdmin } from '#lib/server/auth.ts';
 
 export const load = async (event: { locals: App.Locals }) => {
   const currentUser = requirePageAdmin(event).user;

@@ -1,0 +1,7 @@
+displayName: Rudder CrowdSec learning
+type: middleware
+import: github.com/rudder-learning/ingress
+summary: Correlate enrolled browser requests without changing CrowdSec enforcement
+testData:
+  originHost: app.example.test
+  endpoint: http://127.0.0.1:8079/_capture

@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { eq } from 'drizzle-orm';
-import { db } from '$lib/db';
-import { applications, containers, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, containers, workers } from '#lib/db/schema.ts';
 import { desiredState, diff, toObserved } from './reconcile';
 import { evictPodmanClient } from './podman-client';
 import { OUT_OF_BAND_STOP_SETTLE_MS, synchronizeWorkerRuntimePolicies } from './runtime-policy';

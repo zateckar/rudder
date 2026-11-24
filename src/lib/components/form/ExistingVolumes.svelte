@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { formatBytes } from '$lib/format';
-  import { showToast } from '$lib/client/toast.svelte';
+  import { formatBytes } from '#lib/format.ts';
+  import { showToast } from '#lib/client/toast.svelte.ts';
   import {
     composeMounts,
     composeServiceNames,
     k8sVolumeSnippet,
     useVolumeInCompose,
-  } from '$lib/manifest-volumes';
+  } from '#lib/manifest-volumes.ts';
 
   /**
    * Existing volumes the team already has on the chosen worker, offered while a

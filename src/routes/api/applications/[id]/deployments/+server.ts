@@ -1,11 +1,11 @@
 import { json } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { deployments, users } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { deployments, users } from '#lib/db/schema.ts';
 import { eq, desc } from 'drizzle-orm';
-import { fastRollbackTargets } from '$lib/server/deploy';
-import { parseCapturedOutput } from '$lib/server/deploy/failure-logs';
-import { canAccessApplication } from '$lib/server/auth';
-import { rollbackToDeployment } from '$lib/server/rollback';
+import { fastRollbackTargets } from '#lib/server/deploy.ts';
+import { parseCapturedOutput } from '#lib/server/deploy/failure-logs.ts';
+import { canAccessApplication } from '#lib/server/auth.ts';
+import { rollbackToDeployment } from '#lib/server/rollback.ts';
 
 /** Read the notes column, tolerating rows written before it existed. */
 function parseNotes(raw: string | null): string[] {
@@ -93,7 +93,7 @@ export async function POST({ params, request, cookies }: { params: { id: string 
     return json({ error: 'deploymentId is required' }, { status: 400 });
   }
 
-  // Shared with the MCP server — see $lib/server/rollback.
+  // Shared with the MCP server — see #lib/server/rollback.
   const result = await rollbackToDeployment(access.application, deploymentId, userId);
   if (!result.success) {
     return json(

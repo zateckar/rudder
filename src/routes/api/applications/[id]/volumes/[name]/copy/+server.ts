@@ -1,14 +1,14 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { requireApplication, route } from '$lib/server/auth';
+import { requireApplication, route } from '#lib/server/auth.ts';
 import {
   assertNotSharedWithOthers,
   requireAppVolume,
   runningContainerNames,
-} from '$lib/server/app-volumes';
-import { cloneVolume, restoreFromCopy } from '$lib/server/volume-ops';
-import { LockError, VOLUME_OP_TTL_MS, withLock, workerDeployLock } from '$lib/server/locks';
-import { parseVolumeCopyName } from '$lib/server/volumes';
+} from '#lib/server/app-volumes.ts';
+import { cloneVolume, restoreFromCopy } from '#lib/server/volume-ops.ts';
+import { LockError, VOLUME_OP_TTL_MS, withLock, workerDeployLock } from '#lib/server/locks.ts';
+import { parseVolumeCopyName } from '#lib/server/volumes.ts';
 
 /**
  * Hold the worker's deploy lock for the duration of `fn`.

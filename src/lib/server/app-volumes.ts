@@ -21,8 +21,8 @@
  * volumes on the worker nothing declares any more — are then testable against a
  * fixture without a worker.
  */
-import { db } from '$lib/db';
-import { applications, containers, teams, volumes, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, containers, teams, volumes, workers } from '#lib/db/schema.ts';
 import { eq, inArray } from 'drizzle-orm';
 import { AuthorizationError } from './auth';
 import type { MountIntent } from './mounts';

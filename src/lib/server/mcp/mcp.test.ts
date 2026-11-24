@@ -7,8 +7,8 @@
  * token — is exercised against real WebCrypto, without Keycloak.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { db } from '$lib/db';
-import { applications, auditLogs, deployments, teams } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, auditLogs, deployments, teams } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
 import { JwtVerifier, TokenError } from './jwt';
 import { resolveTeams, teamNameFromAudience, teamNamesFromAudience } from './teams';
@@ -404,7 +404,7 @@ describe('/mcp', () => {
 
   test('a second operation on an application with one running is refused', async () => {
     // Give the app a (fictional) worker so the worker check passes and the busy check is what answers.
-    const { workers } = await import('$lib/db/schema');
+    const { workers } = await import('#lib/db/schema.ts');
     const workerId = crypto.randomUUID();
     await db.insert(workers).values({
       id: workerId, name: 'w', hostname: 'w.example.test', sshUser: 'root',

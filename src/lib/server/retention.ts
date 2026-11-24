@@ -13,9 +13,9 @@
  * simply never given it.
  */
 
-import { sqlite } from '$lib/db';
+import { sqlite } from '#lib/db/index.ts';
 import { getTableName } from 'drizzle-orm';
-import { auditLogs, alertEvents } from '$lib/db/schema';
+import { auditLogs, alertEvents } from '#lib/db/schema.ts';
 import { numericSetting } from './settings';
 
 /**

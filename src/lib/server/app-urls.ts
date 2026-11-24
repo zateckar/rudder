@@ -14,7 +14,7 @@
  * otherwise an http-mode application shows no URL at all unless someone set an
  * explicit domain.
  */
-import type { containers } from '$lib/db/schema';
+import type { containers } from '#lib/db/schema.ts';
 import {
   ENTRYPOINT_PORTS,
   MAX_ROUTES_PER_CONTAINER,

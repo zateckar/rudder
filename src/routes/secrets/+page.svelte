@@ -1,8 +1,8 @@
 <script lang="ts">
-  import PageHeader from '$lib/components/PageHeader.svelte';
+  import PageHeader from '#lib/components/PageHeader.svelte';
   import { onMount } from 'svelte';
-  import { showToast } from '$lib/client/toast.svelte';
-  import { confirmAction } from '$lib/client/dialog.svelte';
+  import { showToast } from '#lib/client/toast.svelte.ts';
+  import { confirmAction } from '#lib/client/dialog.svelte.ts';
 
   let { data } = $props();
   let secretsList = $state<any[]>([]);

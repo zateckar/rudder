@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { getRestPodmanClient, withPodman } from '$lib/server/podman-client';
-import { requireContainer, route } from '$lib/server/auth';
+import { getRestPodmanClient, withPodman } from '#lib/server/podman-client.ts';
+import { requireContainer, route } from '#lib/server/auth.ts';
 
 export const GET: RequestHandler = route(async (event) => {
   const { url } = event;

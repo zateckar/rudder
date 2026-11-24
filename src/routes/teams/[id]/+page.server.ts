@@ -1,8 +1,8 @@
 import { redirect } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { teams, teamMembers, users, apiKeys } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { teams, teamMembers, users, apiKeys } from '#lib/db/schema.ts';
 import { eq, and } from 'drizzle-orm';
-import { requirePageUser } from '$lib/server/auth';
+import { requirePageUser } from '#lib/server/auth.ts';
 
 export const load = async (event: { params: { id: string }; locals: App.Locals }) => {
   const currentUser = requirePageUser(event).user;

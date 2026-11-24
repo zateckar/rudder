@@ -1,7 +1,7 @@
-import { db } from '$lib/db';
-import { notificationChannels, alertRules, alertEvents, teamMembers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { notificationChannels, alertRules, alertEvents, teamMembers } from '#lib/db/schema.ts';
 import { eq, desc, inArray } from 'drizzle-orm';
-import { requirePageAdmin } from '$lib/server/auth';
+import { requirePageAdmin } from '#lib/server/auth.ts';
 
 export const load = async (event: { locals: App.Locals; url: URL }) => {
   // Notification channels carry webhook URLs and credentials, and alert rules

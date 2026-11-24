@@ -1,12 +1,12 @@
 <script lang="ts">
   import { page } from '$app/state';
-  import AppLayout from '$lib/components/AppLayout.svelte';
-  import Toasts from '$lib/components/Toasts.svelte';
-  import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
+  import AppLayout from '#lib/components/AppLayout.svelte';
+  import Toasts from '#lib/components/Toasts.svelte';
+  import ConfirmDialog from '#lib/components/ConfirmDialog.svelte';
 
   // Shared UI primitives — buttons, form controls, modals, tables. Loaded once
   // here so pages carry only what is genuinely their own. See ui.css.
-  import '$lib/styles/ui.css';
+  import '#lib/styles/ui.css';
 
   let { data, children }: {
     data: {

@@ -11,13 +11,13 @@
  * Every operation that changes something runs as a background task (see
  * tasks.ts) and returns its id at once; `get_task` reports progress.
  *
- * The tenancy rule is the one $lib/server/auth applies to sessions: an
+ * The tenancy rule is the one #lib/server/auth applies to sessions: an
  * application outside the caller's teams is "not found", never "forbidden", so
  * the tools cannot be used to learn which ids exist elsewhere.
  */
 import { z } from 'zod';
-import { db } from '$lib/db';
-import { applications, auditLogs, containers, deployments, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, auditLogs, containers, deployments, workers } from '#lib/db/schema.ts';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { executeApplicationDeploy } from '../deploy';
 import { runLifecycleAction } from '../app-lifecycle';

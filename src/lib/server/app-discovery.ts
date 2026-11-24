@@ -40,16 +40,16 @@
  * empty, and the operator sets it.
  */
 
-import { db } from '$lib/db';
-import { applications, containers, deployments, teams, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, containers, deployments, teams, workers } from '#lib/db/schema.ts';
 import { and, eq } from 'drizzle-orm';
-import { getRestPodmanClient } from '$lib/server/podman-client';
-import type { Container, ContainerInspect } from '$lib/server/podman';
+import { getRestPodmanClient } from '#lib/server/podman-client.ts';
+import type { Container, ContainerInspect } from '#lib/server/podman.ts';
 // A container's labels can carry an OIDC client secret stamped in by an earlier
 // deploy; keep it out of Rudder's database.
-import { redactSecretLabels } from '$lib/server/redaction';
-import { podmanName } from '$lib/server/reconcile';
-import { assertDomainAvailable, withApplicationDomainWrite } from '$lib/server/domains';
+import { redactSecretLabels } from '#lib/server/redaction.ts';
+import { podmanName } from '#lib/server/reconcile.ts';
+import { assertDomainAvailable, withApplicationDomainWrite } from '#lib/server/domains.ts';
 
 /** Platform containers. Rudder runs these; they are not applications. */
 const INFRASTRUCTURE = ['traefik', 'crowdsec', 'podman-api'];

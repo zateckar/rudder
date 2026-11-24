@@ -1,32 +1,32 @@
 import { redirect, fail } from '@sveltejs/kit';
-import { db, safeWorkerColumns, safeUserColumns } from '$lib/db';
-import { applications, users, workers, teams, teamMembers, volumes } from '$lib/db/schema';
+import { db, safeWorkerColumns, safeUserColumns } from '#lib/db/index.ts';
+import { applications, users, workers, teams, teamMembers, volumes } from '#lib/db/schema.ts';
 import { eq, inArray, or, isNull } from 'drizzle-orm';
 import {
   canAccessApplication,
   requirePageUser,
   userTeams as allUserTeams,
-} from '$lib/server/auth';
-import { assertDomainAvailable, withApplicationDomainWrite } from '$lib/server/domains';
-import { ALLOWED_DOMAINS_UNSUPPORTED, normalizeTokenHeader, tokenHeadersError } from '$lib/server/oidc';
-import { DEFAULT_HEALTH_TIMEOUT_S } from '$lib/server/generations';
-import { imageReferenceError } from '$lib/server/image-reference';
-import { IMAGE_UPDATE_INTERVAL_ERROR, parseImageUpdateFormSettings } from '$lib/image-update-settings';
-import { decryptField, encryptField } from '$lib/server/encryption';
+} from '#lib/server/auth.ts';
+import { assertDomainAvailable, withApplicationDomainWrite } from '#lib/server/domains.ts';
+import { ALLOWED_DOMAINS_UNSUPPORTED, normalizeTokenHeader, tokenHeadersError } from '#lib/server/oidc.ts';
+import { DEFAULT_HEALTH_TIMEOUT_S } from '#lib/server/generations.ts';
+import { imageReferenceError } from '#lib/server/image-reference.ts';
+import { IMAGE_UPDATE_INTERVAL_ERROR, parseImageUpdateFormSettings } from '#lib/image-update-settings.ts';
+import { decryptField, encryptField } from '#lib/server/encryption.ts';
 import {
   EXPOSED_PORTS_ERROR,
   MAX_ROUTES_PER_CONTAINER,
   parseExposedPorts,
   parsePortList,
   serializeExposedPorts,
-} from '$lib/server/deploy/plan';
+} from '#lib/server/deploy/plan.ts';
 import {
   APPSEC_RULES_ERROR,
   appsecRuleError,
   parseAppsecRules,
   parseRuleList,
   serializeAppsecRules,
-} from '$lib/server/appsec';
+} from '#lib/server/appsec.ts';
 
 /**
  * Volume-registry ids this application's `volumes` column already names.

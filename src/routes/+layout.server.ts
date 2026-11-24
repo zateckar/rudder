@@ -1,5 +1,5 @@
 import { redirect } from '@sveltejs/kit';
-import { currentUser, userTeams } from '$lib/server/auth';
+import { currentUser, userTeams } from '#lib/server/auth.ts';
 
 /**
  * The user every page's layout renders, and the gate that sends an anonymous

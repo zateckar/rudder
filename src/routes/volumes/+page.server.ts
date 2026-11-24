@@ -1,11 +1,11 @@
 import type { PageServerLoad } from './$types';
-import { db, safeWorkerColumns } from '$lib/db';
-import { applications, volumes, teams, workers, teamMembers } from '$lib/db/schema';
+import { db, safeWorkerColumns } from '#lib/db/index.ts';
+import { applications, volumes, teams, workers, teamMembers } from '#lib/db/schema.ts';
 import { eq, inArray } from 'drizzle-orm';
-import { requirePageUser } from '$lib/server/auth';
-import { withPodman } from '$lib/server/podman-client';
-import { registryVolumeName } from '$lib/server/volumes';
-import { storageForApplications, unclaimedVolumes } from '$lib/server/app-volumes';
+import { requirePageUser } from '#lib/server/auth.ts';
+import { withPodman } from '#lib/server/podman-client.ts';
+import { registryVolumeName } from '#lib/server/volumes.ts';
+import { storageForApplications, unclaimedVolumes } from '#lib/server/app-volumes.ts';
 
 export const load: PageServerLoad = async (event) => {
   const currentUser = requirePageUser(event).user;

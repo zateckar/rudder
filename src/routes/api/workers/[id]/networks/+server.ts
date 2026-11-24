@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { withPodman } from '$lib/server/podman-client';
-import { requireWorker, route } from '$lib/server/auth';
+import { withPodman } from '#lib/server/podman-client.ts';
+import { requireWorker, route } from '#lib/server/auth.ts';
 
 /** Podman's own networks. Removing one of these breaks the worker. */
 const PROTECTED_NETWORKS = ['podman', 'bridge', 'host', 'none'];

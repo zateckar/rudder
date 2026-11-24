@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { withPodman } from '$lib/server/podman-client';
-import { requireWorker, route } from '$lib/server/auth';
+import { withPodman } from '#lib/server/podman-client.ts';
+import { requireWorker, route } from '#lib/server/auth.ts';
 import {
   crowdsecReadError,
   decisionsFromExec,
@@ -12,7 +12,7 @@ import {
   type AppsecSourceGroup,
   type CscliResult,
   type DecisionsRead,
-} from '$lib/server/crowdsec';
+} from '#lib/server/crowdsec.ts';
 import {
   decisionsLifted,
   exemptionCommands,
@@ -21,7 +21,7 @@ import {
   listAlreadyExists,
   normaliseComment,
   type ExemptionsRead,
-} from '$lib/server/crowdsec-exemptions';
+} from '#lib/server/crowdsec-exemptions.ts';
 
 /**
  * Recent AppSec alerts, for the panel that names which rules actually fired.

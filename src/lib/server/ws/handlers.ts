@@ -8,22 +8,22 @@
  */
 import type { IncomingMessage } from 'http';
 import type { WebSocket } from 'ws';
-import { db } from '$lib/db';
-import { applications, containers, teams, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, containers, teams, workers } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { validateTerminalToken } from '$lib/server/terminal-tokens';
-import { getRestPodmanClient } from '$lib/server/podman-client';
-import { executeSSHCommand, type SSHConnectionConfig } from '$lib/server/ssh';
-import { authenticateK8s } from '$lib/server/k8s/auth';
-import { podNameOf } from '$lib/server/k8s/mapper';
-import { TERMINAL_SUBPROTOCOL, tokenFromSubprotocols } from '$lib/terminal-protocol';
+import { validateTerminalToken } from '#lib/server/terminal-tokens.ts';
+import { getRestPodmanClient } from '#lib/server/podman-client.ts';
+import { executeSSHCommand, type SSHConnectionConfig } from '#lib/server/ssh.ts';
+import { authenticateK8s } from '#lib/server/k8s/auth.ts';
+import { podNameOf } from '#lib/server/k8s/mapper.ts';
+import { TERMINAL_SUBPROTOCOL, tokenFromSubprotocols } from '#lib/terminal-protocol.ts';
 import {
   CHANNEL,
   frame,
   parseFrame,
   selectChannelProtocol,
   statusFrame,
-} from '$lib/server/k8s/channel';
+} from '#lib/server/k8s/channel.ts';
 import { registerWsRoute } from './registry';
 
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000;

@@ -1,17 +1,17 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { applications } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { requireApplication, route } from '$lib/server/auth';
+import { requireApplication, route } from '#lib/server/auth.ts';
 import {
   applicationIdForHostname,
   appsecRuleError,
   parseAppsecRules,
   parseRuleList,
   serializeAppsecRules,
-} from '$lib/server/appsec';
-import { joinRuleSource } from '$lib/appsec-rules';
+} from '#lib/server/appsec.ts';
+import { joinRuleSource } from '#lib/appsec-rules.ts';
 
 /**
  * POST /api/applications/appsec-rules

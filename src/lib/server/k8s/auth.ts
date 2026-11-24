@@ -5,11 +5,11 @@
  * Keys can be global (access all teams) or team-scoped.
  */
 
-import { db } from '$lib/db';
-import { apiKeys, teams } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { apiKeys, teams } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { hashKey } from '$lib/server/encryption';
-import { touchApiKey } from '$lib/server/api-keys';
+import { hashKey } from '#lib/server/encryption.ts';
+import { touchApiKey } from '#lib/server/api-keys.ts';
 
 export interface K8sAuthContext {
   apiKeyId: string;

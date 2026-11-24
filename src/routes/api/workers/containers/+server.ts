@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { withPodman } from '$lib/server/podman-client';
-import { requireWorkerWithApi, route } from '$lib/server/auth';
+import { withPodman } from '#lib/server/podman-client.ts';
+import { requireWorkerWithApi, route } from '#lib/server/auth.ts';
 
 /**
  * GET /api/workers/containers?workerId=… — every container on one worker,

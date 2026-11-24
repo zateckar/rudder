@@ -1,15 +1,15 @@
 import { redirect, fail } from '@sveltejs/kit';
-import { db, safeWorkerColumns } from '$lib/db';
-import { applicationTemplates, applications, teams, teamMembers, workers } from '$lib/db/schema';
+import { db, safeWorkerColumns } from '#lib/db/index.ts';
+import { applicationTemplates, applications, teams, teamMembers, workers } from '#lib/db/schema.ts';
 import { eq, inArray, or } from 'drizzle-orm';
-import { buildAppDomain, assertDomainAvailable, withApplicationDomainWrite } from '$lib/server/domains';
+import { buildAppDomain, assertDomainAvailable, withApplicationDomainWrite } from '#lib/server/domains.ts';
 import {
   type AuthContext,
   canWriteToTeam,
   currentUser as sessionUser,
   isTeamMember,
   requirePageUser,
-} from '$lib/server/auth';
+} from '#lib/server/auth.ts';
 
 /** Whether this caller may share, unshare or delete a template. */
 async function canModifyTemplate(ctx: AuthContext, template: any): Promise<boolean> {

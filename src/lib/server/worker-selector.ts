@@ -3,8 +3,8 @@
  * Picks the worker with the most available CPU, memory, and disk capacity.
  * Returns null if all workers are over the utilization threshold (>85%).
  */
-import { db, safeWorkerColumns, toSafeWorker, type SafeWorker } from '$lib/db';
-import { workers, workerMetrics, workerPings } from '$lib/db/schema';
+import { db, safeWorkerColumns, toSafeWorker, type SafeWorker } from '#lib/db/index.ts';
+import { workers, workerMetrics, workerPings } from '#lib/db/schema.ts';
 import { eq, and, gte, desc } from 'drizzle-orm';
 
 const UTILIZATION_THRESHOLD = 85; // percent

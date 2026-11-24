@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
-import { db } from '$lib/db';
-import { applications, containers, teams, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, containers, teams, workers } from '#lib/db/schema.ts';
 import { fastRollbackTargets, isAbsent } from './deploy';
 
 /**

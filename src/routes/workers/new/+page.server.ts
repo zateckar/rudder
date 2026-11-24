@@ -1,9 +1,9 @@
 import { redirect, fail } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { workers } from '$lib/db/schema';
-import { domainFormatError } from '$lib/server/domains';
-import { workerTargetError } from '$lib/server/ssh-target';
-import { currentUser, isAdmin, requirePageAdmin } from '$lib/server/auth';
+import { db } from '#lib/db/index.ts';
+import { workers } from '#lib/db/schema.ts';
+import { domainFormatError } from '#lib/server/domains.ts';
+import { workerTargetError } from '#lib/server/ssh-target.ts';
+import { currentUser, isAdmin, requirePageAdmin } from '#lib/server/auth.ts';
 
 export const load = async (event: { locals: App.Locals }) => {
   return { user: requirePageAdmin(event).user };

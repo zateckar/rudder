@@ -2,7 +2,7 @@
   import {
     DEFAULT_IMAGE_UPDATE_INTERVAL_MINUTES,
     MAX_IMAGE_UPDATE_INTERVAL_MINUTES,
-  } from '$lib/image-update-settings';
+  } from '#lib/image-update-settings.ts';
 
   let {
     enabled = $bindable(false),

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { showToast } from '$lib/client/toast.svelte';
+  import { showToast } from '#lib/client/toast.svelte.ts';
 
   let { data } = $props();
 

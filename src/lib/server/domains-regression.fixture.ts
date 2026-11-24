@@ -1,5 +1,5 @@
 import { expect } from 'bun:test';
-import { applications, containers, teams, workers } from '$lib/db/schema';
+import { applications, containers, teams, workers } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
 import {
   assertDomainAvailable, assertDomainsAvailable, findAppIdByDomain,
@@ -9,7 +9,7 @@ import {
 // The standard test preload always allocates its own database. Point this
 // child at the parent-owned disposable directory before loading the singleton.
 process.env.DATABASE_URL = process.env.DOMAIN_TEST_DATABASE_URL;
-const { db } = await import('$lib/db');
+const { db } = await import('#lib/db/index.ts');
 const { executeApplicationDeploy } = await import('./deploy');
 
 const now = new Date();

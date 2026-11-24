@@ -1,6 +1,6 @@
 <script lang="ts">
-  import PageHeader from '$lib/components/PageHeader.svelte';
-  import Modal from '$lib/components/Modal.svelte';
+  import PageHeader from '#lib/components/PageHeader.svelte';
+  import Modal from '#lib/components/Modal.svelte';
   let { data } = $props();
   let importFileInput: HTMLInputElement;
   let importing = $state(false);

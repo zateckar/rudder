@@ -12,8 +12,8 @@
    * against one address is what is breaking that user; the rule that fired once
    * beside it is noise, and they look identical without the number.
    */
-  import { metaRuleNote } from '$lib/appsec-rules';
-  import { timeAgo } from '$lib/format';
+  import { metaRuleNote } from '#lib/appsec-rules.ts';
+  import { timeAgo } from '#lib/format.ts';
 
   interface Decision {
     id: number;

@@ -1,8 +1,8 @@
 <script lang="ts">
-  import PageHeader from '$lib/components/PageHeader.svelte';
+  import PageHeader from '#lib/components/PageHeader.svelte';
   import { enhance } from '$app/forms';
-  import { confirmAction } from '$lib/client/dialog.svelte';
-  import Modal from '$lib/components/Modal.svelte';
+  import { confirmAction } from '#lib/client/dialog.svelte.ts';
+  import Modal from '#lib/components/Modal.svelte';
 
   let { data } = $props();
 

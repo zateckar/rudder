@@ -1,11 +1,11 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { applications, volumes, teamMembers, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, volumes, teamMembers, workers } from '#lib/db/schema.ts';
 import { eq, and, inArray } from 'drizzle-orm';
-import { AuthorizationError, requireUser, route } from '$lib/server/auth';
-import { withPodman } from '$lib/server/podman-client';
-import { registryVolumeName } from '$lib/server/volumes';
+import { AuthorizationError, requireUser, route } from '#lib/server/auth.ts';
+import { withPodman } from '#lib/server/podman-client.ts';
+import { registryVolumeName } from '#lib/server/volumes.ts';
 
 /**
  * Resolve a volume the caller may act on.

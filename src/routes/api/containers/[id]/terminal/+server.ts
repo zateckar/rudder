@@ -1,6 +1,6 @@
 import type { RequestHandler } from './$types';
-import { withPodman } from '$lib/server/podman-client';
-import { requireContainer, route } from '$lib/server/auth';
+import { withPodman } from '#lib/server/podman-client.ts';
+import { requireContainer, route } from '#lib/server/auth.ts';
 
 /**
  * GET /api/containers/[id]/terminal — the last 500 log lines, as plain text.

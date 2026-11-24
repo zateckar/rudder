@@ -1,9 +1,9 @@
 import { fail, redirect } from '@sveltejs/kit';
 import { eq } from 'drizzle-orm';
-import { db } from '$lib/db';
-import { users, oidcConfig, auditLogs } from '$lib/db/schema';
-import { verifyPassword, createSession, setSessionCookie } from '$lib/auth';
-import { addressIsDistinguishing, consume, reset } from '$lib/server/rate-limit';
+import { db } from '#lib/db/index.ts';
+import { users, oidcConfig, auditLogs } from '#lib/db/schema.ts';
+import { verifyPassword, createSession, setSessionCookie } from '#lib/auth/index.ts';
+import { addressIsDistinguishing, consume, reset } from '#lib/server/rate-limit.ts';
 
 /** Attempts allowed per identity and per source address before lockout. */
 const PER_USER = { limit: 5, windowMs: 15 * 60_000, blockMs: 15 * 60_000 };

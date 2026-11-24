@@ -1,7 +1,18 @@
 diff --git a/pkg/acquisition/modules/appsec/utils.go b/pkg/acquisition/modules/appsec/utils.go
+index 950ec94..d3f5efa 100644
 --- a/pkg/acquisition/modules/appsec/utils.go
 +++ b/pkg/acquisition/modules/appsec/utils.go
-@@ -7,6 +7,7 @@
+@@ -1,12 +1,17 @@
+ package appsecacquisition
+ 
+ import (
++	"crypto/hmac"
++	"crypto/sha256"
++	"encoding/hex"
+ 	"fmt"
+ 	"net/http"
++	"os"
+ 	"slices"
  	"strings"
  	"time"
  
@@ -9,19 +20,41 @@ diff --git a/pkg/acquisition/modules/appsec/utils.go b/pkg/acquisition/modules/a
  	"github.com/prometheus/client_golang/prometheus"
  	log "github.com/sirupsen/logrus"
  
-@@ -138,6 +139,14 @@
+@@ -138,6 +143,10 @@ func AppsecEventGeneration(inEvt pipeline.Event, request *http.Request) (*pipeli
  		}
  	}
  
-+	// Rudder sets this reserved ID at the isolated, trusted gateway.
-+	// Append it after rule evaluation and after generating ordinary context.
-+	if id := inEvt.Parsed["req_uuid"]; strings.HasPrefix(id, "rudder-") {
-+		if parsed, err := uuid.Parse(strings.TrimPrefix(id, "rudder-")); err == nil && parsed.Version() == 4 {
-+			metas = append(metas, &models.MetaItems0{Key: "rudder_request_id", Value: id})
-+		}
++	if id := rudderLearningID(inEvt.Parsed["req_uuid"], request.Host); id != "" {
++		metas = append(metas, &models.MetaItems0{Key: "rudder_request_id", Value: id})
 +	}
 +
  	alert.Meta = metas
  
  	alert.EventsCount = new(int32(len(alert.Events)))
-
+@@ -547,3 +556,26 @@ func (r *AppsecRunner) AccumulateTxToEvent(evt *pipeline.Event, state *appsec.Ap
+ 		processDropInfo(dropInfo, evt, req)
+ 	}
+ }
++
++// Authenticate ingress metadata after evaluation.
++func rudderLearningID(value, host string) string {
++	id, sig, signed := strings.Cut(value, ".")
++	if !strings.HasPrefix(id, "rudder-") {
++		return ""
++	}
++	parsed, err := uuid.Parse(strings.TrimPrefix(id, "rudder-"))
++	if err != nil || parsed.Version() != 4 || "rudder-"+parsed.String() != id {
++		return ""
++	}
++	scope := os.Getenv("RUDDER_LEARNING_HOST")
++	key := os.Getenv("RUDDER_LEARNING_INGRESS_KEY")
++	if !signed || scope == "" || len(key) < 32 || !strings.EqualFold(host, scope) {
++		return ""
++	}
++	mac := hmac.New(sha256.New, []byte(key))
++	mac.Write([]byte(id))
++	if !hmac.Equal([]byte(sig), []byte(hex.EncodeToString(mac.Sum(nil)))) {
++		return ""
++	}
++	return id
++}

@@ -6,8 +6,8 @@
  * call, which put the coarsening somewhere it did not matter and left it out of
  * the one path that actually needed it.
  */
-import { db } from '$lib/db';
-import { apiKeys } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { apiKeys } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
 
 /**

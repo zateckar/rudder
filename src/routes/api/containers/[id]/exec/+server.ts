@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { withPodman } from '$lib/server/podman-client';
-import { requireContainer, route } from '$lib/server/auth';
+import { withPodman } from '#lib/server/podman-client.ts';
+import { requireContainer, route } from '#lib/server/auth.ts';
 
 const SHELL = '/bin/sh';
 

@@ -1,10 +1,10 @@
 import { json } from '@sveltejs/kit';
-import { db, safeWorkerColumns } from '$lib/db';
-import { workers } from '$lib/db/schema';
+import { db, safeWorkerColumns } from '#lib/db/index.ts';
+import { workers } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
 import type { RequestHandler } from './$types';
-import { parseJsonBody, schemas } from '$lib/server/validation';
-import { requireAdminUser, route } from '$lib/server/auth';
+import { parseJsonBody, schemas } from '#lib/server/validation.ts';
+import { requireAdminUser, route } from '#lib/server/auth.ts';
 
 export const GET: RequestHandler = route(async (event) => {
   requireAdminUser(event);

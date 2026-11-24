@@ -1,32 +1,32 @@
 import { redirect, fail } from '@sveltejs/kit';
-import { db, safeUserColumns, toSafeWorker } from '$lib/db';
-import { applications, users, workers, teams, teamMembers, volumes } from '$lib/db/schema';
+import { db, safeUserColumns, toSafeWorker } from '#lib/db/index.ts';
+import { applications, users, workers, teams, teamMembers, volumes } from '#lib/db/schema.ts';
 import { eq, inArray, or, isNull, and } from 'drizzle-orm';
-import { selectWorker, getAllWorkerResources, getAllEligibleWorkers } from '$lib/server/worker-selector';
-import { buildAppDomain, assertDomainAvailable, withApplicationDomainWrite } from '$lib/server/domains';
-import { ALLOWED_DOMAINS_UNSUPPORTED, normalizeTokenHeader, tokenHeadersError } from '$lib/server/oidc';
-import { imageReferenceError } from '$lib/server/image-reference';
-import { IMAGE_UPDATE_INTERVAL_ERROR, parseImageUpdateFormSettings } from '$lib/image-update-settings';
-import { createApplicationWithQuota } from '$lib/server/quota';
+import { selectWorker, getAllWorkerResources, getAllEligibleWorkers } from '#lib/server/worker-selector.ts';
+import { buildAppDomain, assertDomainAvailable, withApplicationDomainWrite } from '#lib/server/domains.ts';
+import { ALLOWED_DOMAINS_UNSUPPORTED, normalizeTokenHeader, tokenHeadersError } from '#lib/server/oidc.ts';
+import { imageReferenceError } from '#lib/server/image-reference.ts';
+import { IMAGE_UPDATE_INTERVAL_ERROR, parseImageUpdateFormSettings } from '#lib/image-update-settings.ts';
+import { createApplicationWithQuota } from '#lib/server/quota.ts';
 import {
   canWriteToTeam,
   currentUser as sessionUser,
   requirePageUser,
   userTeams as allUserTeams,
-} from '$lib/server/auth';
-import { encryptField } from '$lib/server/encryption';
+} from '#lib/server/auth.ts';
+import { encryptField } from '#lib/server/encryption.ts';
 import {
   EXPOSED_PORTS_ERROR,
   MAX_ROUTES_PER_CONTAINER,
   parsePortList,
   serializeExposedPorts,
-} from '$lib/server/deploy/plan';
+} from '#lib/server/deploy/plan.ts';
 import {
   APPSEC_RULES_ERROR,
   appsecRuleError,
   parseRuleList,
   serializeAppsecRules,
-} from '$lib/server/appsec';
+} from '#lib/server/appsec.ts';
 
 export const load = async (event: { locals: App.Locals }) => {
   const currentUser = requirePageUser(event).user;

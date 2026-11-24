@@ -1,9 +1,9 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { users, userOidc, teamMembers, teams } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { users, userOidc, teamMembers, teams } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { requireUser, route } from '$lib/server/auth';
+import { requireUser, route } from '#lib/server/auth.ts';
 
 /**
  * GET /api/auth/me — who the caller is.

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { page } from '$app/state';
-  import PageHeader from '$lib/components/PageHeader.svelte';
+  import PageHeader from '#lib/components/PageHeader.svelte';
 
   let { children } = $props();
 

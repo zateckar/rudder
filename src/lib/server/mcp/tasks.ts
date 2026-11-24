@@ -14,8 +14,8 @@
  * recovery already reconciles for interrupted deploys. Finished tasks are kept
  * for a day so an agent that polls late still gets an answer.
  */
-import { db } from '$lib/db';
-import { deployments } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { deployments } from '#lib/db/schema.ts';
 import { and, desc, eq, gte } from 'drizzle-orm';
 
 export type TaskKind = 'deploy' | 'rollback' | 'start' | 'stop' | 'restart' | 'scale';

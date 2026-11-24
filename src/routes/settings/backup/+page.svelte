@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { formatBytes, formatDateTime as formatDate } from '$lib/format';
+  import { formatBytes, formatDateTime as formatDate } from '#lib/format.ts';
   import { browser } from '$app/env';
 
   let { data } = $props();

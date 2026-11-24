@@ -1,37 +1,37 @@
 /**
  * Shared deploy logic — used by both the deploy API endpoint and the webhook trigger.
  */
-import { db } from '$lib/db';
-import { applications, workers, containers, teams, volumes, secrets, deployments, auditLogs } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, workers, containers, teams, volumes, secrets, deployments, auditLogs } from '#lib/db/schema.ts';
 import { and, eq, inArray, or, desc } from 'drizzle-orm';
-import { getRestPodmanClient } from '$lib/server/podman-client';
-import type { ContainerInspect } from '$lib/server/podman';
+import { getRestPodmanClient } from '#lib/server/podman-client.ts';
+import type { ContainerInspect } from '#lib/server/podman.ts';
 import {
   ManifestError,
   routeKey,
   type DeploymentPlan,
   type PlannedFile,
   type PlannedRoute,
-} from '$lib/server/deploy/plan';
-import { desiredState, type DesiredApp } from '$lib/server/reconcile';
+} from '#lib/server/deploy/plan.ts';
+import { desiredState, type DesiredApp } from '#lib/server/reconcile.ts';
 import {
   generateTraefikLabelsForApp,
   usableTokenHeaders,
   usesGlobalOidc,
   type AppMiddlewareOptions,
-} from '$lib/server/provisioning';
+} from '#lib/server/provisioning/index.ts';
 // Shared with the config generator so `labels` and `http` mode workers apply
 // exactly the same rate limit, auth mode and health check.
-import { buildMiddlewareOpts } from '$lib/server/traefik-config';
-import { ALLOWED_DOMAINS_UNSUPPORTED } from '$lib/server/oidc';
-import { decrypt, decryptField } from '$lib/server/encryption';
-import { ensureAppNetwork, teardownAppNetwork } from '$lib/server/networks';
-import { env } from '$lib/server/env';
-import { MountPolicyError, realizeMounts, type MountIntent } from '$lib/server/mounts';
+import { buildMiddlewareOpts } from '#lib/server/traefik-config.ts';
+import { ALLOWED_DOMAINS_UNSUPPORTED } from '#lib/server/oidc.ts';
+import { decrypt, decryptField } from '#lib/server/encryption.ts';
+import { ensureAppNetwork, teardownAppNetwork } from '#lib/server/networks.ts';
+import { env } from '#lib/server/env.ts';
+import { MountPolicyError, realizeMounts, type MountIntent } from '#lib/server/mounts.ts';
 import { assertDeploymentVolumeAccess } from './deployment-volumes';
 import { AuthorizationError } from './auth';
 // Deploys are serialized per worker; see `workerDeployLock`.
-import { LockError, withLock, workerDeployLock } from '$lib/server/locks';
+import { LockError, withLock, workerDeployLock } from '#lib/server/locks.ts';
 import { commitGenerationCutover, revertGenerationCutover, revertRetainedGenerationCutover } from './lifecycle-cutover';
 import { expectedRoutingHash, waitForRoutingAcknowledgement } from './routing-convergence';
 import { suppressContainerRestart, restoreContainerRestart } from './runtime-policy';
@@ -39,21 +39,21 @@ import {
   parseDigestRecord,
   pinnedImageFor,
   serializeDigestRecord,
-} from '$lib/server/image-digests';
-import { buildTar, MAX_TAR_NAME } from '$lib/server/tar';
+} from '#lib/server/image-digests.ts';
+import { buildTar, MAX_TAR_NAME } from '#lib/server/tar.ts';
 // A failed deploy removes the containers whose logs explain the failure, so the
 // logs are taken before that happens and kept on the deployment row.
 import {
   captureContainerOutput,
   serializeCapturedOutput,
-} from '$lib/server/deploy/failure-logs';
-import { pickFreePort } from '$lib/server/ports';
-import { claimDeploymentDomains, DomainReservationError, withApplicationDeploymentDomains } from '$lib/server/domains';
+} from '#lib/server/deploy/failure-logs.ts';
+import { pickFreePort } from '#lib/server/ports.ts';
+import { claimDeploymentDomains, DomainReservationError, withApplicationDeploymentDomains } from '#lib/server/domains.ts';
 import { checkDeployQuota, plannedResources, withTeamDeployQuota } from './quota';
 import { imageUpdateConfigurationIsCurrent, imageUpdateIsDue, resolveApplicationImageUpdate } from './image-updates';
 // Traefik needs the OIDC client secret in the container's labels; Rudder's own
 // database does not, and used to keep a plaintext copy of it there.
-import { redactSecretLabels } from '$lib/server/redaction';
+import { redactSecretLabels } from '#lib/server/redaction.ts';
 import {
   CUTOVER_CONVERGENCE_TIMEOUT_MS,
   DRAIN_GRACE_MS,
@@ -66,7 +66,7 @@ import {
   retentionExpired,
   retentionMs,
   supportsBlueGreen,
-} from '$lib/server/generations';
+} from '#lib/server/generations.ts';
 
 /**
  * Where file-mode secrets are mounted, following the Docker/Podman convention

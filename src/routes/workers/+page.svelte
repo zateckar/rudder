@@ -1,8 +1,8 @@
 <script lang="ts">
-  import PageHeader from '$lib/components/PageHeader.svelte';
+  import PageHeader from '#lib/components/PageHeader.svelte';
   import { invalidateAll } from '$app/navigation';
-  import SshKeyPrompt from '$lib/components/SshKeyPrompt.svelte';
-  import { showToast } from '$lib/client/toast.svelte';
+  import SshKeyPrompt from '#lib/components/SshKeyPrompt.svelte';
+  import { showToast } from '#lib/client/toast.svelte.ts';
 
   let { data } = $props();
 

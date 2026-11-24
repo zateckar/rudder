@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { db } from '$lib/db';
-import { applications, containers, teams, volumes, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, containers, teams, volumes, workers } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
 import { assertDeploymentVolumeAccess, bareVolumeAccessForTeam, type VolumeAccessSource } from './deployment-volumes';
 import { desiredState } from './reconcile';

@@ -1,11 +1,11 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { users, sessions, teamMembers, userOidc } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { users, sessions, teamMembers, userOidc } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { hashPassword, validatePassword } from '$lib/auth';
-import { parseJsonBody, schemas } from '$lib/server/validation';
-import { requireAdminUser, requireUser, route } from '$lib/server/auth';
+import { hashPassword, validatePassword } from '#lib/auth/index.ts';
+import { parseJsonBody, schemas } from '#lib/server/validation.ts';
+import { requireAdminUser, requireUser, route } from '#lib/server/auth.ts';
 import { z } from 'zod';
 
 /**

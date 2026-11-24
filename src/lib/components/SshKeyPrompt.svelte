@@ -29,7 +29,7 @@
 
   onMount(async () => {
     try {
-      const { loadKeyFromVault, hasStoredKey } = await import('$lib/client/key-vault');
+      const { loadKeyFromVault, hasStoredKey } = await import('#lib/client/key-vault.ts');
       if (hasStoredKey(workerId)) {
         hasVaultKey = true;
         const stored = await loadKeyFromVault(workerId);
@@ -59,7 +59,7 @@
 
     if (rememberKey) {
       try {
-        const { saveKeyToVault } = await import('$lib/client/key-vault');
+        const { saveKeyToVault } = await import('#lib/client/key-vault.ts');
         await saveKeyToVault(workerId, key);
       } catch {
         // Non-fatal — key just won't be remembered
@@ -72,7 +72,7 @@
 
   async function handleForgetKey() {
     try {
-      const { clearKey } = await import('$lib/client/key-vault');
+      const { clearKey } = await import('#lib/client/key-vault.ts');
       clearKey(workerId);
       hasVaultKey = false;
       sshKey = '';

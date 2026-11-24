@@ -1,8 +1,8 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { requireApplication, route } from '$lib/server/auth';
-import { pruneDeployments } from '$lib/server/deployment-prune';
-import { ValidationError } from '$lib/server/validation';
+import { requireApplication, route } from '#lib/server/auth.ts';
+import { pruneDeployments } from '#lib/server/deployment-prune.ts';
+import { ValidationError } from '#lib/server/validation.ts';
 
 function parseKeep(raw: unknown): number {
   const keep = typeof raw === 'number' ? raw : Number.parseInt(String(raw ?? ''), 10);

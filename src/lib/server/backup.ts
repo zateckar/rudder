@@ -1,6 +1,6 @@
-import { db, sqlite } from '$lib/db';
-import { backupConfig } from '$lib/db/schema';
-import { decrypt } from '$lib/server/encryption';
+import { db, sqlite } from '#lib/db/index.ts';
+import { backupConfig } from '#lib/db/schema.ts';
+import { decrypt } from '#lib/server/encryption.ts';
 import { createHmac } from 'crypto';
 import { readFileSync, unlinkSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
@@ -11,7 +11,7 @@ import { hasPendingDatabaseRestore, stageDatabaseRestore } from './database-rest
 /**
  * The database this backs up, and the scratch directory it stages through.
  *
- * Resolved the same way `$lib/db` resolves the file it opens — `DATABASE_URL`
+ * Resolved the same way `#lib/db/index.ts` resolves the file it opens — `DATABASE_URL`
  * first, the directory beside the bundle as a fallback. These used to be
  * `join(__dirname, '../../../data/rudder.db')` outright, which ignored
  * `DATABASE_URL` entirely: on any deployment that pointed it somewhere else,
@@ -115,7 +115,7 @@ export async function performBackup(): Promise<{ success: boolean; message: stri
   try {
     // `VACUUM INTO`, not `copyFileSync`.
     //
-    // The database runs in WAL mode (see $lib/db), so committed transactions
+    // The database runs in WAL mode (see #lib/db), so committed transactions
     // live in `rudder.db-wal` until a checkpoint moves them across. Copying the
     // main file alone therefore silently omitted every write since the last
     // checkpoint — and a copy taken *during* one is not a consistent snapshot at

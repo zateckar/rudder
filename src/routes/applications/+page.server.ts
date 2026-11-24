@@ -1,8 +1,8 @@
-import { db, safeWorkerColumns, safeApplicationColumns } from '$lib/db';
-import { applications, workers, teams, teamMembers, containers } from '$lib/db/schema';
+import { db, safeWorkerColumns, safeApplicationColumns } from '#lib/db/index.ts';
+import { applications, workers, teams, teamMembers, containers } from '#lib/db/schema.ts';
 import { eq, inArray } from 'drizzle-orm';
-import { primaryUrl, serviceUrls } from '$lib/server/app-urls';
-import { requirePageUser } from '$lib/server/auth';
+import { primaryUrl, serviceUrls } from '#lib/server/app-urls.ts';
+import { requirePageUser } from '#lib/server/auth.ts';
 
 function getAppStatus(appContainers: (typeof containers.$inferSelect)[]): { label: string; color: string } {
   if (appContainers.length === 0) return { label: 'not deployed', color: 'gray' };

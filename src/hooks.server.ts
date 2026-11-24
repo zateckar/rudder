@@ -1,11 +1,11 @@
 import { sequence, type Handle } from '@sveltejs/kit/hooks';
-import { db } from '$lib/db';
-import { users, auditLogs, apiKeys } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { users, auditLogs, apiKeys } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { getSessionIdFromCookies, validateSession } from '$lib/auth';
-import { AUDITED_READS, classifyRequest, isAuditable } from '$lib/server/audit';
-import { touchApiKey } from '$lib/server/api-keys';
-import { hashKey } from '$lib/server/encryption';
+import { getSessionIdFromCookies, validateSession } from '#lib/auth/index.ts';
+import { AUDITED_READS, classifyRequest, isAuditable } from '#lib/server/audit.ts';
+import { touchApiKey } from '#lib/server/api-keys.ts';
+import { hashKey } from '#lib/server/encryption.ts';
 
 const securityHeaders: Handle = async ({ event, resolve }) => {
   const response = await resolve(event);
@@ -81,9 +81,9 @@ const authentication: Handle = async ({ event, resolve }) => {
   // This used to set `locals.userId` and `locals.userRole` and stop there, and
   // almost nothing read them: 56 route files instead re-ran this same session
   // validation and user lookup for themselves via an inline
-  // `await import('$lib/auth')`. A single application page load performed three
+  // `await import('#lib/auth/index.ts')`. A single application page load performed three
   // session validations and three user reads as a result. `locals.auth` now
-  // carries the whole context so the helpers in $lib/server/auth are pure
+  // carries the whole context so the helpers in #lib/server/auth are pure
   // reads.
   const sessionId = getSessionIdFromCookies(event.cookies);
   if (sessionId) {
@@ -195,7 +195,7 @@ export const handle = sequence(securityHeaders, authentication);
 // and Podman clients; the HTTP server (Vite in dev, server.js in production)
 // only dispatches upgrades to them. SvelteKit itself does not serve upgrades —
 // see src/lib/server/ws/registry.ts.
-import '$lib/server/ws/handlers';
+import '#lib/server/ws/handlers.ts';
 
 // ── Recovery from an interrupted deploy ──────────────────────────────────────
 // Before anything else touches the fleet: a deploy that was running when this
@@ -205,7 +205,7 @@ import '$lib/server/ws/handlers';
 // deploy that is legitimately in flight.
 if (!(globalThis as any).__recoveryRan) {
   (globalThis as any).__recoveryRan = true;
-  import('$lib/server/recover')
+  import('#lib/server/recover.ts')
     .then(({ recoverInterruptedDeploys }) => recoverInterruptedDeploys())
     .catch((e) => console.error('[recover] Failed to run startup recovery:', e));
 }
@@ -214,7 +214,7 @@ if (!(globalThis as any).__recoveryRan) {
 // Guard against re-initialization (e.g. HMR hot reloads in dev)
 if (!(globalThis as any).__metricsStarted) {
   (globalThis as any).__metricsStarted = true;
-  import('$lib/server/metrics')
+  import('#lib/server/metrics.ts')
     .then(({ startMetricsCollection }) => startMetricsCollection())
     .catch((e) => console.error('[metrics] Failed to start collection:', e));
 }
@@ -225,7 +225,7 @@ if (!(globalThis as any).__metricsStarted) {
 // same amount. See the scheduler note in alerts.ts.
 if (!(globalThis as any).__alertsStarted) {
   (globalThis as any).__alertsStarted = true;
-  import('$lib/server/alerts')
+  import('#lib/server/alerts.ts')
     .then(({ startAlertEvaluation }) => startAlertEvaluation())
     .catch((e) => console.error('[alerts] Failed to start evaluation:', e));
 }
@@ -235,7 +235,7 @@ if (!(globalThis as any).__alertsStarted) {
 // because nothing about it is per-cycle work. See retention.ts.
 if (!(globalThis as any).__retentionStarted) {
   (globalThis as any).__retentionStarted = true;
-  import('$lib/server/retention')
+  import('#lib/server/retention.ts')
     .then(({ startRetentionSweep }) => startRetentionSweep())
     .catch((e) => console.error('[retention] Failed to start sweep:', e));
 }
@@ -243,7 +243,7 @@ if (!(globalThis as any).__retentionStarted) {
 // ── Backup scheduler ─────────────────────────────────────────────────────────
 if (!(globalThis as any).__backupStarted) {
   (globalThis as any).__backupStarted = true;
-  import('$lib/server/backup')
+  import('#lib/server/backup.ts')
     .then(({ startBackupScheduler }) => startBackupScheduler())
     .catch((e) => console.error('[backup] Failed to start scheduler:', e));
 }
@@ -251,7 +251,7 @@ if (!(globalThis as any).__backupStarted) {
 // ── Opt-in automatic image updates ────────────────────────────────────────────
 if (!(globalThis as any).__imageUpdatesStarted) {
   (globalThis as any).__imageUpdatesStarted = true;
-  import('$lib/server/image-updates')
+  import('#lib/server/image-updates.ts')
     .then(({ startImageUpdateChecks }) => startImageUpdateChecks())
     .catch((e) => console.error('[image-updates] Failed to start checks:', e));
 }

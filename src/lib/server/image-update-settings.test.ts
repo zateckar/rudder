@@ -2,9 +2,9 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { readFileSync } from 'node:fs';
 import { eq } from 'drizzle-orm';
-import { db } from '$lib/db';
-import { applications, sessions, teams, users, workers } from '$lib/db/schema';
-import { createSession } from '$lib/auth';
+import { db } from '#lib/db/index.ts';
+import { applications, sessions, teams, users, workers } from '#lib/db/schema.ts';
+import { createSession } from '#lib/auth/index.ts';
 import {
   DEFAULT_IMAGE_UPDATE_INTERVAL_MINUTES,
   IMAGE_UPDATE_INTERVAL_ERROR,

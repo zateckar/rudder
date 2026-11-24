@@ -1,11 +1,11 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { applications, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, workers } from '#lib/db/schema.ts';
 import { eq, count } from 'drizzle-orm';
-import { checkPublicUrlReachable, configEndpointUrl } from '$lib/server/worker-config-endpoint';
-import { env } from '$lib/server/env';
-import { requireWorker, route } from '$lib/server/auth';
+import { checkPublicUrlReachable, configEndpointUrl } from '#lib/server/worker-config-endpoint.ts';
+import { env } from '#lib/server/env.ts';
+import { requireWorker, route } from '#lib/server/auth.ts';
 
 /**
  * PUT /api/workers/[id]/routing-mode — switch a worker between reading its

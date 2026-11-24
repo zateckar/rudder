@@ -2,10 +2,10 @@
  * The MCP endpoint — Streamable HTTP transport, stateless, JSON responses.
  *
  * Off unless `MCP_OIDC_ISSUER` is set, and then reachable only with an access
- * token from that provider whose audience names a team. See $lib/server/mcp.
+ * token from that provider whose audience names a team. See #lib/server/mcp.
  */
 import type { RequestHandler } from './$types';
-import { authenticateMcp, mcpConfig, originAllowed } from '$lib/server/mcp/auth';
+import { authenticateMcp, mcpConfig, originAllowed } from '#lib/server/mcp/auth.ts';
 import {
   INVALID_REQUEST,
   PARSE_ERROR,
@@ -13,8 +13,8 @@ import {
   handleMessage,
   rpcError,
   type JsonRpcResponse,
-} from '$lib/server/mcp/protocol';
-import { consume } from '$lib/server/rate-limit';
+} from '#lib/server/mcp/protocol.ts';
+import { consume } from '#lib/server/rate-limit.ts';
 
 /** Requests per token subject per minute. Polling get_task every few seconds fits easily. */
 const RATE_LIMIT = { limit: 300, windowMs: 60_000 };

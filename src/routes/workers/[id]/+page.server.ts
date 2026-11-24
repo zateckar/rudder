@@ -1,8 +1,8 @@
 import { error, redirect } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { workers, containers, workerPings, workerMetrics, teams } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { workers, containers, workerPings, workerMetrics, teams } from '#lib/db/schema.ts';
 import { eq, and, gte, desc } from 'drizzle-orm';
-import { requireWorker } from '$lib/server/auth';
+import { requireWorker } from '#lib/server/auth.ts';
 
 export const load = async ({ params, locals }: { params: { id: string }; locals: App.Locals }) => {
   let access;

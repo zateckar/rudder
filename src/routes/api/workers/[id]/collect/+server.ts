@@ -1,10 +1,10 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { workers, workerMetrics, workerPings } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { workers, workerMetrics, workerPings } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { withPodman } from '$lib/server/podman-client';
-import { requireWorker, route } from '$lib/server/auth';
+import { withPodman } from '#lib/server/podman-client.ts';
+import { requireWorker, route } from '#lib/server/auth.ts';
 
 /** Collect one worker's metrics now, rather than waiting for the timer. */
 export const POST: RequestHandler = route(async (event) => {

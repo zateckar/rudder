@@ -423,7 +423,7 @@ export const auditLogs = sqliteTable('audit_logs', {
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 }, (t) => [
   // Both orderings the audit views ask for, and what the retention sweep in
-  // $lib/server/retention deletes by.
+  // #lib/server/retention deletes by.
   index('audit_logs_created_idx').on(sql`created_at DESC`),
   index('audit_logs_team_created_idx').on(t.teamId, sql`created_at DESC`),
 ]);

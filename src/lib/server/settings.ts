@@ -7,8 +7,8 @@
  * background loop that never runs again.
  */
 
-import { db } from '$lib/db';
-import { systemSettings } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { systemSettings } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
 
 export async function numericSetting(

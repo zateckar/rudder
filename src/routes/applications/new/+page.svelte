@@ -1,16 +1,16 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import PageHeader from '$lib/components/PageHeader.svelte';
-  import { formatBytes } from '$lib/format';
+  import PageHeader from '#lib/components/PageHeader.svelte';
+  import { formatBytes } from '#lib/format.ts';
   import { enhance } from '$app/forms';
-  import YamlEditor from '$lib/components/YamlEditor.svelte';
-  import EnvVarEditor from '$lib/components/form/EnvVarEditor.svelte';
-  import PortMappingEditor from '$lib/components/form/PortMappingEditor.svelte';
-  import VolumeMountEditor from '$lib/components/form/VolumeMountEditor.svelte';
-  import ImageUpdateSettings from '$lib/components/form/ImageUpdateSettings.svelte';
-  import ExistingVolumes from '$lib/components/form/ExistingVolumes.svelte';
-  import { DEFAULT_IMAGE_UPDATE_INTERVAL_MINUTES } from '$lib/image-update-settings';
-  import type { EnvVar, PortMapping, VolumeMount } from '$lib/components/form/types';
+  import YamlEditor from '#lib/components/YamlEditor.svelte';
+  import EnvVarEditor from '#lib/components/form/EnvVarEditor.svelte';
+  import PortMappingEditor from '#lib/components/form/PortMappingEditor.svelte';
+  import VolumeMountEditor from '#lib/components/form/VolumeMountEditor.svelte';
+  import ImageUpdateSettings from '#lib/components/form/ImageUpdateSettings.svelte';
+  import ExistingVolumes from '#lib/components/form/ExistingVolumes.svelte';
+  import { DEFAULT_IMAGE_UPDATE_INTERVAL_MINUTES } from '#lib/image-update-settings.ts';
+  import type { EnvVar, PortMapping, VolumeMount } from '#lib/components/form/types.ts';
 
   let { data } = $props();
   let loading = $state(false);

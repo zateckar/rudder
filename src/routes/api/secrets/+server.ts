@@ -1,15 +1,15 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { secrets, teamMembers, auditLogs } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { secrets, teamMembers, auditLogs } from '#lib/db/schema.ts';
 import { eq, and, or, inArray } from 'drizzle-orm';
-import { encrypt, decrypt } from '$lib/server/encryption';
-import { parseJsonBody, ValidationError, schemas } from '$lib/server/validation';
+import { encrypt, decrypt } from '#lib/server/encryption.ts';
+import { parseJsonBody, ValidationError, schemas } from '#lib/server/validation.ts';
 import {
   authErrorResponse,
   requireAuth,
   type AuthContext,
-} from '$lib/server/auth';
+} from '#lib/server/auth.ts';
 
 /** Team IDs the caller belongs to. */
 async function teamIdsFor(userId: string): Promise<string[]> {

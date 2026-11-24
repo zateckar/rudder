@@ -1,12 +1,12 @@
 import { json, type RequestEvent } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { eq } from 'drizzle-orm';
-import { db } from '$lib/db';
-import { workers } from '$lib/db/schema';
-import { applicationHostnames } from '$lib/server/appsec';
-import { requireApplication, route } from '$lib/server/auth';
-import { openLearningPilot, sessionIdPattern } from '$lib/server/crowdsec-learning';
-import { withPodman } from '$lib/server/podman-client';
+import { db } from '#lib/db/index.ts';
+import { workers } from '#lib/db/schema.ts';
+import { applicationHostnames } from '#lib/server/appsec.ts';
+import { requireApplication, route } from '#lib/server/auth.ts';
+import { openLearningPilot, sessionIdPattern } from '#lib/server/crowdsec-learning.ts';
+import { withPodman } from '#lib/server/podman-client.ts';
 
 const headers = { 'Cache-Control': 'no-store' };
 

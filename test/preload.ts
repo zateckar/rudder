@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'path';
 /**
  * Point the whole suite at a throwaway database.
  *
- * `$lib/db` opens a SQLite file at import time and bootstraps an admin user, so
+ * `#lib/db/index.ts` opens a SQLite file at import time and bootstraps an admin user, so
  * any test that transitively imports it — several do — reads and writes a real
  * database. Set here in `preload`, before anything imports it.
  *
@@ -29,7 +29,7 @@ delete process.env.ADMIN_PASSWORD;
  * `getRestPodmanClient` fails closed without mTLS credentials, which is right in
  * production and makes a local stub server unusable — the alternative is a full
  * CA, server and client certificate per test. It has to be here rather than in
- * the test file that wants it, because `$lib/server/env` parses the environment
+ * the test file that wants it, because `#lib/server/env.ts` parses the environment
  * once at import time and the suite shares a module registry, so whichever file
  * imports it first decides the value for all of them.
  *

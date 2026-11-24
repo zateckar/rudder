@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
 import { eq } from 'drizzle-orm';
-import { db } from '$lib/db';
-import { applications, auditLogs, containers, deployments, deployWebhooks, sessions, teamQuotas, teams, users, workers } from '$lib/db/schema';
-import { createSession } from '$lib/auth';
+import { db } from '#lib/db/index.ts';
+import { applications, auditLogs, containers, deployments, deployWebhooks, sessions, teamQuotas, teams, users, workers } from '#lib/db/schema.ts';
+import { createSession } from '#lib/auth/index.ts';
 import { buildDeploymentPlan } from './deploy/build';
 import { checkDeployQuota, createApplicationWithQuota, plannedResources } from './quota';
 import { executeApplicationDeploy } from './deploy';

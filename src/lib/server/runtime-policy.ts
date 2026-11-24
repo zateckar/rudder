@@ -1,5 +1,5 @@
-import { db } from '$lib/db';
-import { applications, containers, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, containers, workers } from '#lib/db/schema.ts';
 import { and, eq, sql } from 'drizzle-orm';
 import type { PodmanClient } from './podman';
 import { withPodman } from './podman-client';

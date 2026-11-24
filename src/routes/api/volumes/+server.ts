@@ -1,10 +1,10 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { volumes, teamMembers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { volumes, teamMembers } from '#lib/db/schema.ts';
 import { eq, inArray } from 'drizzle-orm';
-import { isTeamMember, requireUser, route } from '$lib/server/auth';
-import { parseJsonBody, schemas } from '$lib/server/validation';
+import { isTeamMember, requireUser, route } from '#lib/server/auth.ts';
+import { parseJsonBody, schemas } from '#lib/server/validation.ts';
 
 export const GET: RequestHandler = route(async (event) => {
   const ctx = requireUser(event);

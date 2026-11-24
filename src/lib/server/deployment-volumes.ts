@@ -1,6 +1,6 @@
 /** Authorize storage before a deploy can remove or create containers. */
-import { db } from '$lib/db';
-import { applications, containers, teams, volumes, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, containers, teams, volumes, workers } from '#lib/db/schema.ts';
 import { eq, inArray } from 'drizzle-orm';
 import { AuthorizationError } from './auth';
 import { desiredState } from './reconcile';

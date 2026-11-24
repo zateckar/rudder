@@ -1,8 +1,8 @@
 import type { RequestHandler } from './$types';
-import { requireApplication, route } from '$lib/server/auth';
-import { requireAppVolume } from '$lib/server/app-volumes';
-import { backupVolume } from '$lib/server/volume-ops';
-import { toDnsLabel } from '$lib/server/domains';
+import { requireApplication, route } from '#lib/server/auth.ts';
+import { requireAppVolume } from '#lib/server/app-volumes.ts';
+import { backupVolume } from '#lib/server/volume-ops.ts';
+import { toDnsLabel } from '#lib/server/domains.ts';
 
 /**
  * Stream a volume's contents out as a tar archive.

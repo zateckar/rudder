@@ -1,10 +1,10 @@
 import { redirect, error } from '@sveltejs/kit';
-import { db, safeWorkerColumns } from '$lib/db';
-import { applications, workers, containers } from '$lib/db/schema';
+import { db, safeWorkerColumns } from '#lib/db/index.ts';
+import { applications, workers, containers } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { canAccessApplication, requireAuth } from '$lib/server/auth';
-import { driftForApplication } from '$lib/server/reconcile';
-import { primaryUrl, routeUrls, serviceUrls, unroutedPorts } from '$lib/server/app-urls';
+import { canAccessApplication, requireAuth } from '#lib/server/auth.ts';
+import { driftForApplication } from '#lib/server/reconcile.ts';
+import { primaryUrl, routeUrls, serviceUrls, unroutedPorts } from '#lib/server/app-urls.ts';
 
 export const load = async ({ params, cookies }: { params: { id: string }; cookies: any }) => {
   const ctx = await requireAuth(cookies);

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
-import { db, sqlite } from '$lib/db';
-import { alertEvents, auditLogs, systemSettings } from '$lib/db/schema';
+import { db, sqlite } from '#lib/db/index.ts';
+import { alertEvents, auditLogs, systemSettings } from '#lib/db/schema.ts';
 import { pruneRetainedRecords } from './retention';
 
 /**

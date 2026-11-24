@@ -1,11 +1,11 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { workers } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { requireApplication, route } from '$lib/server/auth';
-import { applicationHostnames, parseAppsecRules } from '$lib/server/appsec';
-import { withPodman } from '$lib/server/podman-client';
+import { requireApplication, route } from '#lib/server/auth.ts';
+import { applicationHostnames, parseAppsecRules } from '#lib/server/appsec.ts';
+import { withPodman } from '#lib/server/podman-client.ts';
 import {
   crowdsecReadError,
   decisionsFromExec,
@@ -17,7 +17,7 @@ import {
   type AppsecSourceGroup,
   type CrowdsecDecision,
   type SourceBanHistory,
-} from '$lib/server/crowdsec';
+} from '#lib/server/crowdsec.ts';
 
 /**
  * GET /api/applications/[id]/appsec

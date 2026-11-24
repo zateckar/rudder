@@ -40,7 +40,7 @@
  * reconciler under-claims rather than over-claims.
  */
 import { createHash } from 'crypto';
-import { db } from '$lib/db';
+import { db } from '#lib/db/index.ts';
 import {
   alertEvents,
   applications,
@@ -50,7 +50,7 @@ import {
   teams,
   volumes,
   workers,
-} from '$lib/db/schema';
+} from '#lib/db/schema.ts';
 import { eq, isNull } from 'drizzle-orm';
 import type { Container, PodmanClient } from './podman';
 import { getRestPodmanClient } from './podman-client';

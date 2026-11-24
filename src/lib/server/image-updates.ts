@@ -1,13 +1,13 @@
 /** Opt-in image checks. All pulls and deploy decisions run under the worker lock. */
-import { db } from '$lib/db';
-import { applications, containers, deployments, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, containers, deployments, workers } from '#lib/db/schema.ts';
 import { and, eq } from 'drizzle-orm';
 import { desiredState } from './reconcile';
 import { parseDigestRecord, sameRepository, serializeDigestRecord } from './image-digests';
 import { getRestPodmanClient } from './podman-client';
 import type { PodmanClient } from './podman';
 import { mapWithConcurrency } from './concurrency';
-import { DEFAULT_IMAGE_UPDATE_INTERVAL_MINUTES } from '$lib/image-update-settings';
+import { DEFAULT_IMAGE_UPDATE_INTERVAL_MINUTES } from '#lib/image-update-settings.ts';
 
 type Application = typeof applications.$inferSelect;
 type Worker = typeof workers.$inferSelect;

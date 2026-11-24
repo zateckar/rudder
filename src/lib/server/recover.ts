@@ -16,8 +16,8 @@
  * which is the correct outcome — so this is only about rows.
  */
 
-import { db } from '$lib/db';
-import { deployments, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { deployments, workers } from '#lib/db/schema.ts';
 import { eq, or } from 'drizzle-orm';
 import { sweepInterruptedGenerations } from './deploy';
 import { synchronizeWorkerRuntimePolicies } from './runtime-policy';

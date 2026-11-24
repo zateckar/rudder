@@ -1,10 +1,10 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { workers } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { requireApplication, route } from '$lib/server/auth';
-import { appStorage } from '$lib/server/app-volumes';
+import { requireApplication, route } from '#lib/server/auth.ts';
+import { appStorage } from '#lib/server/app-volumes.ts';
 
 /**
  * Every volume this application uses, whatever it was deployed from.

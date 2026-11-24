@@ -155,7 +155,7 @@ on that:
 | Mechanism | Why one process |
 | --- | --- |
 | **SQLite** | One writer. Two instances on a shared volume corrupt each other's WAL. |
-| **Deploy locks** | Held in memory (`$lib/server/locks`). Two instances would each think they had the worker, allocate the same host port and collide on container names — the exact race the lock exists to prevent. |
+| **Deploy locks** | Held in memory (`#lib/server/locks.ts`). Two instances would each think they had the worker, allocate the same host port and collide on container names — the exact race the lock exists to prevent. |
 | **Rate limits, terminal tokens, WebSocket registry** | Per-process state. A second instance halves the effective login throttle and cannot validate a terminal token minted by the first. |
 
 So: **do not scale the deployment past one replica**, and do not run two
@@ -278,12 +278,9 @@ SvelteKit Server (Bun runtime with Node adapter)
   `aardvark-dns` serves container name resolution
 - CrowdSec AppSec WAF on all application routes with IP ban enforcement.
   Virtual-patching rules block known exploit signatures inline (403); the OWASP
-  Core Rule Set runs out-of-band, scoring SQLi/XSS/LFI/RCE attempts and banning
-  the source once the anomaly threshold is crossed. Out-of-band is deliberate —
-  CRS false positives cost a visible, removable ban decision rather than a
-  broken request. To block inline instead, add `crowdsecurity/appsec-crs-inband`
-  to the CrowdSec container's `COLLECTIONS` and reference `crowdsecurity/crs-inband`
-  in `/etc/crowdsec/acquis.d/appsec.yaml`
+  Core Rule Set runs out-of-band. The aggregate out-of-band AppSec scenario
+  records alerts for observation. Other CrowdSec scenarios keep their
+  configured remediation.
 - Security headers: HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy
 - User-provided container labels sanitized to prevent Traefik route hijacking
 - Secrets can be delivered as files on a tmpfs (`/run/secrets/<NAME>`, mode 0400)
@@ -306,6 +303,67 @@ SvelteKit Server (Bun runtime with Node adapter)
   unrelated reason cannot move Traefik to a new major version
 - Access logs rotated daily (logrotate, 14-day retention)
 - Traefik dashboard protected with mTLS (same as Podman API)
+
+### Reviewing a CrowdSec tuning proposal
+
+On a learning-enabled application, use **Firewall → Learning session** to
+review captured requests as expected, unexpected or uncertain. Download the
+review before leaving the page. The export contains the selected request IDs,
+review labels and matched rule IDs.
+
+Import paired observations in the Firewall panel to compare them with the
+current review. The command below can compare observations across multiple
+downloaded sessions.
+
+Compare a proposed global removal of one rule using paired observations from
+isolated runs with the same CrowdSec build and equivalent inputs. Supply the
+SHA-256 fingerprints of the complete baseline and candidate policies, and use a
+separate set of known probes with an explicit expected outcome for each.
+Record alerts, inline blocks and IP bans separately. Include the observed
+rule IDs with each outcome. An HTTP status
+by itself does not identify a CrowdSec outcome.
+
+```json
+{
+  "schemaVersion": 1,
+  "baselineRun": {
+    "engineVersion": "v1.8.2",
+    "policyFingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "candidateRun": {
+    "engineVersion": "v1.8.2",
+    "policyFingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "change": { "kind": "disable-rule", "ruleId": "native_rule:12345" },
+  "legitimate": [{
+    "requestId": "rudder-22222222-2222-4222-8222-222222222222",
+    "baseline": { "alerted": true, "blocked": false, "banned": false, "rules": ["native_rule:12345"] },
+    "candidate": { "alerted": false, "blocked": false, "banned": false, "rules": [] }
+  }],
+  "probes": [{
+    "id": "known-probe",
+    "required": ["blocked"],
+    "baseline": { "alerted": true, "blocked": true, "banned": false, "rules": ["native_rule:12346"] },
+    "candidate": { "alerted": true, "blocked": true, "banned": false, "rules": ["native_rule:12346"] }
+  }]
+}
+```
+
+```sh
+bun scripts/crowdsec-learning-compare.ts observations.json session.json [more-sessions.json ...]
+```
+
+The JSON report lists improvements and regressions per request and retention
+per probe. Exit code `0` means the supplied evidence supports operator review,
+`1` means the evidence is incomplete or shows a regression, and `2` means
+the input was rejected. The tool only compares supplied observations. The
+operator verifies the fingerprints, isolated runs and fixture coverage before
+any policy change.
+
+The release workflow checks the metadata patch against the provisioning
+version and runs the compiled binary in that version's CrowdSec image.
+Run `bash scripts/crowdsec-learning-engine.sh --verify` on Linux for the same
+check. It uses Podman by default and accepts `CONTAINER_RUNTIME=docker`.
 
 ---
 

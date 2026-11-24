@@ -1,9 +1,9 @@
 import { json } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { workers } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
 import { timingSafeEqual, createHash } from 'crypto';
-import { decryptField, encryptField } from '$lib/server/encryption';
+import { decryptField, encryptField } from '#lib/server/encryption.ts';
 
 /** Compare two secrets without leaking length or content through timing. */
 function secretsMatch(a: string, b: string): boolean {

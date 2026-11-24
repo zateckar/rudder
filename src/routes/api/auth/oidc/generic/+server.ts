@@ -3,8 +3,8 @@
  * Initiate the generic OIDC Auth Code + PKCE flow.
  */
 import { redirect } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { oidcConfig } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { oidcConfig } from '#lib/db/schema.ts';
 import crypto from 'crypto';
 
 function base64url(buf: Buffer): string {

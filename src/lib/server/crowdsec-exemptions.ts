@@ -32,7 +32,7 @@
  * difference between this and lifting bans by hand while they re-appear.
  */
 
-import { isSourceRange, isValidSource } from '$lib/appsec-rules';
+import { isSourceRange, isValidSource } from '#lib/appsec-rules.ts';
 
 /**
  * The allowlist Rudder manages, by name.

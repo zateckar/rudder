@@ -6,10 +6,10 @@
  * polls, so there is one implementation of the comparison rather than one per
  * endpoint drifting apart.
  */
-import { db } from '$lib/db';
-import { workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { workers } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { decryptField } from '$lib/server/encryption';
+import { decryptField } from '#lib/server/encryption.ts';
 import { timingSafeEqual } from 'crypto';
 
 /** Constant-time compare that does not leak length through an early return. */

@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { createPodmanClient, PodmanApiError, type PodmanClient } from './podman';
 import { decryptField } from './encryption';
 import { env } from './env';
-import type { workers } from '$lib/db/schema';
+import type { workers } from '#lib/db/schema.ts';
 import { json } from '@sveltejs/kit';
 
 /**

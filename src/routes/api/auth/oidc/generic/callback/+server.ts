@@ -4,12 +4,12 @@
  * Exchanges the code for tokens, fetches user info, and creates a session.
  */
 import { redirect } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { oidcConfig, users, userOidc } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { oidcConfig, users, userOidc } from '#lib/db/schema.ts';
 import { eq, and } from 'drizzle-orm';
-import { createSession, setSessionCookie } from '$lib/auth';
-import { decryptField } from '$lib/server/encryption';
-import { resolveTeamNames, syncUserTeams } from '$lib/server/oidc-teams';
+import { createSession, setSessionCookie } from '#lib/auth/index.ts';
+import { decryptField } from '#lib/server/encryption.ts';
+import { resolveTeamNames, syncUserTeams } from '#lib/server/oidc-teams.ts';
 
 function decodeJwtPayload(token: string): Record<string, any> | null {
   try {

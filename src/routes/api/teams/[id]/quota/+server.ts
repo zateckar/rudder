@@ -1,9 +1,9 @@
 import { json } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { teamQuotas, teams, applications, containers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { teamQuotas, teams, applications, containers } from '#lib/db/schema.ts';
 import { eq, inArray, count } from 'drizzle-orm';
 import type { RequestHandler } from './$types';
-import { requireTeam, requireAdminUser, route } from '$lib/server/auth';
+import { requireTeam, requireAdminUser, route } from '#lib/server/auth.ts';
 
 /** GET: Return quota for this team + current usage */
 export const GET: RequestHandler = route(async (event) => {

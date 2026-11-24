@@ -1,14 +1,14 @@
 import { json } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { applications, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, workers } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
 import type { RequestHandler } from './$types';
-import { requireTeam, route } from '$lib/server/auth';
-import { buildAppDomain, assertDomainAvailable, withApplicationDomainWrite } from '$lib/server/domains';
-import { normalizeTokenHeader, tokenHeaderNameError } from '$lib/server/oidc';
-import { parseExposedPorts, serializeExposedPorts } from '$lib/server/deploy/plan';
-import { IMAGE_UPDATE_INTERVAL_ERROR, parseImageUpdateInterval } from '$lib/image-update-settings';
-import { createApplicationWithQuota } from '$lib/server/quota';
+import { requireTeam, route } from '#lib/server/auth.ts';
+import { buildAppDomain, assertDomainAvailable, withApplicationDomainWrite } from '#lib/server/domains.ts';
+import { normalizeTokenHeader, tokenHeaderNameError } from '#lib/server/oidc.ts';
+import { parseExposedPorts, serializeExposedPorts } from '#lib/server/deploy/plan.ts';
+import { IMAGE_UPDATE_INTERVAL_ERROR, parseImageUpdateInterval } from '#lib/image-update-settings.ts';
+import { createApplicationWithQuota } from '#lib/server/quota.ts';
 
 /** A token header name from an imported file, or null if it is unusable. */
 function importedTokenHeader(raw: unknown): string | null {

@@ -1,25 +1,25 @@
 import { json } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { workers } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { executeSSHCommand, testSSHConnection } from '$lib/server/ssh';
-import { generateProvisioningScript, type ProvisioningOptions } from '$lib/server/provisioning';
-import { routeGroupsForWorker, tokenForwardingApps } from '$lib/server/traefik-config';
-import { env } from '$lib/server/env';
+import { executeSSHCommand, testSSHConnection } from '#lib/server/ssh.ts';
+import { generateProvisioningScript, type ProvisioningOptions } from '#lib/server/provisioning/index.ts';
+import { routeGroupsForWorker, tokenForwardingApps } from '#lib/server/traefik-config.ts';
+import { env } from '#lib/server/env.ts';
 import { randomBytes } from 'crypto';
-import { withLock, LockError } from '$lib/server/locks';
+import { withLock, LockError } from '#lib/server/locks.ts';
 import type { RequestHandler } from './$types';
-import { parseJsonBody, schemas } from '$lib/server/validation';
-import { requireAdminUser, route } from '$lib/server/auth';
-import { encryptField, decryptField } from '$lib/server/encryption';
-import { normalizeOidcSecret } from '$lib/server/oidc';
-import { redactProvisioningOutput } from '$lib/server/redaction';
+import { parseJsonBody, schemas } from '#lib/server/validation.ts';
+import { requireAdminUser, route } from '#lib/server/auth.ts';
+import { encryptField, decryptField } from '#lib/server/encryption.ts';
+import { normalizeOidcSecret } from '#lib/server/oidc.ts';
+import { redactProvisioningOutput } from '#lib/server/redaction.ts';
 import {
   checkPublicUrlReachable,
   configEndpointUrl,
   appsecEndpointUrl,
   generateConfigToken,
-} from '$lib/server/worker-config-endpoint';
+} from '#lib/server/worker-config-endpoint.ts';
 
 /** Parse mTLS certificates and bouncer key from provisioning script stdout */
 function parseCertsFromOutput(stdout: string): {

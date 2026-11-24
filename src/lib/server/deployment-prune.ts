@@ -26,8 +26,8 @@
  * Removal never forces. Podman's own "image is in use" refusal is the last
  * word, and is reported as skipped rather than overridden.
  */
-import { db } from '$lib/db';
-import { applications, auditLogs, containers, deployments, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, auditLogs, containers, deployments, workers } from '#lib/db/schema.ts';
 import { and, desc, eq, inArray, ne } from 'drizzle-orm';
 import { AuthorizationError } from './auth';
 import { PodmanApiError } from './podman';

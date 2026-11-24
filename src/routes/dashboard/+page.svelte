@@ -1,6 +1,6 @@
 <script lang="ts">
-  import PageHeader from '$lib/components/PageHeader.svelte';
-  import { timeAgo as relativeTime } from '$lib/format';
+  import PageHeader from '#lib/components/PageHeader.svelte';
+  import { timeAgo as relativeTime } from '#lib/format.ts';
   let { data } = $props();
 
   let isAdmin = $derived(data.user?.role === 'admin');

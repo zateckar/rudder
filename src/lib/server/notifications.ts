@@ -4,7 +4,7 @@
  */
 
 import type { InferSelectModel } from 'drizzle-orm';
-import type { notificationChannels } from '$lib/db/schema';
+import type { notificationChannels } from '#lib/db/schema.ts';
 
 type NotificationChannel = InferSelectModel<typeof notificationChannels>;
 

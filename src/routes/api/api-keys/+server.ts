@@ -1,12 +1,12 @@
 import { json } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { apiKeys, teamMembers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { apiKeys, teamMembers } from '#lib/db/schema.ts';
 import { eq, and, inArray } from 'drizzle-orm';
-import { hashKey } from '$lib/server/encryption';
+import { hashKey } from '#lib/server/encryption.ts';
 import { randomBytes } from 'crypto';
 import type { RequestHandler } from './$types';
-import { requireTeam, requireUser, route } from '$lib/server/auth';
-import { parseJsonBody, schemas } from '$lib/server/validation';
+import { requireTeam, requireUser, route } from '#lib/server/auth.ts';
+import { parseJsonBody, schemas } from '#lib/server/validation.ts';
 
 /** Generate a cryptographically secure API key with a recognisable prefix. */
 function generateApiKey(): string {

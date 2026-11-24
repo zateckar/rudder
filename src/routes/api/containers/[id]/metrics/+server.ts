@@ -1,10 +1,10 @@
 import { json } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { containerMetrics } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { containerMetrics } from '#lib/db/schema.ts';
 import { eq, and, asc, sql } from 'drizzle-orm';
 import type { RequestHandler } from './$types';
-import { requireContainerScoped, route } from '$lib/server/auth';
-import { formatBytes } from '$lib/format';
+import { requireContainerScoped, route } from '#lib/server/auth.ts';
+import { formatBytes } from '#lib/format.ts';
 
 const RANGES: Record<string, number> = {
   '1h':  1  * 60 * 60 * 1000,

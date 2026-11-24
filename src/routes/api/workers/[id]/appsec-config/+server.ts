@@ -1,7 +1,7 @@
 import { json, text } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { appsecExclusionsForWorker, generateAppsecConfig } from '$lib/server/appsec';
-import { authenticateWorker } from '$lib/server/worker-token';
+import { appsecExclusionsForWorker, generateAppsecConfig } from '#lib/server/appsec.ts';
+import { authenticateWorker } from '#lib/server/worker-token.ts';
 import { createHash } from 'crypto';
 
 /**

@@ -1,14 +1,14 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { workers } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { executeSSHCommand } from '$lib/server/ssh';
-import { decryptField, encryptField } from '$lib/server/encryption';
-import { renderGlobalOidcConfig } from '$lib/server/provisioning';
-import { routeGroupsForWorker, tokenForwardingApps } from '$lib/server/traefik-config';
-import { normalizeOidcSecret, oidcCallbackHost, oidcCallbackUrl } from '$lib/server/oidc';
-import { requireWorker, route } from '$lib/server/auth';
+import { executeSSHCommand } from '#lib/server/ssh.ts';
+import { decryptField, encryptField } from '#lib/server/encryption.ts';
+import { renderGlobalOidcConfig } from '#lib/server/provisioning/index.ts';
+import { routeGroupsForWorker, tokenForwardingApps } from '#lib/server/traefik-config.ts';
+import { normalizeOidcSecret, oidcCallbackHost, oidcCallbackUrl } from '#lib/server/oidc.ts';
+import { requireWorker, route } from '#lib/server/auth.ts';
 
 /** POST /api/workers/[id]/oidc/apply — push global-oidc.yml to the worker via SSH.
  *  Traefik watches /etc/traefik/dynamic/ and hot-reloads within seconds. */

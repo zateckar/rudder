@@ -3,14 +3,14 @@
  * Checks all enabled alert rules against latest metrics and fires notifications.
  */
 
-import { db } from '$lib/db';
+import { db } from '#lib/db/index.ts';
 import {
   alertRules,
   alertEvents,
   notificationChannels,
   workerMetrics,
   containerMetrics,
-} from '$lib/db/schema';
+} from '#lib/db/schema.ts';
 import { eq, and, desc } from 'drizzle-orm';
 import { sendNotification } from './notifications';
 import { numericSetting } from './settings';

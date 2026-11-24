@@ -1,10 +1,10 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { teams, teamMembers, users } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { teams, teamMembers, users } from '#lib/db/schema.ts';
 import { eq, inArray } from 'drizzle-orm';
-import { requireAdminUser, requireUser, route, userTeams } from '$lib/server/auth';
-import { parseJsonBody, schemas } from '$lib/server/validation';
+import { requireAdminUser, requireUser, route, userTeams } from '#lib/server/auth.ts';
+import { parseJsonBody, schemas } from '#lib/server/validation.ts';
 
 function slugify(text: string): string {
   return text

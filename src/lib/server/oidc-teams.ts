@@ -7,8 +7,8 @@
  * route file was exporting `syncUserTeams` regardless, which is why the
  * production build failed while `bun test` and `svelte-check` were both clean.
  */
-import { db } from '$lib/db';
-import { teams, teamMembers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { teams, teamMembers } from '#lib/db/schema.ts';
 import { eq, and } from 'drizzle-orm';
 
 /** How the group claim is to be read. One mode or the other; suffix wins. */

@@ -234,8 +234,8 @@ export async function applicationPlannedDomains(
 
 async function loadDomainReservations(): Promise<Map<string, Set<string>>> {
   const [{ db }, { applications, workers, containers }] = await Promise.all([
-    import('$lib/db'),
-    import('$lib/db/schema'),
+    import('#lib/db/index.ts'),
+    import('#lib/db/schema.ts'),
   ]);
   const apps = db.select().from(applications).all();
   const workerRows = db.select().from(workers).all();
@@ -299,7 +299,7 @@ export async function claimDeploymentDomains(domains: Iterable<string>, applicat
 
 async function candidateDomains(app: ApplicationDomainInput): Promise<Set<string>> {
   const [{ db }, { workers }, { eq }] = await Promise.all([
-    import('$lib/db'), import('$lib/db/schema'), import('drizzle-orm'),
+    import('#lib/db/index.ts'), import('#lib/db/schema.ts'), import('drizzle-orm'),
   ]);
   const worker = app.workerId ? db.select().from(workers).where(eq(workers.id, app.workerId)).get() : undefined;
   return applicationPlannedDomains(app, worker);
@@ -326,7 +326,7 @@ export async function withApplicationDomainWrite(
 /** Hold only this application's hostnames until its external deployment has finished. */
 export async function withApplicationDeploymentDomains<T>(applicationId: string, deploy: () => Promise<T>): Promise<T> {
   const [{ db }, { applications }, { eq }] = await Promise.all([
-    import('$lib/db'), import('$lib/db/schema'), import('drizzle-orm'),
+    import('#lib/db/index.ts'), import('#lib/db/schema.ts'), import('drizzle-orm'),
   ]);
   await withDomainPolicy(async () => {
     const app = db.select().from(applications).where(eq(applications.id, applicationId)).get();

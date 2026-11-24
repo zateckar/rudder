@@ -1,5 +1,5 @@
-import { db } from '$lib/db';
-import { applications, containers, deployments, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, containers, deployments, workers } from '#lib/db/schema.ts';
 import { eq, inArray, sql } from 'drizzle-orm';
 
 /** All role changes and their crash-recovery marker commit in one SQLite transaction. */

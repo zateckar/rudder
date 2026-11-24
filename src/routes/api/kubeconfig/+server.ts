@@ -9,12 +9,12 @@
  */
 
 import { json } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { apiKeys, teams } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { apiKeys, teams } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
 import type { RequestHandler } from './$types';
-import { requireUser, requireTeam, route } from '$lib/server/auth';
-import { hashKey } from '$lib/server/encryption';
+import { requireUser, requireTeam, route } from '#lib/server/auth.ts';
+import { hashKey } from '#lib/server/encryption.ts';
 import { randomBytes } from 'crypto';
 
 export const POST: RequestHandler = route(async (event) => {

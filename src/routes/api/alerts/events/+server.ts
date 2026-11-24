@@ -5,10 +5,10 @@
  */
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { alertEvents } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { alertEvents } from '#lib/db/schema.ts';
 import { eq, desc } from 'drizzle-orm';
-import { requireAdminUser, route } from '$lib/server/auth';
+import { requireAdminUser, route } from '#lib/server/auth.ts';
 
 export const GET: RequestHandler = route(async ({ url, locals }) => {
   requireAdminUser({ locals });

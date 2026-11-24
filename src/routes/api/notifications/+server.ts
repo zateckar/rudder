@@ -14,9 +14,9 @@
  */
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { notificationChannels } from '$lib/db/schema';
-import { requireAdminUser, route } from '$lib/server/auth';
+import { db } from '#lib/db/index.ts';
+import { notificationChannels } from '#lib/db/schema.ts';
+import { requireAdminUser, route } from '#lib/server/auth.ts';
 
 export const GET: RequestHandler = route(async (event) => {
   requireAdminUser(event);

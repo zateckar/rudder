@@ -1,10 +1,10 @@
 import { json, text } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { workers } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { authenticateWorker } from '$lib/server/worker-token';
-import { acknowledgeRoutingSnapshot, routingSnapshot } from '$lib/server/routing-convergence';
+import { authenticateWorker } from '#lib/server/worker-token.ts';
+import { acknowledgeRoutingSnapshot, routingSnapshot } from '#lib/server/routing-convergence.ts';
 
 /** Fetch telemetry says only that a response was served, never that routes were installed. */
 export const GET: RequestHandler = async ({ params, request, setHeaders }) => {

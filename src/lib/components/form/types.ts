@@ -22,7 +22,7 @@ export interface VolumeMount {
   /**
    * Mount source. An absolute path is a host directory; anything else is a
    * named Podman volume, mounted under that literal name. See
-   * `isHostPathSource` in `$lib/server/volumes` — the field name is what the
+   * `isHostPathSource` in `#lib/server/volumes.ts` — the field name is what the
    * stored JSON has always called it, not what it means.
    */
   hostPath: string;

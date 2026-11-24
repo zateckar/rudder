@@ -22,7 +22,7 @@
  * the same way `verifyGeneration` does — so the format and the capture are
  * tested without a worker.
  */
-import { REDACTED } from '$lib/server/redaction';
+import { REDACTED } from '#lib/server/redaction.ts';
 
 /** How many lines of a failed container's output are worth keeping. */
 export const FAILURE_LOG_TAIL_LINES = 200;

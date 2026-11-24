@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { db, sqlite } from '$lib/db';
-import { backupConfig } from '$lib/db/schema';
+import { db, sqlite } from '#lib/db/index.ts';
+import { backupConfig } from '#lib/db/schema.ts';
 import { encrypt } from './encryption';
 import { listBackups, restoreBackup, testConnection } from './backup';
 import { dirname, join } from 'node:path';

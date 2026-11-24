@@ -77,7 +77,6 @@ const isProduction = process.env.NODE_ENV === 'production';
 export default defineConfig({
 	plugins: [sveltekit({
 			adapter: adapter(),
-			alias: { '$lib': 'src/lib' },
 			csrf: {
 				// In production only trust the configured ORIGIN; fall back to dev
 				// origins when running locally without NODE_ENV=production.

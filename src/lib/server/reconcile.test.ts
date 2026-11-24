@@ -21,7 +21,7 @@ import {
   type DriftEntry,
 } from './reconcile';
 import { ManifestError, type PlannedContainer } from './deploy/plan';
-import type { applications, containers, workers } from '$lib/db/schema';
+import type { applications, containers, workers } from '#lib/db/schema.ts';
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 

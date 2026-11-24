@@ -11,8 +11,8 @@
  * Authorization is the caller's job. Everything here assumes the caller has
  * already established that the application is theirs to act on.
  */
-import { db } from '$lib/db';
-import { applications, containers, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, containers, workers } from '#lib/db/schema.ts';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { getRestPodmanClient } from './podman-client';
 import { applyToContainers, lifecycleMessage, type LifecycleFailure, type LifecycleVerb } from './deploy/lifecycle';

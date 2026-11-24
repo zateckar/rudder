@@ -11,8 +11,8 @@
  * Authorization is the caller's job: `application` must already be one the
  * caller may act on.
  */
-import { db } from '$lib/db';
-import { applications, deployments } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, deployments } from '#lib/db/schema.ts';
 import { desc, eq } from 'drizzle-orm';
 import { executeApplicationDeploy, executeFastRollback, fastRollbackTargets } from './deploy';
 import { withApplicationDomainWrite } from './domains';

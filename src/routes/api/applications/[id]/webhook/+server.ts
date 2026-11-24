@@ -1,10 +1,10 @@
 import { json } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { deployWebhooks, applications } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { deployWebhooks, applications } from '#lib/db/schema.ts';
 import { eq, and } from 'drizzle-orm';
 import { randomBytes } from 'crypto';
-import { hashKey } from '$lib/server/encryption';
-import { canAccessApplication } from '$lib/server/auth';
+import { hashKey } from '#lib/server/encryption.ts';
+import { canAccessApplication } from '#lib/server/auth.ts';
 
 /** GET — return the webhook for this application (if exists) */
 export async function GET({ params, cookies }: { params: { id: string }; cookies: any }) {

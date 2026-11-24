@@ -18,7 +18,7 @@ import {
   tailChars,
   type LogSource,
 } from './failure-logs';
-import { REDACTED } from '$lib/server/redaction';
+import { REDACTED } from '#lib/server/redaction.ts';
 
 const one = [{ containerId: 'c1', name: 'app-g1' }];
 

@@ -11,6 +11,8 @@ application=${3:?An application ID is required}
 origin=https://$host
 state_scope=$(printf '%s\0%s' "$application" "$origin" | sha256sum | cut -d' ' -f1)
 dir=$(pwd -P)
+engine_version=$(./crowdsec -version | sed -n 's/^version: //p')
+[[ $engine_version =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 pod=rudder-learning-pilot
 plugin=github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
 for credential in bouncer-key signing-key; do
@@ -93,12 +95,13 @@ common=(--pod "$pod" --label "io.rudder.crowdsec-learning.origin=$origin"
   --label "io.rudder.crowdsec-learning.application=$application")
 podman run -d "${common[@]}" --name "$pod-engine" --label io.rudder.crowdsec-learning=engine \
   -e "BOUNCER_KEY_traefik=$bouncer" -e DISABLE_ONLINE_API=true \
+  -e "RUDDER_LEARNING_HOST=$host" -e "RUDDER_LEARNING_INGRESS_KEY=$key" \
   -e 'COLLECTIONS=crowdsecurity/appsec-virtual-patching crowdsecurity/appsec-crs crowdsecurity/appsec-generic-rules' \
   -v "$dir/crowdsec-data:/var/lib/crowdsec/data" \
   -v "$dir/acquis.yaml:/etc/crowdsec/acquis.d/rudder-learning.yaml:ro" \
   -v "$dir/profiles.yaml.local:/etc/crowdsec/profiles.yaml.local:ro" \
   -v "$dir/crowdsec:/usr/local/bin/crowdsec:ro" \
-  docker.io/crowdsecurity/crowdsec:v1.8.2
+  "docker.io/crowdsecurity/crowdsec:$engine_version"
 for attempt in $(seq 1 30); do
   if podman exec "$pod-engine" cscli lapi status >/dev/null 2>&1; then break; fi
   if [[ $attempt == 30 ]]; then echo 'Isolated CrowdSec did not start' >&2; exit 1; fi
@@ -111,6 +114,8 @@ podman run -d --pod "$pod" --name "$pod-app" -v "$dir/app.ts:/lab/app.ts:ro" \
   docker.io/oven/bun:1.4.2-alpine bun /lab/app.ts
 podman run -d "${common[@]}" --name "$pod-gateway" --label io.rudder.crowdsec-learning=gateway \
   -v "$dir/crowdsec-learning-spike.ts:/lab/gateway.ts:ro" \
+  -v "$dir/crowdsec-learning-alerts.ts:/lab/crowdsec-learning-alerts.ts:ro" \
+  -v "$dir/crowdsec-data:/alerts:ro" \
   -v "$dir/crowdsec-learning-state.ts:/lab/crowdsec-learning-state.ts:ro" -v "$dir/state:/state" \
   -e "LEARNING_ORIGIN=$origin" -e "LEARNING_KEY=$key" -e LEARNING_LISTEN_HOST=0.0.0.0 \
   -e "LEARNING_STATE_PATH=/state/$state_scope.sqlite" \

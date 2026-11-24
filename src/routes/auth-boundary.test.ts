@@ -14,7 +14,7 @@
  */
 import { beforeAll, describe, expect, test } from 'bun:test';
 import type { Cookies } from '@sveltejs/kit';
-import { db } from '$lib/db';
+import { db } from '#lib/db/index.ts';
 import {
   alertEvents,
   alertRules,
@@ -32,10 +32,10 @@ import {
   users,
   volumes,
   workers,
-} from '$lib/db/schema';
+} from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { createSession, hashPassword } from '$lib/auth';
-import { consume, reset } from '$lib/server/rate-limit';
+import { createSession, hashPassword } from '#lib/auth/index.ts';
+import { consume, reset } from '#lib/server/rate-limit.ts';
 
 /** A Cookies stand-in holding one session cookie. */
 function cookiesFor(sessionId: string | null): Cookies {

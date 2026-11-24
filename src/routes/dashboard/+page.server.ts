@@ -1,8 +1,8 @@
-import { db, safeWorkerColumns, safeApplicationColumns } from '$lib/db';
-import { workers, applications, containers, teams, users, auditLogs, deployments, teamMembers } from '$lib/db/schema';
+import { db, safeWorkerColumns, safeApplicationColumns } from '#lib/db/index.ts';
+import { workers, applications, containers, teams, users, auditLogs, deployments, teamMembers } from '#lib/db/schema.ts';
 import { eq, desc, inArray } from 'drizzle-orm';
-import { getAllWorkerResources } from '$lib/server/worker-selector';
-import { requirePageUser } from '$lib/server/auth';
+import { getAllWorkerResources } from '#lib/server/worker-selector.ts';
+import { requirePageUser } from '#lib/server/auth.ts';
 
 export const load = async (event: { url: URL; locals: App.Locals }) => {
   const currentUser = requirePageUser(event).user;

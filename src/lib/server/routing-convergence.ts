@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
-import { db } from '$lib/db';
-import { workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { workers } from '#lib/db/schema.ts';
 import { buildWorkerDynamicConfig } from './traefik-config';
 import { CONVERGENCE_POLL_MS, CUTOVER_CONVERGENCE_TIMEOUT_MS } from './generations';
 

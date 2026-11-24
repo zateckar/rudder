@@ -7,8 +7,8 @@
  * application" is answered by a column here or by reading the database.
  */
 import { beforeAll, describe, expect, test } from 'bun:test';
-import { db } from '$lib/db';
-import { teamMembers, teams, userOidc, users } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { teamMembers, teams, userOidc, users } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
 import { load } from './+page.server';
 

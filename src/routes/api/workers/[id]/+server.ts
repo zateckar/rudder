@@ -1,11 +1,11 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db, safeWorkerColumns } from '$lib/db';
-import { workers, applications, containers, volumes, workerMetrics, workerPings } from '$lib/db/schema';
+import { db, safeWorkerColumns } from '#lib/db/index.ts';
+import { workers, applications, containers, volumes, workerMetrics, workerPings } from '#lib/db/schema.ts';
 import { eq, count } from 'drizzle-orm';
-import { requireWorker, route } from '$lib/server/auth';
-import { evictPodmanClient } from '$lib/server/podman-client';
-import { forgetWorkerInfo } from '$lib/server/worker-info-cache';
+import { requireWorker, route } from '#lib/server/auth.ts';
+import { evictPodmanClient } from '#lib/server/podman-client.ts';
+import { forgetWorkerInfo } from '#lib/server/worker-info-cache.ts';
 
 /**
  * A worker as the browser may see it.

@@ -1,9 +1,9 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { workers } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { encryptField } from '$lib/server/encryption';
+import { encryptField } from '#lib/server/encryption.ts';
 import {
   CALLBACK_PATH_INVALID,
   generateOidcSecret,
@@ -13,8 +13,8 @@ import {
   oidcCallbackHost,
   oidcCallbackUrl,
   resolveCallbackPath,
-} from '$lib/server/oidc';
-import { requireWorker, route } from '$lib/server/auth';
+} from '#lib/server/oidc.ts';
+import { requireWorker, route } from '#lib/server/auth.ts';
 
 /** Shape returned to the settings UI. Never includes secret material. */
 function publicOidcState(worker: typeof workers.$inferSelect) {

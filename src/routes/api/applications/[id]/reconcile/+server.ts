@@ -23,12 +23,12 @@
  * or by the operator from the container's own card.
  */
 import { json } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { workers } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { executeApplicationDeploy } from '$lib/server/deploy';
-import { canAccessApplication, requireAuth } from '$lib/server/auth';
-import { actionable, reconcileWorker, StaleWorkerSnapshotError } from '$lib/server/reconcile';
+import { executeApplicationDeploy } from '#lib/server/deploy.ts';
+import { canAccessApplication, requireAuth } from '#lib/server/auth.ts';
+import { actionable, reconcileWorker, StaleWorkerSnapshotError } from '#lib/server/reconcile.ts';
 
 export async function GET({ params, cookies }: { params: { id: string }; cookies: any }) {
   await requireAuth(cookies);

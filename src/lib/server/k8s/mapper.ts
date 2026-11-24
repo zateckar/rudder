@@ -11,7 +11,7 @@ import {
   parsePortList,
 } from '../deploy/plan';
 import { parseAppsecRules, parseRuleList, type AppsecRuleId } from '../appsec';
-import { firstRuleRefusal } from '$lib/appsec-rules';
+import { firstRuleRefusal } from '#lib/appsec-rules.ts';
 import { k8sPodTemplate } from '../kubernetes';
 
 // ── Path matching utility ──────────────────────────────────────

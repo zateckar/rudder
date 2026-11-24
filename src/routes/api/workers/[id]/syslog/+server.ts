@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { executeSSHCommand, type SSHConnectionConfig } from '$lib/server/ssh';
-import { requireWorker, route } from '$lib/server/auth';
+import { executeSSHCommand, type SSHConnectionConfig } from '#lib/server/ssh.ts';
+import { requireWorker, route } from '#lib/server/auth.ts';
 
 /**
  * A `--since` value that is safe to put in a remote shell command.

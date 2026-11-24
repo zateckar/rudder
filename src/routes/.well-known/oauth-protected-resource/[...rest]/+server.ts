@@ -8,7 +8,7 @@
  * either.
  */
 import type { RequestHandler } from './$types';
-import { mcpConfig } from '$lib/server/mcp/auth';
+import { mcpConfig } from '#lib/server/mcp/auth.ts';
 
 export const GET: RequestHandler = ({ params }) => {
   const config = mcpConfig();

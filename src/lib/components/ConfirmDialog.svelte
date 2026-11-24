@@ -3,7 +3,7 @@
   `<Toasts />`.
 -->
 <script lang="ts">
-  import { dialogState, settleDialog } from '$lib/client/dialog.svelte';
+  import { dialogState, settleDialog } from '#lib/client/dialog.svelte.ts';
 
   const pending = $derived(dialogState.pending);
 

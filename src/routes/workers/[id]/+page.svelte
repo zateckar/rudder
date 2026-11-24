@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { formatBytes, formatUptime, timeAgo } from '$lib/format';
+  import { formatBytes, formatUptime, timeAgo } from '#lib/format.ts';
   import { invalidateAll } from '$app/navigation';
   import { onDestroy, onMount } from 'svelte';
-  import SshKeyPrompt from '$lib/components/SshKeyPrompt.svelte';
-  import PageHeader from '$lib/components/PageHeader.svelte';
-  import { showToast } from '$lib/client/toast.svelte';
-  import { confirmAction } from '$lib/client/dialog.svelte';
-  import AppsecMatches from '$lib/components/AppsecMatches.svelte';
+  import SshKeyPrompt from '#lib/components/SshKeyPrompt.svelte';
+  import PageHeader from '#lib/components/PageHeader.svelte';
+  import { showToast } from '#lib/client/toast.svelte.ts';
+  import { confirmAction } from '#lib/client/dialog.svelte.ts';
+  import AppsecMatches from '#lib/components/AppsecMatches.svelte';
 
   let { data } = $props();
 

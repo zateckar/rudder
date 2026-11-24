@@ -1,8 +1,8 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { requireContainer, requireWorker, route } from '$lib/server/auth';
-import { storeTerminalToken } from '$lib/server/terminal-tokens';
-import { parseJsonBody, schemas } from '$lib/server/validation';
+import { requireContainer, requireWorker, route } from '#lib/server/auth.ts';
+import { storeTerminalToken } from '#lib/server/terminal-tokens.ts';
+import { parseJsonBody, schemas } from '#lib/server/validation.ts';
 
 export const POST: RequestHandler = route(async (event) => {
   const { containerId, workerId } = await parseJsonBody(event.request, schemas.terminalToken);

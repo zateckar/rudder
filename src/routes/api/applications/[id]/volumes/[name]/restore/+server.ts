@@ -1,10 +1,10 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { requireApplication, route } from '$lib/server/auth';
-import { requireAppVolume, runningContainerNamesLive } from '$lib/server/app-volumes';
-import { restoreVolume, type RestoreMode } from '$lib/server/volume-ops';
-import { PodmanApiError } from '$lib/server/podman';
-import { LockError, VOLUME_OP_TTL_MS, withLock, workerDeployLock } from '$lib/server/locks';
+import { requireApplication, route } from '#lib/server/auth.ts';
+import { requireAppVolume, runningContainerNamesLive } from '#lib/server/app-volumes.ts';
+import { restoreVolume, type RestoreMode } from '#lib/server/volume-ops.ts';
+import { PodmanApiError } from '#lib/server/podman.ts';
+import { LockError, VOLUME_OP_TTL_MS, withLock, workerDeployLock } from '#lib/server/locks.ts';
 
 /**
  * Carries the refusal out through `withLock`, whose callback can only signal by

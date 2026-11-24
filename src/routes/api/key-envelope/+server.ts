@@ -10,8 +10,8 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { createHmac } from 'crypto';
-import { env } from '$lib/server/env';
-import { requireUser, route } from '$lib/server/auth';
+import { env } from '#lib/server/env.ts';
+import { requireUser, route } from '#lib/server/auth.ts';
 
 export const GET: RequestHandler = route(async (event) => {
   const { user } = requireUser(event);

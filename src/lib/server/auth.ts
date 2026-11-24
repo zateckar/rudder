@@ -9,7 +9,7 @@
  *
  * Before this, three mechanisms coexisted: `locals` (populated, read by ten
  * files), these helpers taking `cookies` (twenty-eight files), and an inline
- * `await import('$lib/auth')` with a hand-written role check (fifty-six files,
+ * `await import('#lib/auth/index.ts')` with a hand-written role check (fifty-six files,
  * eighty-two occurrences — three times in one file in the worst case). They did
  * not disagree about *policy*; they disagreed about how many times to ask.
  *
@@ -21,11 +21,11 @@
  * containers. `requireApplication` and `requireContainer` both throw 404.
  */
 import { json, redirect, type RequestEvent } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { users, teamMembers, applications, workers, teams, containers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { users, teamMembers, applications, workers, teams, containers } from '#lib/db/schema.ts';
 import { eq, and } from 'drizzle-orm';
 import type { Cookies } from '@sveltejs/kit';
-import { getSessionIdFromCookies, validateSession } from '$lib/auth';
+import { getSessionIdFromCookies, validateSession } from '#lib/auth/index.ts';
 import { ValidationError } from './validation';
 import { PodmanApiError } from './podman';
 import { podmanErrorResponse } from './podman-client';

@@ -4,7 +4,7 @@ import { desiredState } from './reconcile';
 import { ManifestError } from './deploy/plan';
 import { volumeCopyName } from './volumes';
 import type { PodmanVolume } from './podman';
-import type { applications, workers } from '$lib/db/schema';
+import type { applications, workers } from '#lib/db/schema.ts';
 
 /**
  * The point of these tests: the storage view has to be correct for all three

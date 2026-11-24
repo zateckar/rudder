@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { formatDateTime as formatDate } from '$lib/format';
-  import { showToast } from '$lib/client/toast.svelte';
-  import { confirmAction } from '$lib/client/dialog.svelte';
+  import { formatDateTime as formatDate } from '#lib/format.ts';
+  import { showToast } from '#lib/client/toast.svelte.ts';
+  import { confirmAction } from '#lib/client/dialog.svelte.ts';
 
   let { data } = $props();
 
@@ -345,7 +345,7 @@
               channels, and the badge and edit form still have to render them.
               There is no SMTP path behind this type, so a channel created here
               could only fail to deliver — which it used to do while reporting
-              success. See sendEmail in $lib/server/notifications.
+              success. See sendEmail in #lib/server/notifications.
             -->
             <option value="email" disabled>Email (not available yet)</option>
           </select>

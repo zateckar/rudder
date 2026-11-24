@@ -1,14 +1,14 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { applications, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, workers } from '#lib/db/schema.ts';
 import { and, eq } from 'drizzle-orm';
-import { AuthorizationError, isTeamMember, requireUser, route } from '$lib/server/auth';
-import { storageForApplications } from '$lib/server/app-volumes';
-import { bareVolumeAccessForTeam } from '$lib/server/deployment-volumes';
-import { getRestPodmanClient } from '$lib/server/podman-client';
-import { volumeOwnerApp8 } from '$lib/server/volumes';
-import { ValidationError } from '$lib/server/validation';
+import { AuthorizationError, isTeamMember, requireUser, route } from '#lib/server/auth.ts';
+import { storageForApplications } from '#lib/server/app-volumes.ts';
+import { bareVolumeAccessForTeam } from '#lib/server/deployment-volumes.ts';
+import { getRestPodmanClient } from '#lib/server/podman-client.ts';
+import { volumeOwnerApp8 } from '#lib/server/volumes.ts';
+import { ValidationError } from '#lib/server/validation.ts';
 
 /** One existing volume a new application of the team might use. */
 interface Candidate {

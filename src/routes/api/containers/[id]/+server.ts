@@ -1,16 +1,16 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { containers, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { containers, workers } from '#lib/db/schema.ts';
 import { eq, sql } from 'drizzle-orm';
-import { withPodman } from '$lib/server/podman-client';
-import { isAbsent } from '$lib/server/deploy';
-import { requireContainer, route } from '$lib/server/auth';
-import { parseJsonBody, schemas } from '$lib/server/validation';
-import { redactContainerInspect } from '$lib/server/redact';
-import { LockError, withLock, workerDeployLock } from '$lib/server/locks';
-import { suppressContainerRestart, restoreContainerRestart } from '$lib/server/runtime-policy';
-import { PodmanApiError } from '$lib/server/podman';
+import { withPodman } from '#lib/server/podman-client.ts';
+import { isAbsent } from '#lib/server/deploy.ts';
+import { requireContainer, route } from '#lib/server/auth.ts';
+import { parseJsonBody, schemas } from '#lib/server/validation.ts';
+import { redactContainerInspect } from '#lib/server/redact.ts';
+import { LockError, withLock, workerDeployLock } from '#lib/server/locks.ts';
+import { suppressContainerRestart, restoreContainerRestart } from '#lib/server/runtime-policy.ts';
+import { PodmanApiError } from '#lib/server/podman.ts';
 
 export const GET: RequestHandler = route(async (event) => {
   const { container, worker } = await requireContainer(event, event.params.id!);

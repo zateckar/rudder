@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { eq, sql } from 'drizzle-orm';
-import { db } from '$lib/db';
-import { applications, containers, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, containers, workers } from '#lib/db/schema.ts';
 import { GET, POST } from '../../routes/api/workers/[id]/traefik-config/+server';
 import { acknowledgeRoutingSnapshot, expectedRoutingHash, routingSnapshot, waitForRoutingAcknowledgement } from './routing-convergence';
 

@@ -1,13 +1,13 @@
 import { json } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { applications, workers, containers, deployments, deployWebhooks, applicationTemplates } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, workers, containers, deployments, deployWebhooks, applicationTemplates } from '#lib/db/schema.ts';
 import { eq, sql } from 'drizzle-orm';
-import { getRestPodmanClient } from '$lib/server/podman-client';
-import { executeApplicationDeploy, resolveWorkerSSHConfig } from '$lib/server/deploy';
-import { isLifecycleAction, runLifecycleAction } from '$lib/server/app-lifecycle';
-import { teardownAppNetwork } from '$lib/server/networks';
-import { canAccessApplication } from '$lib/server/auth';
-import { LockError, withLock, workerDeployLock } from '$lib/server/locks';
+import { getRestPodmanClient } from '#lib/server/podman-client.ts';
+import { executeApplicationDeploy, resolveWorkerSSHConfig } from '#lib/server/deploy.ts';
+import { isLifecycleAction, runLifecycleAction } from '#lib/server/app-lifecycle.ts';
+import { teardownAppNetwork } from '#lib/server/networks.ts';
+import { canAccessApplication } from '#lib/server/auth.ts';
+import { LockError, withLock, workerDeployLock } from '#lib/server/locks.ts';
 
 type PodmanClient = ReturnType<typeof getRestPodmanClient>;
 
@@ -72,7 +72,7 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
 
     // ──────── START / STOP / RESTART ───────────────────────
     } else if (isLifecycleAction(action)) {
-      // Shared with the MCP server — see $lib/server/app-lifecycle.
+      // Shared with the MCP server — see #lib/server/app-lifecycle.
       const result = await runLifecycleAction(app, worker, action);
       if (!result.found) return json({ error: 'Application not found' }, { status: 404 });
       // 200 even when some containers refused: something did happen, and the

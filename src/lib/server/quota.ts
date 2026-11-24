@@ -1,6 +1,6 @@
 /** Team quotas are checked against the executable plan, under the deploy lock. */
-import { db } from '$lib/db';
-import { applications, containers, teamQuotas } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, containers, teamQuotas } from '#lib/db/schema.ts';
 import { eq, inArray } from 'drizzle-orm';
 import type { DeploymentPlan } from './deploy/plan';
 import { withLock } from './locks';

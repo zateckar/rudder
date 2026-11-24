@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { eq } from 'drizzle-orm';
-import { db } from '$lib/db';
-import { applications, containers, reconcileReports, workers, workerMetrics, workerPings } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, containers, reconcileReports, workers, workerMetrics, workerPings } from '#lib/db/schema.ts';
 import { isLocked, LockError, withLock, workerDeployLock, workerMutationEpoch, workerSnapshotIsCurrent } from './locks';
 import { persistContainerObservations, persistSweep, sweepWorker } from './metrics';
 import { desiredState, diff, reconcileWorker, StaleWorkerSnapshotError, toObserved } from './reconcile';

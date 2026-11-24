@@ -3,7 +3,7 @@
   it positions itself.
 -->
 <script lang="ts">
-  import { toasts } from '$lib/client/toast.svelte';
+  import { toasts } from '#lib/client/toast.svelte.ts';
 </script>
 
 <div class="toasts">

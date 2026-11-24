@@ -1,15 +1,18 @@
 /**
- * Request correlation on an isolated worker. The listener forwards only to
- * the disposable Traefik instance. Rudder manages grants over Podman exec.
+ * Enrollment and capture on a worker. The standalone pilot also uses this
+ * listener as its relay. Rudder manages grants over Podman exec.
  */
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, request } from 'node:http';
 import { lifetime, openLearningState, uuid } from './crowdsec-learning-state';
+import { readLearningAlerts } from './crowdsec-learning-alerts';
 
 const cookieName = '__Host-rudder-learning';
 const transactionHeader = 'x-crowdsec-appsec-transaction-id';
 const enrollmentPath = '/learn';
 const statePath = process.env.LEARNING_STATE_PATH ?? '/state/learning.sqlite';
+const alertDb = process.env.LEARNING_ALERTS_DB ?? '/alerts/crowdsec.db';
+const captureKey = process.env.LEARNING_INGRESS_KEY;
 
 if (process.argv[2] === 'manage') {
   const [, , , action, id, grantHash, codeHash] = process.argv;
@@ -26,6 +29,13 @@ if (process.argv[2] === 'manage') {
     case 'read':
       console.log(JSON.stringify(state.read(id)));
       break;
+    case 'report': {
+      const session = state.read(id);
+      const alerts = session ? readLearningAlerts(alertDb, session.requests.map((row) => row.id),
+        new URL(process.env.LEARNING_ORIGIN!).hostname) : [];
+      console.log(JSON.stringify(session && { session, alerts }));
+      break;
+    }
     case 'revoke':
       console.log(JSON.stringify(state.revoke(id)));
       break;
@@ -53,11 +63,11 @@ const listenHost = process.env.LEARNING_LISTEN_HOST ?? '127.0.0.1';
 const enrollPage = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CrowdSec correlation test</title>
-<h1>CrowdSec correlation test</h1>
+<title>CrowdSec learning session</title>
+<h1>CrowdSec learning session</h1>
 <form>
   <label>One-time code <input maxlength="6" autocapitalize="characters" spellcheck="false" required></label>
-  <button>Start test</button>
+  <button>Enroll this browser</button>
 </form>
 <p role="status"></p>
 <script>
@@ -77,15 +87,13 @@ form.addEventListener('submit', async (event) => {
       method: 'POST', headers: { 'X-Rudder-Lab-Grant': code || input.value.trim().toUpperCase() }
     });
     if (!enrolled.ok) {
-      status.textContent = 'The test code was rejected.';
+      status.textContent = 'The enrollment code was rejected.';
       button.disabled = false;
       return;
     }
-    const result = await fetch('/', { cache: 'no-store' });
-    const probe = await fetch('/crowdsec-test-NtktlJHV4TfBSK3wvlhiOBnl', { cache: 'no-store' });
-    status.textContent = 'Test requests sent. HTTP ' + result.status + ' and ' + probe.status + '.';
+    location.replace(${JSON.stringify(captureKey ? '/' : '/crowdsec-test-NtktlJHV4TfBSK3wvlhiOBnl')});
   } catch {
-    status.textContent = 'The test request could not be sent.';
+    status.textContent = 'Enrollment could not be completed.';
   }
 });
 </script>`;
@@ -102,6 +110,10 @@ function signature(payload: string): string {
     .update('\0')
     .update(payload)
     .digest('base64url');
+}
+
+function signedRequestId(id: string, secret: string): string {
+  return `${id}.${createHmac('sha256', secret).update(id).digest('hex')}`;
 }
 
 function sessionId(value: string | undefined): string | undefined {
@@ -130,6 +142,30 @@ function splitCookies(cookie: string | undefined) {
 const server = createServer((incoming, response) => {
   if (incoming.headers.host !== expectedOrigin.host) {
     response.writeHead(421).end();
+    return;
+  }
+
+  if (captureKey && incoming.url === '/_capture') {
+    const key = incoming.headers['x-rudder-ingress-key'];
+    if (incoming.method !== 'POST' || typeof key !== 'string' || !equal(key, captureKey)) {
+      response.writeHead(403).end();
+      return;
+    }
+    const credential = incoming.headers['x-rudder-learning-cookie'];
+    const session = typeof credential === 'string' ? sessionId(credential) : undefined;
+    if (!session) {
+      response.writeHead(204).end();
+      return;
+    }
+    try {
+      const id = `rudder-${randomUUID()}`;
+      if (state.record(id, session, Date.now(), 0).changes) {
+        response.setHeader(transactionHeader, signedRequestId(id, captureKey));
+      }
+      response.writeHead(204).end();
+    } catch {
+      response.writeHead(503).end();
+    }
     return;
   }
 
@@ -170,6 +206,11 @@ const server = createServer((incoming, response) => {
     return;
   }
 
+  if (captureKey) {
+    response.writeHead(404).end();
+    return;
+  }
+
   const headers = { ...incoming.headers };
   const { credential, forwarded } = splitCookies(headers.cookie);
   if (forwarded) headers.cookie = forwarded;
@@ -187,7 +228,7 @@ const server = createServer((incoming, response) => {
     try {
       if (state.isActive(session, at)) {
         transactionId = `rudder-${randomUUID()}`;
-        headers[transactionHeader] = transactionId;
+        headers[transactionHeader] = signedRequestId(transactionId, signingKey);
       }
     } catch {
       // A capture outage must leave ordinary enforcement in the request path.

@@ -1,12 +1,12 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { volumes } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { volumes } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { requireApplication, route } from '$lib/server/auth';
-import { requireAppVolume, runningContainerNames } from '$lib/server/app-volumes';
-import { withPodman } from '$lib/server/podman-client';
-import { PodmanApiError } from '$lib/server/podman';
+import { requireApplication, route } from '#lib/server/auth.ts';
+import { requireAppVolume, runningContainerNames } from '#lib/server/app-volumes.ts';
+import { withPodman } from '#lib/server/podman-client.ts';
+import { PodmanApiError } from '#lib/server/podman.ts';
 
 /**
  * Delete a volume and everything written to it.

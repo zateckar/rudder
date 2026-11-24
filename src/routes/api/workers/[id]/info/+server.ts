@@ -1,18 +1,18 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { workers, workerPings } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { workers, workerPings } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { withPodman } from '$lib/server/podman-client';
-import type { HostStats } from '$lib/server/host-metrics';
-import { getHostStatsHttp } from '$lib/server/host-metrics-http';
-import { getPlatformVersions } from '$lib/server/platform-versions';
-import { requireWorker, route } from '$lib/server/auth';
+import { withPodman } from '#lib/server/podman-client.ts';
+import type { HostStats } from '#lib/server/host-metrics.ts';
+import { getHostStatsHttp } from '#lib/server/host-metrics-http.ts';
+import { getPlatformVersions } from '#lib/server/platform-versions.ts';
+import { requireWorker, route } from '#lib/server/auth.ts';
 import {
   publishPlatformVersions,
   readPlatformVersions,
   readWorkerInfo,
-} from '$lib/server/worker-info-cache';
+} from '#lib/server/worker-info-cache.ts';
 
 /**
  * How stale a sweep snapshot may be before this asks the worker itself.
@@ -41,7 +41,7 @@ export const POST: RequestHandler = route(async (event) => {
   // endpoint — which the worker page then did on load and on a poll. Against a
   // worker that had just gone down, each reached its own timeout in turn and
   // the page hung for the better part of a minute to report what the sweep
-  // already knew. See $lib/server/worker-info-cache.
+  // already knew. See #lib/server/worker-info-cache.
   const cached = readWorkerInfo(workerId, MAX_SNAPSHOT_AGE_MS);
 
   if (cached) {

@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { db } from '$lib/db';
-import { applications, auditLogs, containers, deployments, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, auditLogs, containers, deployments, workers } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
 import { createServer } from 'node:http';
 import {

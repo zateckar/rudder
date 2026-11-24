@@ -3,7 +3,7 @@ import http from 'node:http';
 import type { AddressInfo, Socket } from 'node:net';
 
 // The plain-HTTP path below needs ALLOW_INSECURE_PODMAN, which `test/preload.ts`
-// sets: `$lib/server/env` parses the environment once at import time and the
+// sets: `#lib/server/env.ts` parses the environment once at import time and the
 // suite shares a module registry, so setting it here would only work when this
 // file happened to import it first.
 import { evictPodmanClient, getRestPodmanClient, withPodman } from './podman-client';

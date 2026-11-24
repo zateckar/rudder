@@ -1,13 +1,13 @@
 import { json } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { applications, containers, workers } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { applications, containers, workers } from '#lib/db/schema.ts';
 import { eq, sql } from 'drizzle-orm';
 import type { RequestHandler } from './$types';
-import { withPodman } from '$lib/server/podman-client';
-import { requireContainer, route } from '$lib/server/auth';
-import { LockError, withLock, workerDeployLock } from '$lib/server/locks';
-import { suppressContainerRestart, restoreContainerRestart } from '$lib/server/runtime-policy';
-import { checkDeployQuota, plannedResources, withTeamDeployQuota } from '$lib/server/quota';
+import { withPodman } from '#lib/server/podman-client.ts';
+import { requireContainer, route } from '#lib/server/auth.ts';
+import { LockError, withLock, workerDeployLock } from '#lib/server/locks.ts';
+import { suppressContainerRestart, restoreContainerRestart } from '#lib/server/runtime-policy.ts';
+import { checkDeployQuota, plannedResources, withTeamDeployQuota } from '#lib/server/quota.ts';
 
 /**
  * Recreate a container from its own inspected config, to apply new resource

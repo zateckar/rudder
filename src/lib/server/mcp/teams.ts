@@ -14,8 +14,8 @@
  * `podp_x7f2` reaches the team an admin created as "Product Portal" with slug
  * `podp`, rather than a second, empty "podp" next to it.
  */
-import { db } from '$lib/db';
-import { teams } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { teams } from '#lib/db/schema.ts';
 
 export type Team = typeof teams.$inferSelect;
 

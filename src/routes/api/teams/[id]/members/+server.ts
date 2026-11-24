@@ -1,9 +1,9 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { teams, teamMembers, users } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { teams, teamMembers, users } from '#lib/db/schema.ts';
 import { eq, and } from 'drizzle-orm';
-import { AuthorizationError, requireAdminUser, route } from '$lib/server/auth';
+import { AuthorizationError, requireAdminUser, route } from '#lib/server/auth.ts';
 
 /**
  * The team, for a caller allowed to manage who is in it.

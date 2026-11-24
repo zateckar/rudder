@@ -1,9 +1,9 @@
 import { json } from '@sveltejs/kit';
-import { db } from '$lib/db';
-import { deployWebhooks, applications, auditLogs } from '$lib/db/schema';
+import { db } from '#lib/db/index.ts';
+import { deployWebhooks, applications, auditLogs } from '#lib/db/schema.ts';
 import { eq, and } from 'drizzle-orm';
-import { hashKey } from '$lib/server/encryption';
-import { executeApplicationDeploy } from '$lib/server/deploy';
+import { hashKey } from '#lib/server/encryption.ts';
+import { executeApplicationDeploy } from '#lib/server/deploy.ts';
 
 /**
  * POST — unauthenticated webhook trigger endpoint for CI/CD.
@@ -16,7 +16,7 @@ import { executeApplicationDeploy } from '$lib/server/deploy';
  * trail, which records `url.search` — so that put a credential that triggers a
  * production deploy into files with a wider audience and a different retention
  * policy than the token itself has. The terminal WebSocket was moved off the
- * query string for the same reason; see `$lib/terminal-protocol`.
+ * query string for the same reason; see `#lib/terminal-protocol.ts`.
  *
  * Nothing Rudder generates used the query form: the URL handed out at creation
  * time has always been the bare path, with the token shown separately.

@@ -444,8 +444,8 @@ export async function routeGroupsForWorker(workerId: string): Promise<RouteGroup
   // Imported lazily so the pure generators above stay usable from tests and
   // from modules that must not open the database.
   const [{ db }, { applications, containers }, { and, eq }] = await Promise.all([
-    import('$lib/db'),
-    import('$lib/db/schema'),
+    import('#lib/db/index.ts'),
+    import('#lib/db/schema.ts'),
     import('drizzle-orm'),
   ]);
 
@@ -515,8 +515,8 @@ export async function routeGroupsForWorker(workerId: string): Promise<RouteGroup
 
 export async function buildWorkerDynamicConfig(workerId: string): Promise<ServedConfig> {
   const [{ db }, { workers }, { eq }, { decryptField, encryptField }] = await Promise.all([
-    import('$lib/db'),
-    import('$lib/db/schema'),
+    import('#lib/db/index.ts'),
+    import('#lib/db/schema.ts'),
     import('drizzle-orm'),
     import('./encryption'),
   ]);

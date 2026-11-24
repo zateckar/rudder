@@ -1,8 +1,8 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { withPodman } from '$lib/server/podman-client';
-import { requireContainer, route } from '$lib/server/auth';
-import { formatBytes } from '$lib/format';
+import { withPodman } from '#lib/server/podman-client.ts';
+import { requireContainer, route } from '#lib/server/auth.ts';
+import { formatBytes } from '#lib/format.ts';
 
 
 
