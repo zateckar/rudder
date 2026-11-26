@@ -6,10 +6,10 @@
  * team membership synced from a claim, "why can this person see that
  * application" is answered by a column here or by reading the database.
  */
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { db } from '#lib/db/index.ts';
 import { teamMembers, teams, userOidc, users } from '#lib/db/schema.ts';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { load } from './+page.server';
 
 const ids = {
@@ -68,6 +68,16 @@ beforeAll(async () => {
     { teamId: ids.team, userId: ids.oidc, joinedAt: now },
     { teamId: ids.secondTeam, userId: ids.oidc, joinedAt: now },
   ]);
+});
+
+afterAll(() => {
+  const userIds = [ids.admin, ids.local, ids.oidc, ids.both];
+  db.transaction((tx) => {
+    tx.delete(teamMembers).where(inArray(teamMembers.userId, userIds)).run();
+    tx.delete(userOidc).where(inArray(userOidc.userId, userIds)).run();
+    tx.delete(teams).where(inArray(teams.id, [ids.team, ids.secondTeam])).run();
+    tx.delete(users).where(inArray(users.id, userIds)).run();
+  });
 });
 
 async function loaded() {
