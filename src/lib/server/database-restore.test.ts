@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { drizzle } from 'drizzle-orm/bun-sqlite';
 import { migrate } from 'drizzle-orm/bun-sqlite/migrator';
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { applyPendingDatabaseRestore, stageDatabaseRestore } from './database-restore';
@@ -117,6 +117,36 @@ describe('staged database restoration', () => {
     expect(applyPendingDatabaseRestore(path)).toBe(true);
     expect(ids(path)).toEqual([{ id: 'backup' }]);
     expect(ids(`${path}.pre-restore`)).toEqual([{ id: 'backup' }, { id: 'latest' }]);
+  });
+
+  test('keeps the journal and candidate intact when post-migration validation fails', () => {
+    const { path, live, bytes } = fixture(); live.close(true);
+    stageDatabaseRestore(path, bytes);
+    const markerPath = `${path}.restore-pending.json`;
+    const marker = readFileSync(markerPath, 'utf8');
+    const candidate = join(dirname(path), JSON.parse(marker).candidate);
+    const original = readFileSync(candidate);
+    const migrations = join(dirname(path), 'upgraded-migrations');
+    cpSync(resolveMigrationsDir(), migrations, { recursive: true });
+    const journalPath = join(migrations, 'meta', '_journal.json');
+    const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+    const last = journal.entries.at(-1);
+    journal.entries.push({ ...last, idx: last.idx + 1, when: last.when + 1, tag: 'incompatible_upgrade' });
+    writeFileSync(journalPath, JSON.stringify(journal));
+    writeFileSync(join(migrations, 'incompatible_upgrade.sql'), 'ALTER TABLE users RENAME COLUMN full_name TO invalid_name;');
+
+    const priorMigrations = process.env.MIGRATIONS_DIR;
+    try {
+      process.env.MIGRATIONS_DIR = migrations;
+      expect(() => applyPendingDatabaseRestore(path)).toThrow('missing users.full_name');
+      expect(readFileSync(markerPath, 'utf8')).toBe(marker);
+      expect(readFileSync(candidate).equals(original)).toBe(true);
+      expect(ids(path)).toEqual([{ id: 'backup' }, { id: 'latest' }]);
+    } finally {
+      if (priorMigrations === undefined) delete process.env.MIGRATIONS_DIR;
+      else process.env.MIGRATIONS_DIR = priorMigrations;
+    }
+    expect(applyPendingDatabaseRestore(path)).toBe(true);
   });
 
   test('recognizes a committed rename interrupted before journal cleanup', () => {

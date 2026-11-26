@@ -59,6 +59,14 @@
 {#if (form as any)?.success}
   <div class="alert success">✓ Configuration saved successfully</div>
 {/if}
+{#if form?.migration}
+  <div class="alert success" role="status">
+    Migrated {form.migration.migrated} OIDC links.
+    {#if form.migration.needsReview}
+      {form.migration.needsReview} links need an individually verified subject.
+    {/if}
+  </div>
+{/if}
 {#if (form as any)?.error}
   <div class="alert error">✕ {(form as any).error}</div>
 {/if}
@@ -102,7 +110,7 @@
         </div>
 
         <div class="form-group">
-          <label for="issuerUrl">Issuer URL</label>
+          <label for="issuerUrl">Issuer URL <span class="required">*</span></label>
           <div class="input-row">
             <input type="url" id="issuerUrl" name="issuerUrl" bind:value={issuerUrl}
               placeholder="https://auth.example.com/realms/myrealm" />
@@ -112,7 +120,7 @@
               {discovering ? 'Discovering…' : '⚡ Auto-discover'}
             </button>
           </div>
-          <p class="help">Used for OIDC Discovery. Click "Auto-discover" to populate the endpoints below automatically.</p>
+          <p class="help">Enter the exact HTTPS issuer published by your provider. Auto-discovery fills in the endpoints.</p>
         </div>
 
         <div class="form-group">
@@ -254,6 +262,38 @@
       </button>
     </div>
   </form>
+
+  {#if data.legacyOidcLinks.length && cfg?.issuerUrl}
+    <form method="POST" action="?/migrateLegacy" use:enhance class="test-section">
+      <h3>Migrate existing OIDC links</h3>
+      <p>Verify the original issuer before switching providers. The saved issuer is <code>{cfg.issuerUrl}</code>.</p>
+      <input type="hidden" name="issuer" value={cfg.issuerUrl} />
+      <label class="checkbox-label">
+        <input type="checkbox" name="confirmLegacyIssuer" required />
+        I verified that this issuer issued the subjects in the existing links.
+      </label>
+      <button class="btn-secondary" type="submit">Migrate links</button>
+    </form>
+    <form method="POST" action="?/migrateLegacyAccount" use:enhance class="test-section">
+      <h3>Migrate an individual OIDC link</h3>
+      <p>Use this for an ambiguous legacy link after verifying the account’s exact subject at the saved issuer.</p>
+      <input type="hidden" name="issuer" value={cfg.issuerUrl} />
+      <label for="legacyLink">Rudder account</label>
+      <select id="legacyLink" name="linkId" required>
+        <option value="">Select an account</option>
+        {#each data.legacyOidcLinks as link (link.id)}
+          <option value={link.id}>{link.username} ({link.providerId.slice('generic:'.length)})</option>
+        {/each}
+      </select>
+      <label for="legacySubject">Verified subject</label>
+      <input type="text" id="legacySubject" name="subject" required />
+      <label class="checkbox-label">
+        <input type="checkbox" name="confirmAccountSubject" required />
+        I verified that this subject belongs to the selected account.
+      </label>
+      <button class="btn-secondary" type="submit">Migrate account link</button>
+    </form>
+  {/if}
 
   {#if cfg?.enabled}
     <div class="test-section">

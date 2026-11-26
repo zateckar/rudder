@@ -1,12 +1,13 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { requireApplication, route } from '#lib/server/auth.ts';
+import { AuthorizationError, requireApplication, route } from '#lib/server/auth.ts';
 import {
   assertNotSharedWithOthers,
+  assertVolumeRestoreIdle,
   requireAppVolume,
-  runningContainerNames,
+  VolumeInUseError,
 } from '#lib/server/app-volumes.ts';
-import { cloneVolume, restoreFromCopy } from '#lib/server/volume-ops.ts';
+import { cloneVolume, restoreFromCopy, VolumeRestoreError } from '#lib/server/volume-ops.ts';
 import { LockError, VOLUME_OP_TTL_MS, withLock, workerDeployLock } from '#lib/server/locks.ts';
 import { parseVolumeCopyName } from '#lib/server/volumes.ts';
 
@@ -31,14 +32,15 @@ async function withWorkerLock<T>(
         {
           operation,
           holder: `${process.pid}:${crypto.randomUUID()}`,
-          // Copying a large volume outlasts the deploy-sized default, and a lock
-          // judged stale under a running copy lets a deploy in beside it.
           ttlMs: VOLUME_OP_TTL_MS,
         },
         fn,
       ),
     };
   } catch (e) {
+    if (e instanceof VolumeInUseError) {
+      return { ok: false, response: json({ error: e.message, running: e.running }, { status: e.statusCode }) };
+    }
     if (e instanceof LockError) {
       return {
         ok: false,
@@ -52,6 +54,9 @@ async function withWorkerLock<T>(
           { status: 409 },
         ),
       };
+    }
+    if (e instanceof VolumeRestoreError) {
+      return { ok: false, response: json({ error: e.message, recoveryVolume: e.recoveryVolume }, { status: 500 }) };
     }
     throw e;
   }
@@ -117,7 +122,7 @@ export const POST: RequestHandler = route(async (event) => {
  *
  * The shared-volume check is the one place it has to be made by hand. What is
  * resolved from the URL is the *copy*, which is always app-scoped by
- * construction, while what gets force-removed and rewritten is `copyOf` — so
+ * construction, while the destination being rewritten is `copyOf` — so
  * that is what has to be established as this application's alone.
  */
 export const PUT: RequestHandler = route(async (event) => {
@@ -139,27 +144,18 @@ export const PUT: RequestHandler = route(async (event) => {
     );
   }
 
-  await assertNotSharedWithOthers(application, worker, copyOf, 'restore');
-
-  const running = await runningContainerNames(application.id);
-  if (running.length > 0) {
-    return json(
-      {
-        error:
-          `Stop "${application.name}" before restoring. Writing over "${copyOf.name}" while ` +
-          `${running.map((n) => `"${n}"`).join(', ')} ${running.length === 1 ? 'is' : 'are'} ` +
-          `running can leave the data in a state that never existed.`,
-        running,
-      },
-      { status: 409 },
-    );
-  }
-
   const result = await withWorkerLock(
     worker.id,
     worker.name,
     `restore volume ${copyOf.name}`,
-    () => restoreFromCopy(worker, application.id, volume.name, copyOf.name),
+    async () => {
+      const { application: current } = await requireApplication(event, application.id);
+      if (current.workerId !== worker.id) throw new AuthorizationError('Worker assignment changed. Retry the restore.', 409);
+      await assertNotSharedWithOthers(current, worker, copyOf, 'restore');
+      const checkIdle = () => assertVolumeRestoreIdle(current, worker, copyOf.name);
+      await checkIdle();
+      return restoreFromCopy(worker, application.id, volume.name, copyOf.name, checkIdle);
+    },
   );
   if (!result.ok) return result.response;
 

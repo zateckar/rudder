@@ -27,7 +27,7 @@ function registryIds(raw: string | null): string[] {
   } catch { return []; }
 }
 
-function mountNames(inspect: ContainerInspect): Set<string> {
+export function namedVolumeMounts(inspect: ContainerInspect): Set<string> {
   const names = new Set<string>();
   for (const mount of inspect.Mounts ?? []) {
     if (mount.Type === 'volume' && mount.Name) names.add(mount.Name);
@@ -57,7 +57,7 @@ export async function inspectWorkerVolumes(source: VolumeAccessSource): Promise<
     const present = new Set((await source.listVolumes()).map((v) => v.name));
     const observed: WorkerVolumeEvidence['observed'] = [];
     for (const live of await source.listContainers(true)) {
-      observed.push({ id: live.Id, names: mountNames(await source.getContainer(live.Id)) });
+      observed.push({ id: live.Id, names: namedVolumeMounts(await source.getContainer(live.Id)) });
     }
     return { present, observed };
   } catch {
@@ -179,6 +179,7 @@ export async function assertDeploymentVolumeAccess(
   worker: Worker,
   plan: DeploymentPlan,
   source: VolumeAccessSource,
+  saved: Pick<Application, 'manifest' | 'volumes'> = app,
 ): Promise<void> {
   for (const container of plan.containers) realizeMounts(container.mounts, { owner: app.id });
   const requested = new Set(plan.containers.flatMap((c) => c.mounts.flatMap((m) =>
@@ -194,7 +195,7 @@ export async function assertDeploymentVolumeAccess(
   const { workerApps, registryRows } = readOwnership(worker);
   const current = workerApps.find((a) => a.id === app.id);
   if (!current || current.teamId !== app.teamId || current.workerId !== app.workerId ||
-      current.manifest !== app.manifest || current.volumes !== app.volumes || current.type !== app.type) {
+      current.manifest !== saved.manifest || current.volumes !== saved.volumes || current.type !== app.type) {
     throw new AuthorizationError('Application storage configuration changed during verification. Retry the deployment.', 409);
   }
   const registry = new Map(registryRows.map((v) => [v.id, v]));

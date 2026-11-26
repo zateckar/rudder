@@ -95,3 +95,26 @@ export function buildTar(files: TarFile[]): Buffer {
   parts.push(Buffer.alloc(BLOCK * 2));
   return Buffer.concat(parts);
 }
+
+/** Require the end marker written by a complete, uncompressed Rudder backup. */
+export function requireTarEnd(archive: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  const trailer = new Uint8Array(BLOCK * 2);
+  let size = 0;
+  return archive.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, output) {
+      size += chunk.length;
+      if (chunk.length >= trailer.length) {
+        trailer.set(chunk.subarray(chunk.length - trailer.length));
+      } else {
+        trailer.copyWithin(0, chunk.length);
+        trailer.set(chunk, trailer.length - chunk.length);
+      }
+      output.enqueue(chunk);
+    },
+    flush() {
+      if (size < BLOCK * 3 || size % BLOCK !== 0 || trailer.some((byte) => byte !== 0)) {
+        throw new Error('The archive is missing the end marker of a complete Rudder Backup tar.');
+      }
+    },
+  }));
+}

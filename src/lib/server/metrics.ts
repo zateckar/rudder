@@ -74,6 +74,8 @@ interface WorkerSweep {
   worker: Worker;
   status: 'online' | 'offline' | 'error';
   latencyMs: number;
+  podmanCalls: number;
+  observedAt: number | null;
   /** Every container Podman reports, in the shape reconciliation compares. */
   observed: ObservedContainer[];
   /** True when `observed` is what the worker actually said, not an empty stand-in. */
@@ -96,6 +98,8 @@ function emptySweep(worker: Worker, status: WorkerSweep['status'], latencyMs: nu
     worker,
     status,
     latencyMs,
+    podmanCalls: 0,
+    observedAt: null,
     observed: [],
     observedIsReal: false,
     mutationEpoch: workerMutationEpoch(worker.id),
@@ -134,19 +138,23 @@ export async function sweepWorker(worker: Worker, rows: readonly ContainerRow[],
   try {
     const reachable = await client.ping();
     const latencyMs = Date.now() - start;
-    if (!reachable) return emptySweep(worker, 'offline', latencyMs);
+    if (!reachable) return { ...emptySweep(worker, 'offline', latencyMs), podmanCalls: 1 };
 
     const sweep = emptySweep(worker, 'online', latencyMs);
+    sweep.podmanCalls = 1;
     sweep.mutationEpoch = epoch;
     sweep.observedIsReal = true;
 
     // Each of these is separately survivable — a worker whose `systemDf` fails
     // should still report its container states.
+    sweep.podmanCalls += 2;
     try { sweep.sysInfo = await client.info(); } catch (e) { console.error(`[metrics] info() failed for ${worker.name}:`, (e as any).message || e); }
     try { sweep.systemDf = await client.systemDf(); } catch (e) { console.error(`[metrics] systemDf() failed for ${worker.name}:`, (e as any).message || e); }
 
     try {
+      sweep.podmanCalls += 1;
       sweep.observed = (await client.listContainers(true)).map(toObserved);
+      sweep.observedAt = Date.now();
     } catch (e) {
       console.error(`[metrics] Failed to list containers for ${worker.name}:`, (e as any).message || e);
       // Not a real observation, so reconciliation must not treat the empty list
@@ -176,6 +184,7 @@ export async function sweepWorker(worker: Worker, rows: readonly ContainerRow[],
       STATS_CONCURRENCY,
       async (row): Promise<MetricValues | null> => {
         try {
+          sweep.podmanCalls += 1;
           const raw = await client.getContainerStats(row.containerId);
           return { ...parseStats(raw), id: crypto.randomUUID(), containerId: row.id, collectedAt };
         } catch (e) {
@@ -493,17 +502,17 @@ async function collectFleet(): Promise<Map<string, ObservedSnapshot>> {
     rowsByWorker.set(row.workerId, bucket);
   }
 
-  const sweeps = await mapWithConcurrency(allWorkers, WORKER_CONCURRENCY, async (worker) => {
+  const observedByWorker = new Map<string, ObservedSnapshot>();
+  const timings = await mapWithConcurrency(allWorkers, WORKER_CONCURRENCY, async (worker) => {
+    const startedAt = Date.now();
+    let sweep: WorkerSweep;
     try {
-      return await sweepWorker(worker, rowsByWorker.get(worker.id) ?? [], epochs.get(worker.id)!);
+      sweep = await sweepWorker(worker, rowsByWorker.get(worker.id) ?? [], epochs.get(worker.id)!);
     } catch (e) {
       console.error(`[metrics] Sweep failed for ${worker.name}:`, (e as any).message || e);
-      return emptySweep(worker, 'error', 0);
+      sweep = emptySweep(worker, 'error', 0);
     }
-  });
-
-  const observedByWorker = new Map<string, ObservedSnapshot>();
-  for (const sweep of sweeps) {
+    const sweepMs = Date.now() - startedAt;
     try {
       await persistSweep(sweep, now);
     } catch (e) {
@@ -515,7 +524,13 @@ async function collectFleet(): Promise<Map<string, ObservedSnapshot>> {
     if (sweep.observedIsReal && workerSnapshotIsCurrent(sweep.worker.id, sweep.mutationEpoch)) {
       observedByWorker.set(sweep.worker.id, { containers: sweep.observed, mutationEpoch: sweep.mutationEpoch });
     }
-  }
+    return { workerId: worker.id, sweepMs, podmanCalls: sweep.podmanCalls, observedAt: sweep.observedAt };
+  });
+
+  const finishedAt = Date.now();
+  console.log('[metrics] Fleet sweep', JSON.stringify(timings.map(({ observedAt, ...timing }) => ({
+    ...timing, snapshotAgeMs: observedAt === null ? null : finishedAt - observedAt,
+  }))));
 
   return observedByWorker;
 }

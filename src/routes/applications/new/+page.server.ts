@@ -4,7 +4,7 @@ import { applications, users, workers, teams, teamMembers, volumes } from '#lib/
 import { eq, inArray, or, isNull, and } from 'drizzle-orm';
 import { selectWorker, getAllWorkerResources, getAllEligibleWorkers } from '#lib/server/worker-selector.ts';
 import { buildAppDomain, assertDomainAvailable, withApplicationDomainWrite } from '#lib/server/domains.ts';
-import { ALLOWED_DOMAINS_UNSUPPORTED, normalizeTokenHeader, tokenHeadersError } from '#lib/server/oidc.ts';
+import { InvalidAppOidcConfig, normalizeTokenHeader, parseAppOidcConfig, tokenHeadersError } from '#lib/server/oidc.ts';
 import { imageReferenceError } from '#lib/server/image-reference.ts';
 import { IMAGE_UPDATE_INTERVAL_ERROR, parseImageUpdateFormSettings } from '#lib/image-update-settings.ts';
 import { createApplicationWithQuota } from '#lib/server/quota.ts';
@@ -285,21 +285,11 @@ export const actions = {
     if (badTokenHeader) return fail(400, { error: badTokenHeader });
 
     // Validate OIDC config if auth type is oidc
-    if (authType === 'oidc' && authConfig) {
-      try {
-        const cfg = JSON.parse(authConfig);
-        if (!cfg.providerURL || !cfg.clientID || !cfg.clientSecret || !cfg.sessionEncryptionKey) {
-          return fail(400, { error: 'OIDC authentication requires Provider URL, Client ID, Client Secret, and Session Encryption Key' });
-        }
-        // The Traefik OIDC plugin uses this value directly as an AES-256 key.
-        if (cfg.sessionEncryptionKey.length !== 32) {
-          return fail(400, { error: 'Session Encryption Key must be exactly 32 characters' });
-        }
-        if (cfg.allowedUserDomains?.length) {
-          return fail(400, { error: ALLOWED_DOMAINS_UNSUPPORTED });
-        }
-      } catch {
-        return fail(400, { error: 'Invalid OIDC configuration' });
+    if (authType === 'oidc') {
+      try { parseAppOidcConfig(authConfig); }
+      catch (error) {
+        if (!(error instanceof InvalidAppOidcConfig)) throw error;
+        return fail(400, { error: error.message });
       }
     }
 

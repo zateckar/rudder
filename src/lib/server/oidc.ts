@@ -1,4 +1,5 @@
 import { randomBytes } from 'crypto';
+import type { AppMiddlewareOptions } from './provisioning';
 
 /**
  * Worker-level (global) OIDC support for the Traefik `traefik-oidc-auth`
@@ -19,6 +20,38 @@ import { randomBytes } from 'crypto';
 export const ALLOWED_DOMAINS_UNSUPPORTED =
   'Allowed user domains are not supported: the Traefik OIDC plugin matches claims by exact value, not by ' +
   'domain suffix. List individual addresses under "Allowed users", or restrict access at the identity provider.';
+
+export class InvalidAppOidcConfig extends Error {}
+
+export function parseAppOidcConfig(value: string | null | undefined): NonNullable<AppMiddlewareOptions['authConfig']> {
+  if (!value) throw new InvalidAppOidcConfig('OIDC authentication requires an application configuration.');
+  let config;
+  try { config = JSON.parse(value); }
+  catch { throw new InvalidAppOidcConfig('Invalid OIDC configuration.'); }
+  if (!config || [config.providerURL, config.clientID, config.clientSecret, config.sessionEncryptionKey]
+    .some((field) => typeof field !== 'string' || !field.trim())) {
+    throw new InvalidAppOidcConfig('OIDC authentication requires Provider URL, Client ID, Client Secret, and Session Encryption Key.');
+  }
+  if (Buffer.byteLength(config.sessionEncryptionKey) !== 32) {
+    throw new InvalidAppOidcConfig('Session Encryption Key must be exactly 32 bytes.');
+  }
+  const issuer = URL.parse(normalizeIssuerUrl(config.providerURL) ?? '');
+  if (!issuer || !['http:', 'https:'].includes(issuer.protocol) || issuer.username || issuer.password || issuer.search || issuer.hash) {
+    throw new InvalidAppOidcConfig('OIDC Provider URL must be an HTTP or HTTPS issuer URL.');
+  }
+  for (const field of ['allowedUserDomains', 'allowedUsers', 'excludedURLs', 'scopes']) {
+    const entries = config[field];
+    if (entries != null && (!Array.isArray(entries) || entries.some((entry) => typeof entry !== 'string'))) {
+      throw new InvalidAppOidcConfig('OIDC lists must contain only strings.');
+    }
+  }
+  if (config.allowedUserDomains?.length) throw new InvalidAppOidcConfig(ALLOWED_DOMAINS_UNSUPPORTED);
+  if (config.callbackURL != null && config.callbackURL !== '' &&
+    (typeof config.callbackURL !== 'string' || !isValidCallbackPath(config.callbackURL))) {
+    throw new InvalidAppOidcConfig(CALLBACK_PATH_INVALID);
+  }
+  return config;
+}
 
 /** Path component of the shared callback URL, when a worker names no other. */
 export const OIDC_CALLBACK_PATH = '/oidc/callback';

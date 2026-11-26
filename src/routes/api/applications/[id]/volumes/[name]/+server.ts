@@ -3,10 +3,11 @@ import type { RequestHandler } from './$types';
 import { db } from '#lib/db/index.ts';
 import { volumes } from '#lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { requireApplication, route } from '#lib/server/auth.ts';
+import { AuthorizationError, requireApplication, route } from '#lib/server/auth.ts';
 import { requireAppVolume, runningContainerNames } from '#lib/server/app-volumes.ts';
 import { withPodman } from '#lib/server/podman-client.ts';
 import { PodmanApiError } from '#lib/server/podman.ts';
+import { LockError, withLock, workerDeployLock } from '#lib/server/locks.ts';
 
 /**
  * Delete a volume and everything written to it.
@@ -40,8 +41,17 @@ export const DELETE: RequestHandler = route(async (event) => {
   // could answer "there was nothing to delete".
   let removed: boolean;
   try {
-    removed = await withPodman(worker, (client) => client.removeVolume(volume.name, force));
+    removed = await withLock(workerDeployLock(worker.id), { operation: `delete volume ${volume.name}` }, async () => {
+      const { application: current } = await requireApplication(event, application.id);
+      if (current.workerId !== worker.id) throw new AuthorizationError('Worker assignment changed. Retry the deletion.', 409);
+      const removed = await withPodman(worker, (client) => client.removeVolume(volume.name, force));
+      if (alsoRegistry && volume.registryId) {
+        await db.delete(volumes).where(eq(volumes.id, volume.registryId));
+      }
+      return removed;
+    });
   } catch (e) {
+    if (e instanceof LockError) return json({ error: 'Another operation is running on this worker. Retry when it finishes.' }, { status: 409 });
     // Podman refuses with 409 while a container still mounts the volume. Saying
     // so explicitly is what lets the UI offer the override *only* here: every
     // other refusal on this route is also a 409 — a volume shared with another
@@ -51,10 +61,6 @@ export const DELETE: RequestHandler = route(async (event) => {
       return json({ error: e.detail, canForce: true }, { status: 409 });
     }
     throw e;
-  }
-
-  if (alsoRegistry && volume.registryId) {
-    await db.delete(volumes).where(eq(volumes.id, volume.registryId));
   }
 
   const registryNote =

@@ -487,10 +487,9 @@ describe('buildMiddlewareOpts', () => {
   });
 
   test('malformed auth config does not become an unauthenticated app by accident', () => {
-    // authType stays 'oidc' with no config, so generateTraefikLabelsForApp
-    // emits no OIDC middleware — the deploy path rejects this separately.
-    const opts = buildMiddlewareOpts({ authType: 'oidc', authConfig: '{not json' });
-    expect(opts).toBeUndefined();
+    for (const authConfig of [null, '{not json', 'null', '{}']) {
+      expect(() => buildMiddlewareOpts({ authType: 'oidc', authConfig })).toThrow(/OIDC/);
+    }
   });
 
   // ── auth_config is encrypted at rest ───────────────────────────────────────

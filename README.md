@@ -220,6 +220,7 @@ The GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatical
 | `OIDC_AUTH0_CLIENT_ID` | No | — | Auth0 client ID. |
 | `OIDC_AUTH0_CLIENT_SECRET` | No | — | Auth0 client secret. |
 | `OIDC_AUTH0_DOMAIN` | No | — | Auth0 domain (e.g. `company.auth0.com`). |
+| `OIDC_LEGACY_LINK_MIGRATION_ISSUER` | No | — | One-time startup migration for generic browser OIDC login links. Use the exact saved issuer only after confirming it issued the legacy subjects. Remove the setting after migration. |
 | `MCP_OIDC_ISSUER` | No | — | Enables the [MCP server](#mcp-server) at `/mcp`. The exact `iss` of the identity provider whose access tokens are accepted, e.g. `https://idp.example.com/realms/skoda`. Unset, `/mcp` answers 404. |
 | `MCP_OIDC_JWKS_URI` | No | discovered | Signing-key set URL. Only needed when the provider's discovery document is unreachable from Rudder. |
 | `MCP_ALLOWED_ORIGINS` | No | — | Comma-separated browser origins allowed to call `/mcp` besides `PUBLIC_URL`'s. Native clients send no `Origin` and need nothing here. |
@@ -676,10 +677,9 @@ volume mounted (`VOLUME_TOOL_IMAGE`), which is the same mechanism behind
 - **Backup** streams a `.tar` of the volume to your browser. Nothing is buffered
   on the control plane, and the application does not need to be stopped — a live
   backup carries the usual caveat that it is a snapshot of whatever was on disk.
-- **Restore** uploads one back. `replace` empties the volume first, so the result
-  is exactly the archive; `merge` extracts over what is there, leaving files the
-  archive does not mention where they are. Merge is for dropping a config
-  directory back without touching the data beside it, and is not a restore.
+- **Restore** uploads one back. `replace` stages the archive and installs its
+  contents. `merge` extracts over the existing files and keeps any files the
+  archive omits.
 - **Copy** duplicates the volume on the worker as `rudder-copy-…`. Nothing leaves
   the machine, so it is the cheap safety net before a risky change. Copies are
   listed under the volume they came from, and can be downloaded, restored or
@@ -690,17 +690,13 @@ Two guards, both refusals rather than warnings:
 - **Restore requires the application to be stopped.** Writing over files a
   process has open is how a restore produces a corrupt database rather than the
   state that was backed up. The refusal names the containers to stop.
-- **Restore and copy hold the worker's deploy lock**, so a deploy cannot recreate
-  containers onto the volume halfway through. They hold it for up to six hours
-  rather than the deploy-sized ten minutes: both are bounded by the size of the
-  data and, for a restore, by the client's upload speed, and a lock that expires
-  under a running restore lets a deploy in beside it.
+- **Restore and copy hold the worker's deploy lock** until the operation
+  finishes. Rudder checks the worker for running containers inside that lock.
 
-`replace` destroys before it writes, so `VOLUME_TOOL_IMAGE` is confirmed to be
-pullable or already present *before* the volume is emptied — otherwise a worker
-that cannot reach the registry ends up with an empty volume and an archive that
-was never applied. If a restore does fail after that point, the error says so
-explicitly: Rudder keeps no copy of the upload.
+Both replacement paths need temporary space on the worker for the incoming data
+and a recovery copy of the destination. If installation fails, Rudder attempts
+to restore the previous contents. If that also fails, the response identifies
+the recovery copy in the application's Storage tab.
 
 `BODY_SIZE_LIMIT` caps a restore upload and defaults to 512 KB — see
 [Environment Variables](#environment-variables). Raise it, and your proxy's limit
@@ -899,10 +895,17 @@ Applications are addressed by id or by name. Anything outside the token's teams 
 reported as not found.
 
 **Tasks** run in the background because a deploy takes as long as an image pull
-plus the health timeout — longer than an MCP client will wait on one call. They
-live in memory for 24 hours and do not survive a restart of Rudder; the
-deployment history is the durable record. Only one task per application runs at a
-time.
+plus the health timeout. The application page, deploy webhook, and MCP share
+operation records. Deploy and rollback stages are saved as the operation runs.
+Rudder keeps finished operations for up to 24 hours. After a restart it checks
+the linked deployment history and reports interrupted operations without
+replaying them. Only one tracked operation per application runs at a time.
+
+Deploy webhooks wait for the deployment result by default. Send
+`Prefer: respond-async` on the POST to receive HTTP 202 and an
+`operation.id` immediately. Poll the same webhook URL with GET and the
+`id` query parameter, using the original bearer token in the Authorization
+header. The `operation.status` is `running`, `succeeded`, or `failed`.
 
 ### Authentication
 

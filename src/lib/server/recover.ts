@@ -21,6 +21,7 @@ import { deployments, workers } from '#lib/db/schema.ts';
 import { eq, or } from 'drizzle-orm';
 import { sweepInterruptedGenerations } from './deploy';
 import { synchronizeWorkerRuntimePolicies } from './runtime-policy';
+import { recoverApplicationOperations } from './application-operations';
 
 /**
  * Fail every deployment still marked `pending`, and discard what it created.
@@ -41,6 +42,7 @@ export async function recoverInterruptedDeploys(): Promise<{
   discardedContainers: number;
 }> {
   const failedDeployments = recoverInterruptedDeploymentHistory();
+  recoverApplicationOperations();
 
   let discardedContainers = 0;
   for (const worker of db.select({ id: workers.id }).from(workers).all()) {

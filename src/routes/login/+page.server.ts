@@ -38,7 +38,9 @@ export const load = async ({ url }: { url: URL }) => {
   }).from(oidcConfig).get();
 
   return {
-    error: url.searchParams.get('error'),
+    error: url.searchParams.get('error') === 'oidc_account_linked'
+      ? 'This account has a different or legacy OIDC link. Contact your Rudder administrator.'
+      : url.searchParams.get('error'),
     genericOidc: (genericOidc?.enabled) ? { providerName: genericOidc.providerName } : null,
   };
 };

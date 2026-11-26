@@ -6,6 +6,8 @@ import { fastRollbackTargets } from '#lib/server/deploy.ts';
 import { parseCapturedOutput } from '#lib/server/deploy/failure-logs.ts';
 import { canAccessApplication } from '#lib/server/auth.ts';
 import { rollbackToDeployment } from '#lib/server/rollback.ts';
+import { applicationTask } from '#lib/server/application-operations.ts';
+import { operationResponse } from '#lib/server/operation-http.ts';
 
 /** Read the notes column, tolerating rows written before it existed. */
 function parseNotes(raw: string | null): string[] {
@@ -94,12 +96,10 @@ export async function POST({ params, request, cookies }: { params: { id: string 
   }
 
   // Shared with the MCP server — see #lib/server/rollback.
-  const result = await rollbackToDeployment(access.application, deploymentId, userId);
-  if (!result.success) {
-    return json(
-      { error: result.message, deploymentId: result.deploymentId },
-      { status: result.statusCode ?? 500 },
-    );
-  }
-  return json({ success: true, ...(result.fast ? { fast: true } : {}), message: result.message });
+  return operationResponse(request, applicationTask(access.application, 'rollback', userId), async (reportProgress) => {
+    const result = await rollbackToDeployment(access.application, deploymentId, userId, reportProgress);
+    return { ...result, details: result.fast ? { fast: true } : undefined };
+  }, (result, operationId) => result.success
+    ? json({ success: true, ...result.details, message: result.message, operationId })
+    : json({ error: result.message, deploymentId: result.deploymentId, operationId }, { status: result.statusCode ?? 500 }));
 }

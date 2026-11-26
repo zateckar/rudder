@@ -1,15 +1,15 @@
 import { json } from '@sveltejs/kit';
 import { db } from '#lib/db/index.ts';
-import { applications, workers, containers, deployments, deployWebhooks, applicationTemplates } from '#lib/db/schema.ts';
-import { eq, sql } from 'drizzle-orm';
-import { getRestPodmanClient } from '#lib/server/podman-client.ts';
-import { executeApplicationDeploy, resolveWorkerSSHConfig } from '#lib/server/deploy.ts';
+import { workers, deployments } from '#lib/db/schema.ts';
+import { eq } from 'drizzle-orm';
+import { executeApplicationDeploy } from '#lib/server/deploy.ts';
 import { isLifecycleAction, runLifecycleAction } from '#lib/server/app-lifecycle.ts';
-import { teardownAppNetwork } from '#lib/server/networks.ts';
+import { deleteApplication } from '#lib/server/application-delete.ts';
 import { canAccessApplication } from '#lib/server/auth.ts';
-import { LockError, withLock, workerDeployLock } from '#lib/server/locks.ts';
-
-type PodmanClient = ReturnType<typeof getRestPodmanClient>;
+import { LockError } from '#lib/server/locks.ts';
+import { applicationTask } from '#lib/server/application-operations.ts';
+import { operationResponse } from '#lib/server/operation-http.ts';
+import { rollbackToDeployment } from '#lib/server/rollback.ts';
 
 export async function POST({ request, cookies }: { request: Request; cookies: any }) {
   const body = await request.json();
@@ -27,18 +27,18 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
   }
   const { ctx, application: app } = access;
 
-  if (!app.workerId) return json({ error: 'No worker assigned to this application' }, { status: 400 });
-
-  const worker = await db.select().from(workers).where(eq(workers.id, app.workerId)).get();
-  if (!worker) return json({ error: 'Worker not found' }, { status: 404 });
-
-  // One client for whichever branch runs, destroyed in the `finally`. Each one
-  // carries a keep-alive HTTPS agent, so a client that is dropped rather than
-  // destroyed leaks its sockets to the worker for the life of the process.
-  // `deploy` builds its own inside executeApplicationDeploy and needs none here.
-  let podmanClient: ReturnType<typeof getRestPodmanClient> | null = null;
-
   try {
+    if (action === 'delete') {
+      const result = await deleteApplication(app);
+      return result.ok
+        ? json({ success: true, message: 'Application deleted' })
+        : json({ error: result.message }, { status: result.status });
+    }
+
+    if (!app.workerId) return json({ error: 'No worker assigned to this application' }, { status: 400 });
+    const worker = await db.select().from(workers).where(eq(workers.id, app.workerId)).get();
+    if (!worker) return json({ error: 'Worker not found' }, { status: 404 });
+
     // ──────────────────────── DEPLOY ────────────────────────
     if (action === 'deploy') {
       const deployUserId = ctx.user.id;
@@ -47,7 +47,6 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
       // from that row — never from the request body. Taking a digest from the
       // caller would let anyone who can deploy an application run arbitrary
       // image bytes under its name.
-      let pinnedDigests: string | null = null;
       if (fromDeploymentId) {
         const source = await db.select().from(deployments)
           .where(eq(deployments.id, fromDeploymentId))
@@ -55,20 +54,15 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
         if (!source || source.applicationId !== applicationId) {
           return json({ error: 'Source deployment not found for this application' }, { status: 400 });
         }
-        pinnedDigests = source.imageDigest ?? null;
       }
 
-      const result = await executeApplicationDeploy(applicationId, deployUserId, { pinnedDigests });
-      if (!result.success) {
-        // `deploymentId` names the history row this attempt wrote, when it got
-        // that far. It is where the failed containers' output was captured
-        // before they were removed, so the page can open the right one.
-        return json(
-          { error: result.message, deploymentId: result.deploymentId },
-          { status: result.statusCode || 500 },
-        );
-      }
-      return json({ success: true, message: result.message });
+      return await operationResponse(request, applicationTask(app, fromDeploymentId ? 'rollback' : 'deploy', deployUserId),
+        (reportProgress) => fromDeploymentId
+          ? rollbackToDeployment(app, fromDeploymentId, deployUserId, reportProgress)
+          : executeApplicationDeploy(applicationId, deployUserId, { reportProgress }),
+        (result, operationId) => result.success
+          ? json({ success: true, message: result.message, operationId })
+          : json({ error: result.message, deploymentId: result.deploymentId, operationId }, { status: result.statusCode || 500 }));
 
     // ──────── START / STOP / RESTART ───────────────────────
     } else if (isLifecycleAction(action)) {
@@ -79,70 +73,6 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
       // message says exactly what. `success` and `failures` are what the caller
       // reads to decide whether to say so in red.
       return json({ success: result.success, message: result.message, failures: result.failures });
-
-    // ──────────────────────── DELETE ───────────────────────
-    } else if (action === 'delete') {
-      return await withLock(workerDeployLock(worker.id), {
-        operation: `delete ${app.name}`, holder: crypto.randomUUID(),
-      }, async () => {
-      if (!db.select({ id: applications.id }).from(applications).where(eq(applications.id, applicationId)).get()) {
-        return json({ error: 'Application not found' }, { status: 404 });
-      }
-      db.update(workers).set({ routingRevision: sql`${workers.routingRevision} + 1`, configAppliedHash: null })
-        .where(eq(workers.id, worker.id)).run();
-      podmanClient = getRestPodmanClient(worker);
-      // Every generation, unlike the lifecycle actions above: deleting the
-      // application must not leave a retained generation behind on the worker.
-      const appContainers = await db
-        .select()
-        .from(containers)
-        .where(eq(containers.applicationId, applicationId))
-        .all();
-
-      // Delete deploy webhooks
-      await db.delete(deployWebhooks).where(eq(deployWebhooks.applicationId, applicationId));
-
-      // Delete deployment history
-      await db.delete(deployments).where(eq(deployments.applicationId, applicationId));
-
-      // Unlink any templates referencing this app
-      await db.update(applicationTemplates)
-        .set({ sourceAppId: null })
-        .where(eq(applicationTemplates.sourceAppId, applicationId));
-
-      // Teardown per-app network.
-      // Pass SSH config so teardownAppNetwork can purge stale Netavark iptables
-      // rules immediately after network removal (prevents 502 on next deploy).
-      const containerIds = appContainers.map(c => c.containerId);
-      const workerSSHConfig = await resolveWorkerSSHConfig(worker);
-      try {
-        await teardownAppNetwork(podmanClient, applicationId, containerIds, workerSSHConfig);
-      } catch (e: any) {
-        console.warn('Failed to teardown app network:', e.message);
-      }
-
-      for (const container of appContainers) {
-        // Try to remove from Podman (best-effort — don't let Podman failures block DB cleanup)
-        try {
-          await podmanClient.removeContainer(container.containerId, true);
-        } catch (e: any) {
-          console.error('Failed to remove container from Podman (continuing with DB delete):', e.message);
-        }
-        // Always remove from DB so FK constraint is satisfied before deleting the application
-        try {
-          await db.delete(containers).where(eq(containers.id, container.id));
-        } catch (e: any) {
-          console.error('Failed to delete container from DB:', e.message);
-        }
-      }
-
-      db.transaction((tx) => {
-        tx.delete(applications).where(eq(applications.id, applicationId)).run();
-        tx.update(workers).set({ routingRevision: sql`${workers.routingRevision} + 1`, configAppliedHash: null })
-          .where(eq(workers.id, worker.id)).run();
-      });
-      return json({ success: true, message: 'Application deleted' });
-      });
 
     } else {
       return json({ error: 'Invalid action' }, { status: 400 });
@@ -155,7 +85,5 @@ export async function POST({ request, cookies }: { request: Request; cookies: an
     // A deploy that threw still recorded a history row, and carries its id —
     // see `DeployFailure`. That row holds what the containers printed.
     return json({ error: error.message, deploymentId: error?.deploymentId }, { status: 500 });
-  } finally {
-    (podmanClient as PodmanClient | null)?.destroy();
   }
 }

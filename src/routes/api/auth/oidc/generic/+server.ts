@@ -5,6 +5,7 @@
 import { redirect } from '@sveltejs/kit';
 import { db } from '#lib/db/index.ts';
 import { oidcConfig } from '#lib/db/schema.ts';
+import { validOidcEndpoint, validOidcIssuer } from '#lib/server/oidc-identity.ts';
 import crypto from 'crypto';
 
 function base64url(buf: Buffer): string {
@@ -14,12 +15,14 @@ function base64url(buf: Buffer): string {
 export async function GET({ url, cookies }: { url: URL; cookies: any }) {
   const cfg = await db.select().from(oidcConfig).get();
 
-  if (!cfg || !cfg.enabled || !cfg.authorizationEndpoint || !cfg.clientId) {
+  if (!cfg || !cfg.enabled || !validOidcIssuer(cfg.issuerUrl) ||
+      !validOidcEndpoint(cfg.authorizationEndpoint) || !cfg.clientId) {
     return new Response('Generic OIDC is not configured or disabled', { status: 404 });
   }
 
   // Generate state (CSRF protection)
   const state = base64url(crypto.randomBytes(32));
+  const nonce = base64url(crypto.randomBytes(32));
 
   // Generate PKCE code_verifier and code_challenge
   const codeVerifier = base64url(crypto.randomBytes(96));
@@ -36,6 +39,7 @@ export async function GET({ url, cookies }: { url: URL; cookies: any }) {
     path: '/',
   };
   cookies.set('oidc_state', state, cookieOpts);
+  cookies.set('oidc_nonce', nonce, cookieOpts);
   if (cfg.usePkce) {
     cookies.set('oidc_verifier', codeVerifier, cookieOpts);
   }
@@ -50,6 +54,7 @@ export async function GET({ url, cookies }: { url: URL; cookies: any }) {
     redirect_uri: callbackUrl,
     scope: cfg.scopes ?? 'openid email profile',
     state,
+    nonce,
   });
 
   if (cfg.usePkce) {
@@ -57,5 +62,7 @@ export async function GET({ url, cookies }: { url: URL; cookies: any }) {
     params.set('code_challenge_method', 'S256');
   }
 
-  throw redirect(302, `${cfg.authorizationEndpoint}?${params.toString()}`);
+  const authorizationUrl = new URL(cfg.authorizationEndpoint);
+  for (const [key, value] of params) authorizationUrl.searchParams.set(key, value);
+  throw redirect(302, authorizationUrl.href, { external: [authorizationUrl.origin] });
 }

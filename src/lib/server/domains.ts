@@ -324,14 +324,16 @@ export async function withApplicationDomainWrite(
 }
 
 /** Hold only this application's hostnames until its external deployment has finished. */
-export async function withApplicationDeploymentDomains<T>(applicationId: string, deploy: () => Promise<T>): Promise<T> {
+export async function withApplicationDeploymentDomains<T>(
+  applicationId: string, deploy: () => Promise<T>, configuration?: Pick<ApplicationDomainInput, 'manifest' | 'environment'>,
+): Promise<T> {
   const [{ db }, { applications }, { eq }] = await Promise.all([
     import('#lib/db/index.ts'), import('#lib/db/schema.ts'), import('drizzle-orm'),
   ]);
   await withDomainPolicy(async () => {
     const app = db.select().from(applications).where(eq(applications.id, applicationId)).get();
     if (!app) throw new DomainReservationError('Application not found');
-    const domains = await candidateDomains(app);
+    const domains = await candidateDomains({ ...app, ...configuration });
     const conflict = await assertDomainsAvailable(domains, app.id);
     if (conflict) throw new DomainReservationError(conflict);
     if (activeDomains.has(app.id)) throw new DomainReservationError('A deployment is already running for this application.');
@@ -339,6 +341,16 @@ export async function withApplicationDeploymentDomains<T>(applicationId: string,
     activeDomains.set(app.id, domains);
   });
   try { return await deploy(); }
+  finally { activeDomains.delete(applicationId); }
+}
+
+/** Keep application edits out while deleting, even if its manifest is invalid. */
+export async function withApplicationDeletionDomains<T>(applicationId: string, remove: () => Promise<T>): Promise<T> {
+  await withDomainPolicy(async () => {
+    if (activeDomains.has(applicationId)) throw new DomainReservationError('An application operation is already running.');
+    activeDomains.set(applicationId, new Set());
+  });
+  try { return await remove(); }
   finally { activeDomains.delete(applicationId); }
 }
 

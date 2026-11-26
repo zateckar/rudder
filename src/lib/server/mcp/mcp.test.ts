@@ -13,7 +13,7 @@ import { eq } from 'drizzle-orm';
 import { JwtVerifier, TokenError } from './jwt';
 import { resolveTeams, teamNameFromAudience, teamNamesFromAudience } from './teams';
 import { setVerifierForTests } from './auth';
-import { clearTasksForTests, getTask, startTask } from './tasks';
+import { clearTasksForTests, getTask, startTask } from '../application-operations';
 
 const ISSUER = 'https://idp.example.test/realms/skoda';
 const JWKS_URI = `${ISSUER}/protocol/openid-connect/certs`;

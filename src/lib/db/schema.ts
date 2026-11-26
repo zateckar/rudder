@@ -1,4 +1,5 @@
 import { index, sqliteTable, text, integer, real, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import type { OperationStage } from '#lib/application-operations.ts';
 import { relations, sql } from 'drizzle-orm';
 
 /**
@@ -620,6 +621,27 @@ export const deployments = sqliteTable('deployments', {
   // DESC to match `ORDER BY version DESC LIMIT 1`, which is how the next
   // deployment version is computed on every deploy.
   index('deployments_app_version_idx').on(t.applicationId, sql`version DESC`),
+]);
+
+export const applicationOperations = sqliteTable('application_operations', {
+  id: text('id').primaryKey(),
+  applicationId: text('application_id').notNull().references(() => applications.id, { onDelete: 'cascade' }),
+  applicationName: text('application_name').notNull(),
+  teamId: text('team_id'),
+  startedBy: text('started_by').notNull(),
+  kind: text('kind', { enum: ['deploy', 'rollback', 'start', 'stop', 'restart', 'scale'] }).notNull(),
+  status: text('status', { enum: ['running', 'succeeded', 'failed'] }).notNull(),
+  stage: text('stage').$type<OperationStage>().notNull(),
+  message: text('message'),
+  deploymentId: text('deployment_id'),
+  details: text('details', { mode: 'json' }).$type<Record<string, unknown>>(),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+  finishedAt: integer('finished_at', { mode: 'timestamp_ms' }),
+}, (t) => [
+  index('application_operations_app_created_idx').on(t.applicationId, t.createdAt),
+  index('application_operations_finished_idx').on(t.finishedAt),
+  uniqueIndex('application_operations_one_running_idx').on(t.applicationId).where(sql`status = 'running'`),
 ]);
 
 /** Notification channels (email, webhook, slack) */

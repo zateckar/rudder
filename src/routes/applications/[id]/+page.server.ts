@@ -5,6 +5,7 @@ import { eq } from 'drizzle-orm';
 import { canAccessApplication, requireAuth } from '#lib/server/auth.ts';
 import { driftForApplication } from '#lib/server/reconcile.ts';
 import { primaryUrl, routeUrls, serviceUrls, unroutedPorts } from '#lib/server/app-urls.ts';
+import { latestTask, operationView } from '#lib/server/application-operations.ts';
 
 export const load = async ({ params, cookies }: { params: { id: string }; cookies: any }) => {
   const ctx = await requireAuth(cookies);
@@ -47,6 +48,7 @@ export const load = async ({ params, cookies }: { params: { id: string }; cookie
   // From the last reconciliation pass, not computed here: the page must not make
   // a Podman call per view, and the timer's answer is at most one cycle old.
   const drift = await driftForApplication(params.id);
+  const operation = latestTask(application.id);
 
   return {
     user: ctx.user,
@@ -59,5 +61,6 @@ export const load = async ({ params, cookies }: { params: { id: string }; cookie
     /** Ports declared public that produced no route, and why. */
     unroutedPorts: unroutedPorts(application, appContainers),
     drift,
+    operation: operation ? operationView(operation) : null,
   };
 };

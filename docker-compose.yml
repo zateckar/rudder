@@ -40,6 +40,7 @@ services:
 
       # ── Optional extras ───────────────────────────────────────────────────────
       - WORKER_REGISTRATION_SECRET=${WORKER_REGISTRATION_SECRET:-}
+      - OIDC_LEGACY_LINK_MIGRATION_ISSUER=${OIDC_LEGACY_LINK_MIGRATION_ISSUER:-}
       # Comma-separated host directories applications may bind-mount.
       # Empty (default) disables host path mounts; named volumes still work.
       - ALLOWED_HOST_MOUNT_PREFIXES=${ALLOWED_HOST_MOUNT_PREFIXES:-}

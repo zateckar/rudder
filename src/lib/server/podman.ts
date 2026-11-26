@@ -19,6 +19,8 @@ import http from 'http';
 import tls from 'tls';
 import { readFileSync } from 'fs';
 import { URL } from 'url';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 
 /**
  * Resolves a cert value that may be either PEM content (starts with "-----")
@@ -851,14 +853,6 @@ export class PodmanClient {
   /**
    * Make sure `image` can be run on this worker, and return its resolved name.
    *
-   * Extracted from `createContainer`, which is still the main caller, so that an
-   * operation whose *first* step destroys something can establish this before
-   * taking that step. `restoreVolume` is the case: it removes and recreates the
-   * volume before the helper container exists, so a pull that fails there — an
-   * air-gapped worker, a rate-limited registry, `VOLUME_TOOL_IMAGE` pruned off
-   * the worker by Rudder's own prune — used to leave the volume empty and the
-   * archive unapplied.
-   *
    * @throws when the image can be neither pulled nor found already present.
    */
   async ensureImage(image: string): Promise<string> {
@@ -1180,10 +1174,7 @@ export class PodmanClient {
   /**
    * Create a named volume.
    *
-   * Already there is the same outcome as having just made it — the same reading
-   * `createNetwork` takes of a 409, and the one that matters here: a restore
-   * recreates the volume it is about to fill, and a concurrent deploy may have
-   * got there first.
+   * As with `createNetwork`, a 409 means the volume already exists.
    */
   async createVolume(name: string, labels?: Record<string, string>): Promise<void> {
     try {
@@ -1324,55 +1315,36 @@ export class PodmanClient {
       { headers: { 'Content-Type': 'application/x-tar' }, timeoutMs: null },
     );
 
-    return new Promise<void>((resolve, reject) => {
-      const req = reqModule.request(reqOptions, (res) => {
+    // fromWeb reads the standard stream API. Bun's Node typings also include
+    // Bun-only convenience methods that the DOM Request.body type omits.
+    const input = Readable.fromWeb(body as unknown as Parameters<typeof Readable.fromWeb>[0]);
+    const req = reqModule.request(reqOptions);
+    const reply = new Promise<void>((resolve, reject) => {
+      req.once('error', reject);
+      req.once('response', (res) => {
         let data = '';
-        res.on('data', (chunk) => { data += chunk; });
-        res.on('end', () => {
-          if (res.statusCode && res.statusCode >= 400) {
-            reject(PodmanApiError.fromResponse(res.statusCode, data));
-            return;
+        res.once('error', reject);
+        res.on('data', (chunk) => {
+          if (data.length < 64 * 1024) data += String(chunk);
+        });
+        res.once('end', () => {
+          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+            reject(PodmanApiError.fromResponse(res.statusCode ?? 502, data));
+          } else {
+            resolve();
           }
-          resolve();
         });
       });
-      req.on('error', reject);
-
-      (async () => {
-        const reader = body.getReader();
-        try {
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            if (!req.write(value)) {
-              // Both outcomes, or a request that fails while the buffer is full
-              // leaves this await pending forever and the reader never released.
-              // Each listener removes the other so a long upload does not
-              // accumulate one pair per chunk.
-              await new Promise<void>((resolveDrain, rejectDrain) => {
-                const onDrain = () => {
-                  req.off('error', onError);
-                  resolveDrain();
-                };
-                const onError = (err: Error) => {
-                  req.off('drain', onDrain);
-                  rejectDrain(err);
-                };
-                req.once('drain', onDrain);
-                req.once('error', onError);
-              });
-            }
-          }
-          req.end();
-        } catch (e) {
-          // Destroying the request is what makes a truncated upload a failure
-          // rather than a half-extracted volume Podman thinks it finished.
-          req.destroy(e instanceof Error ? e : new Error(String(e)));
-        } finally {
-          reader.releaseLock();
-        }
-      })();
     });
+    try {
+      // A worker may answer before the browser finishes sending the archive.
+      // Accept the extraction only after both the input and response succeed.
+      await Promise.all([pipeline(input, req), reply]);
+    } catch (error) {
+      input.destroy();
+      req.destroy();
+      throw error;
+    }
   }
 
   async listImages(): Promise<Image[]> {

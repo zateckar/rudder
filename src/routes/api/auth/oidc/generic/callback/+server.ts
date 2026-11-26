@@ -10,6 +10,7 @@ import { eq, and } from 'drizzle-orm';
 import { createSession, setSessionCookie } from '#lib/auth/index.ts';
 import { decryptField } from '#lib/server/encryption.ts';
 import { resolveTeamNames, syncUserTeams } from '#lib/server/oidc-teams.ts';
+import { oidcProviderId, validOidcEndpoint, validOidcIssuer, verifyLoginIdToken } from '#lib/server/oidc-identity.ts';
 
 function decodeJwtPayload(token: string): Record<string, any> | null {
   try {
@@ -76,14 +77,18 @@ export async function GET({ url, cookies }: { url: URL; cookies: any }) {
 
   // Validate state cookie (CSRF check)
   const savedState = cookies.get('oidc_state');
-  if (!savedState || savedState !== state) {
+  const nonce = cookies.get('oidc_nonce');
+  if (!savedState || savedState !== state || !nonce) {
     console.error('[oidc/generic] State mismatch — possible CSRF');
     throw redirect(302, '/login?error=oidc_state_mismatch');
   }
   cookies.delete('oidc_state', { path: '/' });
+  cookies.delete('oidc_nonce', { path: '/' });
 
   const cfg = await db.select().from(oidcConfig).get();
-  if (!cfg || !cfg.enabled || !cfg.tokenEndpoint || !cfg.clientId) {
+  if (!cfg || !cfg.enabled || !validOidcIssuer(cfg.issuerUrl) || !cfg.clientId ||
+      !validOidcEndpoint(cfg.tokenEndpoint) || !validOidcEndpoint(cfg.userinfoEndpoint) ||
+      (cfg.jwksUri && !validOidcEndpoint(cfg.jwksUri))) {
     throw redirect(302, '/login?error=oidc_not_configured');
   }
 
@@ -127,35 +132,45 @@ export async function GET({ url, cookies }: { url: URL; cookies: any }) {
         Accept: 'application/json',
       },
       body: tokenBody.toString(),
+      redirect: 'error',
+      signal: AbortSignal.timeout(10_000),
     });
 
     if (!tokenRes.ok) {
-      const body = await tokenRes.text();
-      console.error('[oidc/generic] Token exchange failed:', tokenRes.status, body);
+      console.error('[oidc/generic] Token exchange failed:', tokenRes.status);
       throw redirect(302, '/login?error=oidc_token_error');
     }
 
     tokenData = await tokenRes.json();
     accessToken = tokenData.access_token;
-    if (!accessToken) throw new Error('No access_token in response');
+    if (typeof accessToken !== 'string' || !accessToken) throw new Error('No access_token in response');
   } catch (e: any) {
     if (e?.location) throw e; // Re-throw SvelteKit redirects
     console.error('[oidc/generic] Token error:', e.message);
     throw redirect(302, '/login?error=oidc_token_error');
   }
 
-  // Fetch user info
-  if (!cfg.userinfoEndpoint) {
-    throw redirect(302, '/login?error=oidc_no_userinfo');
+  let identity;
+  try {
+    if (typeof tokenData.id_token !== 'string') throw new Error('No id_token in response');
+    identity = await verifyLoginIdToken(tokenData.id_token, {
+      issuerUrl: cfg.issuerUrl, clientId: cfg.clientId, jwksUri: cfg.jwksUri,
+    }, nonce);
+  } catch (e) {
+    console.warn('[oidc/generic] Could not validate ID token:', (e as Error).message);
+    throw redirect(302, '/login?error=oidc_token_error');
   }
 
   let userInfo: { sub?: string; email?: string; name?: string; preferred_username?: string; display_name?: string; [key: string]: any };
   try {
     const userRes = await fetch(cfg.userinfoEndpoint, {
       headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+      redirect: 'error',
+      signal: AbortSignal.timeout(10_000),
     });
     if (!userRes.ok) throw new Error(`Userinfo ${userRes.status}`);
     userInfo = await userRes.json();
+    if (userInfo?.sub !== identity.sub) throw new Error('UserInfo subject does not match the ID token');
   } catch (e: any) {
     console.error('[oidc/generic] Userinfo error:', e.message);
     throw redirect(302, '/login?error=oidc_userinfo_error');
@@ -181,7 +196,7 @@ export async function GET({ url, cookies }: { url: URL; cookies: any }) {
     // `decodeJwtPayload` was written for this and was never called.
     const claimSources: Array<Record<string, any> | null> = [
       decodeJwtPayload(accessToken),
-      typeof tokenData.id_token === 'string' ? decodeJwtPayload(tokenData.id_token) : null,
+      identity,
       userInfo,
       // Last, and only for a provider that hangs the claim off the envelope
       // itself. Kept so any deployment that happened to work before still does.
@@ -211,78 +226,45 @@ export async function GET({ url, cookies }: { url: URL; cookies: any }) {
     }
   }
 
-  const providerId = userInfo.sub ?? userInfo.email;
+  const providerId = oidcProviderId(cfg.issuerUrl, identity.sub);
   const email = userInfo.email;
-  const username = userInfo.preferred_username;
-  const fullName = userInfo.display_name || userInfo.name || userInfo.preferred_username || email?.split('@')[0] || 'User';
-
-  if (!providerId || !email) {
-    console.error('[oidc/generic] Missing sub/email in userinfo:', userInfo);
+  if (typeof email !== 'string' || !email.trim()) {
+    console.error('[oidc/generic] Missing email in UserInfo');
     throw redirect(302, '/login?error=oidc_missing_userinfo');
   }
+  const username = typeof userInfo.preferred_username === 'string' ? userInfo.preferred_username : undefined;
+  const fullName = [userInfo.display_name, userInfo.name, username, email.split('@')[0]]
+    .find((name): name is string => typeof name === 'string' && !!name.trim()) ?? 'User';
 
-  // Find or create user.
-  // The link is stored under provider='auth0' with a `generic:` prefix on the
-  // provider id — the enum predates generic OIDC and this reuses one of its
-  // slots rather than migrating it.
-  let userId: string;
+  // The provider enum predates generic OIDC. Existing links must be scoped
+  // to this issuer, including when a provider supplies the same email.
+  const account = db.transaction((tx) => {
+    const now = new Date();
+    const matching = tx.select().from(userOidc)
+      .where(and(eq(userOidc.provider, 'auth0'), eq(userOidc.providerId, providerId))).all();
+    if (matching.length > 1) throw redirect(302, '/login?error=oidc_account_linked');
+    const existingLink = matching[0];
+    if (existingLink) {
+      tx.update(userOidc).set({ lastSyncedAt: now }).where(eq(userOidc.id, existingLink.id)).run();
+      return { userId: existingLink.userId, refreshProfile: true };
+    }
 
-  // Check existing OIDC link (we store generic provider as provider='auth0' with a unique providerId)
-  const existingLink = await db
-    .select()
-    .from(userOidc)
-    .where(and(eq(userOidc.provider, 'auth0'), eq(userOidc.providerId, `generic:${providerId}`)))
-    .get();
-
-  if (existingLink) {
-    userId = existingLink.userId;
-    await db.update(userOidc).set({ lastSyncedAt: new Date() }).where(eq(userOidc.id, existingLink.id));
-    await refreshOidcProfile(userId, { email, username, fullName });
-  } else {
-    // Check by email
-    const existingUser = await db.select().from(users).where(eq(users.email, email)).get();
+    const existingUser = tx.select().from(users).where(eq(users.email, email)).get();
+    const userId = existingUser?.id ?? crypto.randomUUID();
 
     if (existingUser) {
-      // Adopting an existing account on the strength of a matching email address
-      // is an account takeover unless the provider vouches for the address. An
-      // IdP that lets a user set their own unverified email — or any tenant of a
-      // shared provider — could otherwise claim the admin account simply by
-      // presenting its email. Require the provider to say it verified it.
-      if (userInfo.email_verified !== true) {
-        console.warn(
-          '[oidc/generic] Refusing to link to existing account: provider did not report ' +
-            'email_verified for',
-          email,
-        );
-        throw redirect(302, '/login?error=oidc_email_unverified');
-      }
-
-      userId = existingUser.id;
-      // Link this OIDC to the existing user
-      await db.insert(userOidc).values({
-        id: crypto.randomUUID(),
-        userId,
-        provider: 'auth0',
-        providerId: `generic:${providerId}`,
-        lastSyncedAt: new Date(),
-      });
-      await refreshOidcProfile(userId, { email, username, fullName });
+      const linked = tx.select({ id: userOidc.id }).from(userOidc)
+        .where(eq(userOidc.userId, existingUser.id)).get();
+      if (linked) throw redirect(302, '/login?error=oidc_account_linked');
+      if (userInfo.email_verified !== true) throw redirect(302, '/login?error=oidc_email_unverified');
     } else {
-      // Check if registration is allowed
-      if (!cfg.allowRegistration) {
-        console.warn('[oidc/generic] Registration disabled, user not found:', email);
-        throw redirect(302, '/login?error=oidc_registration_disabled');
-      }
+      if (!cfg.allowRegistration) throw redirect(302, '/login?error=oidc_registration_disabled');
 
-      // Create new user
-      userId = crypto.randomUUID();
-      const now = new Date();
       const finalUsername = username || (() => {
         const base = email.split('@')[0].replace(/[^a-z0-9]/gi, '').toLowerCase().slice(0, 20);
         return `${base}${Math.floor(Math.random() * 9000) + 1000}`;
       })();
-
-      await db.insert(users).values({
+      tx.insert(users).values({
         id: userId,
         username: finalUsername,
         email,
@@ -291,17 +273,21 @@ export async function GET({ url, cookies }: { url: URL; cookies: any }) {
         role: 'member',
         createdAt: now,
         updatedAt: now,
-      });
-
-      await db.insert(userOidc).values({
-        id: crypto.randomUUID(),
-        userId,
-        provider: 'auth0',
-        providerId: `generic:${providerId}`,
-        lastSyncedAt: now,
-      });
+      }).run();
     }
-  }
+
+    tx.insert(userOidc).values({
+      id: crypto.randomUUID(),
+      userId,
+      provider: 'auth0',
+      providerId,
+      lastSyncedAt: now,
+    }).run();
+    return { userId, refreshProfile: !!existingUser };
+  });
+
+  const { userId } = account;
+  if (account.refreshProfile) await refreshOidcProfile(userId, { email, username, fullName });
 
   // Create session
   const sessionId = await createSession(userId);

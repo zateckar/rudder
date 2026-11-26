@@ -4,6 +4,8 @@
   import PageHeader from '#lib/components/PageHeader.svelte';
   import { formatBytes, formatTime } from '#lib/format.ts';
   import { invalidateAll } from '$app/navigation';
+  import { operationStages } from '#lib/application-operations.ts';
+  import type { operationView } from '#lib/server/application-operations.ts';
   import ContainerTerminal from '#lib/components/ContainerTerminal.svelte';
   import YamlEditor from '#lib/components/YamlEditor.svelte';
   import { showToast } from '#lib/client/toast.svelte.ts';
@@ -46,6 +48,55 @@
   let { data } = $props();
   let activeTab = $state('containers');
   let deploying = $state(false);
+  type Operation = ReturnType<typeof operationView>;
+  let trackedOperation = $state<{ appId: string; value: Operation | null } | null>(null);
+  let operationRevision = 0;
+  const operation = $derived(trackedOperation?.appId === data.application.id ? trackedOperation.value : data.operation);
+  const operationRunning = $derived(operation?.status === 'running');
+
+  function acceptOperation(appId: string, value: Operation | null) {
+    if (appId !== data.application.id) return;
+    operationRevision += 1;
+    trackedOperation = { appId, value };
+  }
+
+  $effect(() => {
+    const appId = data.application.id;
+    const endpoint = `/api/applications/${appId}/operations`;
+    const interval = operationRunning ? 1500 : 8000;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    // Defer the first read so changes to the operation do not restart the effect.
+    async function poll() {
+      const previous = operation;
+      const id = previous?.status === 'running' ? previous.id : null;
+      const revision = operationRevision;
+      try {
+        const response = await fetch(id ? `${endpoint}?id=${encodeURIComponent(id)}` : endpoint, { signal: controller.signal });
+        if (response.ok) {
+          const { operation: next }: { operation: Operation | null } = await response.json();
+          if (!controller.signal.aborted && revision === operationRevision) {
+            acceptOperation(appId, next);
+            if (previous?.status === 'running' && next?.id === previous.id && next.status !== 'running') {
+              reloadWithFreshDrift(0);
+              if (deploymentsLoaded) void fetchDeployments();
+            }
+          }
+        } else if (response.status === 404 && id && revision === operationRevision && !controller.signal.aborted) {
+          acceptOperation(appId, null);
+        }
+      } catch {
+        // Keep the last known state during a transient connection loss.
+      } finally {
+        if (!controller.signal.aborted) timer = setTimeout(poll, interval);
+      }
+    }
+    timer = setTimeout(poll, 0);
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  });
 
   // ── Drift ──────────────────────────────────────────────────────────────────
   //
@@ -154,10 +205,13 @@
    * the result before routing to it.
    */
   async function reconcileNow() {
+    const appId = data.application.id;
     reconciling = true;
     try {
-      const res = await fetch(`/api/applications/${data.application.id}/reconcile`, { method: 'POST' });
+      const res = await fetch(`/api/applications/${appId}/reconcile`, { method: 'POST', headers: { Prefer: 'respond-async' } });
       const body = await res.json();
+      if (body.operation) acceptOperation(appId, body.operation);
+      if (res.status === 202) return;
       if (res.ok) {
         showToast('success', body.message || 'Reconciled');
         reloadWithFreshDrift();
@@ -385,14 +439,17 @@
       confirmLabel: dep.fastRollback ? 'Roll back (instant)' : 'Roll back',
     });
     if (!ok) return;
+    const appId = data.application.id;
     rollbackBusy = dep.id;
     try {
-      const res = await fetch(`/api/applications/${data.application.id}/deployments`, {
+      const res = await fetch(`/api/applications/${appId}/deployments`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Prefer: 'respond-async' },
         body: JSON.stringify({ deploymentId: dep.id }),
       });
       const body = await res.json();
+      if (body.operation) acceptOperation(appId, body.operation);
+      if (res.status === 202) return;
       if (res.ok) {
         showToast('success', body.message || 'Rolled back successfully');
         reloadWithFreshDrift();
@@ -889,9 +946,9 @@
     const ok = await confirmAction({
       title: `Restore "${onto.label}" from this copy?`,
       body:
-        `"${onto.name}" is emptied and replaced with the copy taken on ` +
-        `${new Date(copy.at).toLocaleString()}. Anything written since then is lost. The ` +
-        `application has to be stopped — the restore is refused otherwise.`,
+        `Replace the contents of "${onto.name}" with the copy taken on ` +
+        `${new Date(copy.at).toLocaleString()}. The application has to be stopped. ` +
+        `Rudder saves the current contents while installing the replacement.`,
       confirmLabel: 'Restore',
       danger: true,
     });
@@ -926,8 +983,8 @@
       title: `Restore "${target.label}" from ${restoreFile.name}?`,
       body:
         restoreMode === 'replace'
-          ? `"${target.name}" is emptied first, so the result is exactly what is in the archive. ` +
-            `Everything currently in it is lost.`
+          ? `The archive will replace the contents of "${target.name}". ` +
+            `Rudder saves the current contents while installing the replacement.`
           : `The archive is extracted over "${target.name}". Files it does not mention are left ` +
             `where they are, which can leave a mixture of old and new — for a database, a state ` +
             `that never existed.`,
@@ -988,14 +1045,17 @@
   }
 
   async function deployApp(action: string) {
+    const appId = data.application.id;
     deploying = true;
     try {
       const res = await fetch('/api/applications/deploy', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ applicationId: data.application.id, action }),
+        headers: { 'Content-Type': 'application/json', ...(action === 'deploy' ? { Prefer: 'respond-async' } : {}) },
+        body: JSON.stringify({ applicationId: appId, action }),
       });
       const body = await res.json();
+      if (body.operation) acceptOperation(appId, body.operation);
+      if (res.status === 202) return;
       if (res.ok) {
         if (action === 'delete') { window.location.href = '/applications'; return; }
         // A lifecycle action answers 200 even when some containers refused it —
@@ -1183,14 +1243,20 @@
   });
 
   async function scaleApp() {
+    const appId = data.application.id;
     scaleBusy = true;
     try {
-      const res = await fetch(`/api/applications/${data.application.id}/scale`, {
+      const res = await fetch(`/api/applications/${appId}/scale`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Prefer: 'respond-async' },
         body: JSON.stringify({ replicas: scaleTarget }),
       });
       const body = await res.json();
+      if (body.operation) acceptOperation(appId, body.operation);
+      if (res.status === 202) {
+        showScaleModal = false;
+        return;
+      }
       if (res.ok) {
         showScaleModal = false;
         showToast('success', body.message || 'Scaling complete');
@@ -1255,7 +1321,6 @@
 
   // Live current snapshot (from stats API — polled while on metrics tab)
   let liveMetrics = $state<Record<string, MetricPoint | null>>({});
-  let livePolling: Record<string, ReturnType<typeof setInterval>> = {};
 
   // Historical from DB
   const RANGES = ['1h','6h','24h','7d','30d'] as const;
@@ -1264,49 +1329,51 @@
   let historicalMetrics = $state<Record<string, MetricPoint[] | null>>({});
   let histLoading = $state<Record<string, boolean>>({});
 
-  async function fetchLive(containerId: string) {
+  async function fetchLive(containerId: string, signal: AbortSignal) {
     try {
-      const res = await fetch(`/api/containers/${containerId}/stats`);
-      if (res.ok) liveMetrics[containerId] = await res.json();
+      const res = await fetch(`/api/containers/${containerId}/stats`, { signal: AbortSignal.any([signal, AbortSignal.timeout(20_000)]) });
+      if (res.ok) {
+        const point = await res.json();
+        if (!signal.aborted) liveMetrics[containerId] = point;
+      }
     } catch { /* ignore */ }
   }
 
-  async function fetchHistorical(containerId: string, range: Range) {
+  async function fetchHistorical(containerId: string, range: Range, signal: AbortSignal) {
     histLoading[containerId] = true;
     try {
-      const res = await fetch(`/api/containers/${containerId}/metrics?range=${range}`);
-      if (res.ok) {
-        const data = await res.json();
-        historicalMetrics[containerId] = data.points ?? [];
-      } else {
-        historicalMetrics[containerId] = [];
-      }
+      const res = await fetch(`/api/containers/${containerId}/metrics?range=${range}`, { signal });
+      const data = res.ok ? await res.json() : null;
+      if (!signal.aborted) historicalMetrics[containerId] = data?.points ?? [];
     } catch {
-      historicalMetrics[containerId] = [];
+      if (!signal.aborted) historicalMetrics[containerId] = [];
     } finally {
-      histLoading[containerId] = false;
+      if (!signal.aborted) histLoading[containerId] = false;
     }
   }
 
   $effect(() => {
-    if (activeTab === 'metrics') {
-      for (const c of data.containers) {
-        // Live polling every 30s
-        if (!livePolling[c.id]) {
-          fetchLive(c.id);
-          livePolling[c.id] = setInterval(() => fetchLive(c.id), 30_000);
-        }
-        fetchHistorical(c.id, selectedRange);
-      }
-    } else {
-      for (const [id, timer] of Object.entries(livePolling)) {
-        clearInterval(timer);
-        delete livePolling[id];
-      }
+    if (activeTab !== 'metrics') return;
+    const ids = data.containers.map((container) => container.id);
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    async function poll() {
+      await Promise.all(ids.map((id) => fetchLive(id, controller.signal)));
+      if (!controller.signal.aborted) timer = setTimeout(poll, 30_000);
     }
+    if (ids.length) void poll();
     return () => {
-      for (const timer of Object.values(livePolling)) clearInterval(timer);
+      controller.abort();
+      clearTimeout(timer);
     };
+  });
+
+  $effect(() => {
+    if (activeTab !== 'metrics') return;
+    const controller = new AbortController();
+    const range = selectedRange;
+    for (const container of data.containers) void fetchHistorical(container.id, range, controller.signal);
+    return () => controller.abort();
   });
 
 
@@ -1432,8 +1499,8 @@
   {#snippet actions()}
     {#if data.worker && data.worker.status === 'online'}
       {@const hasContainers = data.containers.length > 0}
-      <button class="btn-header {hasContainers ? 'btn-redeploy' : 'btn-success'}" onclick={() => deployApp('deploy')} disabled={deploying} title="Deploy or redeploy the application">
-        {deploying ? 'Deploying…' : hasContainers ? '↻ Redeploy' : '▶ Deploy'}
+      <button class="btn-header {hasContainers ? 'btn-redeploy' : 'btn-success'}" onclick={() => deployApp('deploy')} disabled={deploying || operationRunning} title="Deploy or redeploy the application">
+        {deploying || operationRunning ? 'Deploying…' : hasContainers ? '↻ Redeploy' : '▶ Deploy'}
       </button>
     {/if}
     <!-- Act on what is already on the worker, for the application as a whole.
@@ -1443,15 +1510,15 @@
          Deploy is: all three are Podman calls. -->
     {#if data.worker?.status === 'online' && lifecycle.activeCount > 0}
       {#if lifecycle.canStart}
-        <button class="btn-header btn-lifecycle-start" onclick={() => deployApp('start')} disabled={deploying} title="Start every container this application serves from">
+        <button class="btn-header btn-lifecycle-start" onclick={() => deployApp('start')} disabled={deploying || operationRunning} title="Start every container this application serves from">
           {lifecycleLabel('Start', lifecycle.activeCount)}
         </button>
       {/if}
       {#if lifecycle.canStopOrRestart}
-        <button class="btn-header btn-lifecycle-stop" onclick={stopApp} disabled={deploying} title="Stop every container this application serves from">
+        <button class="btn-header btn-lifecycle-stop" onclick={stopApp} disabled={deploying || operationRunning} title="Stop every container this application serves from">
           {lifecycleLabel('Stop', lifecycle.activeCount)}
         </button>
-        <button class="btn-header btn-secondary" onclick={restartApp} disabled={deploying} title="Restart every container this application serves from, without pulling">
+        <button class="btn-header btn-secondary" onclick={restartApp} disabled={deploying || operationRunning} title="Restart every container this application serves from, without pulling">
           {lifecycleLabel('Restart', lifecycle.activeCount)}
         </button>
       {/if}
@@ -1459,7 +1526,7 @@
     {/if}
     <a href="/applications/{data.application.id}/edit" class="btn-header btn-secondary">Edit</a>
     {#if data.application.type === 'single'}
-      <button class="btn-header btn-secondary" onclick={() => { scaleTarget = data.application.replicas ?? 1; showScaleModal = true; }} title="Scale application replicas">
+      <button class="btn-header btn-secondary" onclick={() => { scaleTarget = data.application.replicas ?? 1; showScaleModal = true; }} disabled={operationRunning} title="Scale application replicas">
         Scale ({data.application.replicas ?? 1})
       </button>
     {/if}
@@ -1467,9 +1534,20 @@
       Save as Template
     </button>
     <button class="btn-header btn-secondary" onclick={exportApp} title="Export application configuration as JSON">Export</button>
-    <button class="btn-header btn-danger" onclick={() => deployApp('delete')} disabled={deploying} title="Permanently delete this application">Delete</button>
+    <button class="btn-header btn-danger" onclick={() => deployApp('delete')} disabled={deploying || operationRunning} title="Permanently delete this application">Delete</button>
   {/snippet}
 </PageHeader>
+
+{#if operation}
+  <div class="operation-status" role="status">
+    <span class="badge">{operation.kind} · {operation.status}</span>
+    <span>{operation.status === 'running' ? operationStages[operation.stage] : operation.message}</span>
+    {#if operation.status === 'failed' && operation.deploymentId}
+      {@const deploymentId = operation.deploymentId}
+      <button class="btn-secondary btn-sm" type="button" onclick={() => revealDeployFailure(deploymentId)}>View deployment details</button>
+    {/if}
+  </div>
+{/if}
 
 <!-- ── Webhook panel ───────────────────────────────────────────────────── -->
 <div class="webhook-section">
@@ -1562,7 +1640,7 @@
                ever reads — it is a full deploy, which on a control-plane-routed
                worker means a new generation alongside the old one. Calling it
                "Reconcile now" made the new container look like a malfunction. -->
-          <button class="btn-act btn-start" onclick={reconcileNow} disabled={reconciling} title="Deploy the current configuration: creates what is missing, replaces what is out of date. On this worker that means starting a new version alongside the current one and switching traffic over once it is healthy.">
+          <button class="btn-act btn-start" onclick={reconcileNow} disabled={reconciling || operationRunning} title="Deploy the current configuration: creates what is missing, replaces what is out of date. On this worker that means starting a new version alongside the current one and switching traffic over once it is healthy.">
             {reconciling ? 'Deploying…' : 'Deploy current configuration'}
           </button>
         {/if}
@@ -1625,7 +1703,7 @@
       <div class="empty-row">
         <p>No containers deployed yet.</p>
         {#if data.worker?.status === 'online'}
-          <button class="btn-primary" onclick={() => deployApp('deploy')} title="Deploy this application for the first time">Deploy Application</button>
+          <button class="btn-primary" onclick={() => deployApp('deploy')} disabled={deploying || operationRunning} title="Deploy this application for the first time">Deploy Application</button>
         {/if}
       </div>
     {:else}
@@ -1997,7 +2075,7 @@
         <div class="prune-controls">
           <label for="pruneKeep">Keep newest</label>
           <input id="pruneKeep" type="number" min="1" max="50" bind:value={pruneKeep} disabled={pruneBusy} />
-          <button class="btn-act" onclick={pruneDeployments} disabled={pruneBusy || rollbackBusy !== null}
+          <button class="btn-act" onclick={pruneDeployments} disabled={pruneBusy || rollbackBusy !== null || operationRunning}
             title="Delete older deployment records and remove the images only they used from the worker">
             {pruneBusy ? 'Pruning…' : 'Prune older versions…'}
           </button>
@@ -2085,7 +2163,7 @@
                       class="btn-act btn-rollback"
                       class:btn-rollback-fast={dep.fastRollback}
                       onclick={() => rollbackTo(dep)}
-                      disabled={isBusy || rollbackBusy !== null}
+                      disabled={isBusy || rollbackBusy !== null || operationRunning}
                       title={dep.fastRollback
                         ? `These containers are still on the worker, stopped — rolling back restarts them`
                         : `Redeploy version ${dep.version} from its manifest`}
@@ -2654,7 +2732,7 @@
   </div>
   <div class="modal-actions">
     <button class="btn-secondary" onclick={() => showScaleModal = false} title="Close without scaling">Cancel</button>
-    <button class="btn-primary" onclick={scaleApp} disabled={scaleBusy || scaleTarget === (data.application.replicas ?? 1)} title="Apply scaling">
+    <button class="btn-primary" onclick={scaleApp} disabled={scaleBusy || operationRunning || scaleTarget === (data.application.replicas ?? 1)} title="Apply scaling">
       {scaleBusy ? 'Scaling...' : 'Apply'}
     </button>
   </div>
@@ -2697,7 +2775,7 @@
       <label class="radio-row">
         <input type="radio" value="replace" bind:group={restoreMode} disabled={restoreUploading} />
         <span>
-          <strong>Replace</strong> — empty the volume first, so the result is exactly the archive.
+          <strong>Replace</strong> — install the archive as the volume's complete contents.
         </span>
       </label>
       <label class="radio-row">
@@ -2720,6 +2798,20 @@
 </Modal>
 
 <style>
+  .operation-status {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    margin-bottom: 16px;
+    padding: 10px 12px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    background: var(--bg-raised);
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+  .operation-status .badge { background: var(--bg-overlay); }
   /* ── Detail modal — deploy errors and notes ────────────────────────── */
   .detail-backdrop { position: fixed; inset: 0; z-index: 2500; background: rgba(0,0,0,0.5); }
   .detail-modal {

@@ -6,6 +6,8 @@ import { getSessionIdFromCookies, validateSession } from '#lib/auth/index.ts';
 import { AUDITED_READS, classifyRequest, isAuditable } from '#lib/server/audit.ts';
 import { touchApiKey } from '#lib/server/api-keys.ts';
 import { hashKey } from '#lib/server/encryption.ts';
+import { recoverInterruptedDeploys } from '#lib/server/recover.ts';
+import { migrateLegacyOidcAtStartup } from '#lib/server/oidc-identity.ts';
 
 const securityHeaders: Handle = async ({ event, resolve }) => {
   const response = await resolve(event);
@@ -197,6 +199,16 @@ export const handle = sequence(securityHeaders, authentication);
 // see src/lib/server/ws/registry.ts.
 import '#lib/server/ws/handlers.ts';
 
+const legacyOidcIssuer = process.env.OIDC_LEGACY_LINK_MIGRATION_ISSUER?.trim();
+if (legacyOidcIssuer) {
+  try {
+    const result = migrateLegacyOidcAtStartup(legacyOidcIssuer);
+    console.log(`[oidc] Migrated ${result.migrated} legacy login link(s). ${result.needsReview} require individual review.`);
+  } catch (error) {
+    console.error('[oidc] Legacy login link migration was skipped:', error);
+  }
+}
+
 // ── Recovery from an interrupted deploy ──────────────────────────────────────
 // Before anything else touches the fleet: a deploy that was running when this
 // process last stopped left a `pending` deployment row and a `pending` container
@@ -205,8 +217,7 @@ import '#lib/server/ws/handlers.ts';
 // deploy that is legitimately in flight.
 if (!(globalThis as any).__recoveryRan) {
   (globalThis as any).__recoveryRan = true;
-  import('#lib/server/recover.ts')
-    .then(({ recoverInterruptedDeploys }) => recoverInterruptedDeploys())
+  recoverInterruptedDeploys()
     .catch((e) => console.error('[recover] Failed to run startup recovery:', e));
 }
 

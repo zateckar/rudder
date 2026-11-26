@@ -96,7 +96,7 @@ export interface JwtVerifierOptions {
   issuer: string;
   /** Skips discovery when set. */
   jwksUri?: string | null;
-  fetch?: typeof fetch;
+  fetch?: (url: string, init: RequestInit) => Promise<Response>;
   /** Milliseconds since the epoch. */
   now?: () => number;
   clockSkewSeconds?: number;
@@ -114,7 +114,7 @@ function decodeSegment(segment: string, what: string): unknown {
 export class JwtVerifier {
   readonly issuer: string;
   private readonly configuredJwksUri: string | null;
-  private readonly fetchImpl: typeof fetch;
+  private readonly fetchImpl: NonNullable<JwtVerifierOptions['fetch']>;
   private readonly now: () => number;
   private readonly skewS: number;
 
@@ -133,6 +133,32 @@ export class JwtVerifier {
 
   /** Verify `token` and return its claims, or throw `TokenError`. */
   async verify(token: string): Promise<JwtClaims> {
+    const claims = await this.verifySignatureAndLifetime(token);
+    // Keycloak signs access, ID and refresh tokens with the same key.
+    if (claims.typ !== undefined && String(claims.typ).toLowerCase() !== 'bearer') {
+      throw new TokenError(`Token is a "${String(claims.typ)}" token, not an access token`);
+    }
+    return claims;
+  }
+
+  /** Validate an ID token for this authorization-code flow and browser. */
+  async verifyIdToken(token: string, clientId: string, nonce: string): Promise<JwtClaims & { sub: string }> {
+    const claims = await this.verifySignatureAndLifetime(token);
+    const audience = typeof claims.aud === 'string' ? [claims.aud] : claims.aud;
+    if (!Array.isArray(audience) || audience.length !== 1 || audience[0] !== clientId ||
+        (claims.azp !== undefined && claims.azp !== clientId)) {
+      throw new TokenError('ID token was not issued exclusively for this client');
+    }
+    if (claims.nonce !== nonce || typeof claims.sub !== 'string' || !claims.sub.trim() ||
+        typeof claims.iat !== 'number' || !Number.isFinite(claims.iat) ||
+        claims.iat > Math.floor(this.now() / 1000) + this.skewS ||
+        (claims.typ !== undefined && !/^id$/i.test(String(claims.typ)))) {
+      throw new TokenError('Invalid ID token claims');
+    }
+    return { ...claims, sub: claims.sub };
+  }
+
+  private async verifySignatureAndLifetime(token: string): Promise<JwtClaims> {
     if (token.length > MAX_TOKEN_LENGTH) throw new TokenError('Token is too large');
     const parts = token.split('.');
     if (parts.length !== 3) throw new TokenError('Token is not a JWT');
@@ -159,18 +185,10 @@ export class JwtVerifier {
     if (!valid) throw new TokenError('Token signature is invalid');
 
     const nowS = Math.floor(this.now() / 1000);
-    if (typeof claims.exp !== 'number') throw new TokenError('Token has no expiry');
+    if (typeof claims.exp !== 'number' || !Number.isFinite(claims.exp)) throw new TokenError('Token has no expiry');
     if (nowS - this.skewS >= claims.exp) throw new TokenError('Token has expired');
     if (typeof claims.nbf === 'number' && nowS + this.skewS < claims.nbf) {
       throw new TokenError('Token is not valid yet');
-    }
-
-    // Keycloak signs its ID and refresh tokens with the same key as its access
-    // tokens and says which is which in `typ`. An ID token is proof that someone
-    // logged in to *some* client, not a grant to call this API, so it is refused
-    // here rather than accepted because the signature checks out.
-    if (claims.typ !== undefined && String(claims.typ).toLowerCase() !== 'bearer') {
-      throw new TokenError(`Token is a "${String(claims.typ)}" token, not an access token`);
     }
 
     return claims;
@@ -235,7 +253,7 @@ export class JwtVerifier {
     if (this.configuredJwksUri) return this.configuredJwksUri;
     if (this.discovered && this.now() - this.discovered.at < DISCOVERY_TTL_MS) return this.discovered.jwksUri;
 
-    const doc = (await this.getJson(`${this.issuer}/.well-known/openid-configuration`, 'discovery document')) as {
+    const doc = (await this.getJson(`${this.issuer.replace(/\/$/, '')}/.well-known/openid-configuration`, 'discovery document')) as {
       issuer?: unknown;
       jwks_uri?: unknown;
     };

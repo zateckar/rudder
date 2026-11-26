@@ -28,8 +28,9 @@ import { AuthorizationError } from './auth';
 import type { MountIntent } from './mounts';
 import type { PodmanVolume } from './podman';
 import { withPodman } from './podman-client';
-import { desiredState, podmanName, type DesiredApp } from './reconcile';
+import { APP_ID_LABEL, desiredState, podmanName, type DesiredApp } from './reconcile';
 import { ManifestError } from './deploy/plan';
+import { namedVolumeMounts } from './deployment-volumes';
 import {
   COPY_SOURCE_LABEL,
   isAppScopedVolume,
@@ -235,7 +236,7 @@ export function buildAppStorage(input: BuildAppStorageInput): AppStorage {
   // `volumeCopyBase` is lossy — `web_1-data` and `web-1-data` share a base — so
   // keying on it attaches each of two such volumes' copies to both, and
   // `requireAppVolume` then resolves the copy's `copyOf` to whichever sorts
-  // first: a restore that force-removes and overwrites the wrong volume. The
+  // first: a restore that overwrites the wrong volume. The
   // base is still consulted, but only for copies taken before the label existed.
   const copiesBySource = new Map<string, VolumeCopy[]>();
   const copiesByBase = new Map<string, VolumeCopy[]>();
@@ -684,29 +685,52 @@ export async function runningContainerNames(appId: string): Promise<string[]> {
 export async function runningContainerNamesLive(
   worker: typeof workers.$inferSelect,
   appId: string,
+  volumeName: string,
 ): Promise<string[]> {
   const rows = await db
     .select({ containerId: containers.containerId, name: containers.name })
     .from(containers)
     .where(eq(containers.applicationId, appId))
     .all();
-  if (rows.length === 0) return [];
+  const trackedIds = new Set(rows.map((row) => row.containerId));
+  const trackedNames = new Set(rows.map((row) => podmanName(row.name)));
+  return withPodman(worker, async (client) => {
+    const live = await client.listContainers(true);
+    const running: string[] = [];
+    for (const container of live) {
+      if (container.State !== 'running' && container.State !== 'paused' && container.State !== 'restarting') continue;
+      const name = podmanName(container.Names?.[0]);
+      if (
+        trackedIds.has(container.Id) || trackedNames.has(name) ||
+        container.Labels?.[APP_ID_LABEL] === appId ||
+        namedVolumeMounts(await client.getContainer(container.Id)).has(volumeName)
+      ) {
+        running.push(name || container.Id);
+      }
+    }
+    return running;
+  });
+}
 
-  const live = await withPodman(worker, (client) => client.listContainers(true));
-  const runningIds = new Set<string>();
-  const runningNames = new Set<string>();
-  for (const c of live) {
-    if (c.State !== 'running') continue;
-    runningIds.add(c.Id);
-    runningNames.add(podmanName(c.Names?.[0]));
+export class VolumeInUseError extends AuthorizationError {
+  constructor(appName: string, volumeName: string, readonly running: string[]) {
+    super(`Stop "${appName}" before restoring "${volumeName}". Running containers: ${running.join(', ')}.`, 409);
   }
+}
 
-  // Matched on either, because the two can disagree: a row whose container was
-  // recreated out of band holds a stale id under a name that is still this
-  // application's, and a name match is enough to refuse.
-  return rows
-    .filter((r) => runningIds.has(r.containerId) || runningNames.has(podmanName(r.name)))
-    .map((r) => r.name);
+export async function assertVolumeRestoreIdle(
+  app: typeof applications.$inferSelect,
+  worker: typeof workers.$inferSelect,
+  volumeName: string,
+): Promise<void> {
+  let running: string[];
+  try {
+    running = await runningContainerNamesLive(worker, app.id, volumeName);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new AuthorizationError(`Could not check whether "${volumeName}" is idle. Its contents were preserved. ${detail}`, 502);
+  }
+  if (running.length) throw new VolumeInUseError(app.name, volumeName, running);
 }
 
 /**

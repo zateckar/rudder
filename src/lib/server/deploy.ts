@@ -6,6 +6,7 @@ import { applications, workers, containers, teams, volumes, secrets, deployments
 import { and, eq, inArray, or, desc } from 'drizzle-orm';
 import { getRestPodmanClient } from '#lib/server/podman-client.ts';
 import type { ContainerInspect } from '#lib/server/podman.ts';
+import type { ReportOperationProgress } from '#lib/application-operations.ts';
 import {
   ManifestError,
   routeKey,
@@ -23,8 +24,8 @@ import {
 // Shared with the config generator so `labels` and `http` mode workers apply
 // exactly the same rate limit, auth mode and health check.
 import { buildMiddlewareOpts } from '#lib/server/traefik-config.ts';
-import { ALLOWED_DOMAINS_UNSUPPORTED } from '#lib/server/oidc.ts';
-import { decrypt, decryptField } from '#lib/server/encryption.ts';
+import { InvalidAppOidcConfig } from '#lib/server/oidc.ts';
+import { decrypt } from '#lib/server/encryption.ts';
 import { ensureAppNetwork, teardownAppNetwork } from '#lib/server/networks.ts';
 import { env } from '#lib/server/env.ts';
 import { MountPolicyError, realizeMounts, type MountIntent } from '#lib/server/mounts.ts';
@@ -32,7 +33,7 @@ import { assertDeploymentVolumeAccess } from './deployment-volumes';
 import { AuthorizationError } from './auth';
 // Deploys are serialized per worker; see `workerDeployLock`.
 import { LockError, withLock, workerDeployLock } from '#lib/server/locks.ts';
-import { commitGenerationCutover, revertGenerationCutover, revertRetainedGenerationCutover } from './lifecycle-cutover';
+import { commitGenerationCutover, revertGenerationCutover, revertRetainedGenerationCutover, type DeploymentConfiguration } from './lifecycle-cutover';
 import { expectedRoutingHash, waitForRoutingAcknowledgement } from './routing-convergence';
 import { suppressContainerRestart, restoreContainerRestart } from './runtime-policy';
 import {
@@ -745,6 +746,8 @@ export async function resolveWorkerSSHConfig(
 }
 
 export interface DeployOptions {
+  reportProgress?: ReportOperationProgress;
+  rollback?: { configuration: DeploymentConfiguration; teamId: string | null };
   /** Scale the plan before validating quotas; persist only after admission. */
   replicas?: number;
   /** Check for changed image tags under the worker lock before deploying. */
@@ -834,7 +837,8 @@ export async function executeApplicationDeploy(
       },
       () => withTeamDeployQuota(target.app.teamId,
         () => withApplicationDeploymentDomains(applicationId,
-          () => deployApplication(applicationId, deployedByUserId, options, target.worker.id, target.app.teamId))),
+          () => deployApplication(applicationId, deployedByUserId, options, target.worker.id, target.app.teamId),
+          options.rollback?.configuration)),
     );
   } catch (e) {
     if (e instanceof LockError) return busyResult(target.worker.name);
@@ -859,6 +863,12 @@ async function deployApplication(
   if (app.teamId !== lockedTeamId) {
     return { success: false, message: 'Team assignment changed; retry the deployment', statusCode: 409 };
   }
+  const rollback = options.rollback;
+  if (rollback && rollback.teamId !== app.teamId) {
+    return { success: false, message: 'Team assignment changed; retry the rollback', statusCode: 409 };
+  }
+  const originalConfiguration = { manifest: app.manifest, environment: app.environment, volumes: app.volumes };
+  if (rollback) app = { ...app, ...rollback.configuration };
   if (options.replicas !== undefined) {
     if ((app.type !== 'single' && app.type !== 'k8s') || !Number.isInteger(options.replicas) || options.replicas < 1 || options.replicas > 10) {
       return { success: false, message: 'Scaling requires a single container or Kubernetes application and 1–10 replicas', statusCode: 400 };
@@ -888,6 +898,13 @@ async function deployApplication(
 
   const worker = await db.select().from(workers).where(eq(workers.id, app.workerId)).get();
   if (!worker) return { success: false, message: 'Worker not found', statusCode: 404 };
+
+  let middlewareOpts;
+  try { middlewareOpts = buildMiddlewareOpts(app); }
+  catch (error) {
+    if (error instanceof InvalidAppOidcConfig) return { success: false, message: error.message, statusCode: 400 };
+    throw error;
+  }
 
   let pinnedDigests = options.pinnedDigests;
   if (options.automaticImageUpdate) {
@@ -954,7 +971,7 @@ async function deployApplication(
   if (
     !httpRouting &&
     globalOidcConfigured &&
-    usesGlobalOidc(globalOidcEnabled, buildMiddlewareOpts(app)) &&
+    usesGlobalOidc(globalOidcEnabled, middlewareOpts) &&
     usableTokenHeaders({
       idTokenHeader: app.oidcIdTokenHeader,
       accessTokenHeader: app.oidcAccessTokenHeader,
@@ -969,21 +986,6 @@ async function deployApplication(
         `"Apply to Traefik", then deploy again. Deploying now would take the application offline.`,
       statusCode: 409,
     };
-  }
-
-  // The Traefik OIDC plugin matches claim values by exact string equality, so
-  // there is no way to express "any address at this domain". Fail rather than
-  // deploy an app whose access restriction has quietly evaporated.
-  if (app.authType === 'oidc' && app.authConfig) {
-    try {
-      // Encrypted at rest; `decryptField` returns legacy plaintext unchanged.
-      const cfg = JSON.parse(decryptField(app.authConfig) ?? '');
-      if (Array.isArray(cfg.allowedUserDomains) && cfg.allowedUserDomains.length > 0) {
-        return { success: false, message: ALLOWED_DOMAINS_UNSUPPORTED, statusCode: 400 };
-      }
-    } catch {
-      // buildMiddlewareOpts reports malformed auth config separately.
-    }
   }
 
   if (!app.manifest) {
@@ -1156,7 +1158,7 @@ async function deployApplication(
   if (!quota.allowed) return { success: false, message: quota.message ?? 'Team quota exceeded', statusCode: 403 };
   if (options.automaticImageUpdate) plan.notes.push('Automatically deployed after detecting a new image digest.');
   try {
-    await assertDeploymentVolumeAccess(app, worker, plan, getRestPodmanClient(worker));
+    await assertDeploymentVolumeAccess(app, worker, plan, getRestPodmanClient(worker), originalConfiguration);
   } catch (error) {
     if (error instanceof AuthorizationError) return { success: false, message: error.message, statusCode: error.statusCode };
     throw error;
@@ -1193,6 +1195,7 @@ async function deployApplication(
   const deployedDigests = new Map<string, string>();
 
   const deploymentId = crypto.randomUUID();
+  options.reportProgress?.('preparing', deploymentId);
   await db.insert(deployments).values({
     id: deploymentId,
     applicationId: app.id,
@@ -1288,7 +1291,6 @@ async function deployApplication(
       ...appSecrets.env.map((entry) => entry.slice(entry.indexOf('=') + 1)),
       ...appSecrets.files.map((f) => f.value),
     ];
-    const middlewareOpts = buildMiddlewareOpts(app);
 
     for (const planned of plan.containers) {
       try {
@@ -1319,6 +1321,7 @@ async function deployApplication(
           })),
         ];
 
+        options.reportProgress?.('creating');
         const containerResult = await podmanClient.createContainer({
           name: containerName,
           image,
@@ -1385,6 +1388,7 @@ async function deployApplication(
           createdAt: new Date(),
           updatedAt: new Date(),
         });
+        options.reportProgress?.('starting');
         await podmanClient.startContainer(containerResult.Id);
         await db.update(containers)
           .set({ status: 'running', updatedAt: new Date() })
@@ -1406,19 +1410,21 @@ async function deployApplication(
       // ── Verify ────────────────────────────────────────────────────────────
       // Nothing routes to the new containers yet. A failure here throws, and
       // the catch below removes them; the previous generation never stopped.
+      options.reportProgress?.('verifying');
       await verifyGeneration(podmanClient, createdContainers, healthTimeoutMs(app));
 
       // ── Cut over ──────────────────────────────────────────────────────────
       // One pair of updates moves the traffic. The worker's next fetch sees the
       // new servers and stops seeing the old ones — no container is recreated,
       // which is what makes the switch atomic from Traefik's point of view.
+      options.reportProgress?.('routing');
       const newRowIds = new Set(createdContainers.map((c) => c.rowId));
       const superseded = db.select().from(containers).where(eq(containers.applicationId, app.id)).all()
         .filter((c) => !newRowIds.has(c.id));
       previousActive = superseded.filter((c) => c.state === 'active');
       // Durable boot exclusion precedes demotion, including on Podman 4.9.
       for (const row of superseded) await suppressContainerRestart(podmanClient, row);
-      commitGenerationCutover(worker.id, [...newRowIds], previousActive.map((c) => c.id), deploymentId, app.id);
+      commitGenerationCutover(worker.id, [...newRowIds], previousActive.map((c) => c.id), deploymentId, app.id, 'running', rollback?.configuration);
       cutoverCommitted = true;
       for (const row of db.select().from(containers).where(inArray(containers.id, [...newRowIds])).all()) {
         await restoreContainerRestart(podmanClient, row);
@@ -1428,13 +1434,15 @@ async function deployApplication(
         .where(inArray(containers.id, previousActive.map((c) => c.id))).run();
 
       if (superseded.length > 0) {
+        options.reportProgress?.('acknowledging');
         const converged = await waitForRoutingAcknowledgement(worker.id, routingHash);
         if (!converged) {
+          options.reportProgress?.('restoring');
           // Missing ACK does not prove the candidate was never installed. Revert
           // roles, then confirm exclusion before destroying a possible backend.
           const candidateRows = db.select().from(containers).where(inArray(containers.id, [...newRowIds])).all();
           for (const row of candidateRows) await suppressContainerRestart(podmanClient, row);
-          revertGenerationCutover(worker.id, previousActive.map((c) => c.id), [...newRowIds], deploymentId, app.id, app.desiredStatus);
+          revertGenerationCutover(worker.id, previousActive.map((c) => c.id), [...newRowIds], deploymentId, app.id, app.desiredStatus, rollback && originalConfiguration);
           for (const row of previousActive) {
             if ((row.desiredStatus ?? app.desiredStatus) === 'running') await restoreContainerRestart(podmanClient, row);
           }
@@ -1448,7 +1456,7 @@ async function deployApplication(
           const message = safeToDiscard
             ? 'Routing installation was not acknowledged. The previous generation was restored and the candidate removed.'
             : 'Routing installation was not acknowledged. Previous roles were restored; candidate containers are retained until the worker acknowledges their exclusion.';
-          await db.update(deployments).set({ status: 'failed', finishedAt: new Date(), notes: message })
+          await db.update(deployments).set({ status: 'failed', finishedAt: new Date(), notes: message, errorMessage: message })
             .where(eq(deployments.id, deploymentId));
           return { success: false, message, statusCode: 409, deploymentId };
         } else {
@@ -1456,6 +1464,7 @@ async function deployApplication(
           // finishing whatever they had in flight when the routing changed —
           // Traefik does not drain connections, so this wait is what protects
           // those requests.
+          options.reportProgress?.('draining');
           await sleep(DRAIN_GRACE_MS);
 
           if (retentionMs(app) > 0) {
@@ -1486,25 +1495,26 @@ async function deployApplication(
       }
     }
 
-    await db.update(applications)
-      .set({ desiredStatus: 'running', updatedAt: new Date() })
-      .where(eq(applications.id, applicationId));
-
     // Mark deployment as succeeded, recording what actually ran. Null when no
     // image reported a digest — an honest "unknown" that rollback falls back
     // from, rather than the tag masquerading as provenance.
-    await db.update(deployments)
-      .set({
-        status: 'succeeded',
-        imageDigest: serializeDigestRecord(deployedDigests),
-        finishedAt: new Date(),
-      })
-      .where(eq(deployments.id, deploymentId));
+    db.transaction((tx) => {
+      tx.update(applications).set({ ...rollback?.configuration, desiredStatus: 'running', updatedAt: new Date() })
+        .where(eq(applications.id, applicationId)).run();
+      tx.update(deployments)
+        .set({
+          status: 'succeeded',
+          imageDigest: serializeDigestRecord(deployedDigests),
+          finishedAt: new Date(),
+        })
+        .where(eq(deployments.id, deploymentId)).run();
+    });
 
-    return { success: true, message: 'Application deployed' };
+    return { success: true, message: 'Application deployed', deploymentId };
   } catch (error: any) {
     console.error('Deployment error:', error);
     if (!cutoverCommitted && podmanClient) {
+      options.reportProgress?.('cleaning');
       // Disabling boot on old rows may have partially succeeded before cutover.
       for (const old of previousActive) {
         const row = db.select().from(containers).where(eq(containers.id, old.id)).get();
@@ -1652,6 +1662,8 @@ export function isAbsent(status: string | null | undefined): boolean {
 export async function executeFastRollback(
   applicationId: string,
   targetDeploymentId: string,
+  reportProgress?: ReportOperationProgress,
+  execution?: { source: typeof deployments.$inferSelect; userId: string | null; teamId: string | null },
 ): Promise<DeployResult> {
   const app = await db.select().from(applications).where(eq(applications.id, applicationId)).get();
   if (!app?.workerId) return { success: false, message: 'Application not found', statusCode: 404 };
@@ -1670,14 +1682,54 @@ export async function executeFastRollback(
         holder: `${process.pid}:${crypto.randomUUID()}`,
         ttlMs: deployLockTtlMs(app),
       },
-      async () => {
+      () => withApplicationDeploymentDomains(applicationId, async () => {
         const currentApp = db.select().from(applications).where(eq(applications.id, applicationId)).get();
         if (!currentApp) return { success: false, message: 'Application not found', statusCode: 404 };
-        return rollbackWithinLock(currentApp, worker, applicationId, targetDeploymentId);
-      },
+        const teamId = execution ? execution.teamId : app.teamId;
+        if (currentApp.workerId !== worker.id || currentApp.teamId !== teamId) {
+          return { success: false, message: 'Application assignment changed; retry the rollback', statusCode: 409 };
+        }
+        try { buildMiddlewareOpts(currentApp); }
+        catch (error) {
+          if (error instanceof InvalidAppOidcConfig) return { success: false, message: error.message, statusCode: 400 };
+          throw error;
+        }
+        if (!execution) return rollbackWithinLock(currentApp, worker, applicationId, targetDeploymentId, reportProgress);
+
+        const { source, userId } = execution;
+        const configuration = { manifest: source.manifest, environment: source.environment, volumes: source.volumes };
+        const lastDeployment = db.select({ version: deployments.version }).from(deployments)
+          .where(eq(deployments.applicationId, applicationId)).orderBy(desc(deployments.version)).get();
+        const deploymentId = crypto.randomUUID();
+        db.insert(deployments).values({
+          ...configuration, id: deploymentId, applicationId, version: (lastDeployment?.version ?? 0) + 1,
+          image: source.image, imageDigest: source.imageDigest, status: 'pending', deployedBy: userId, createdAt: new Date(),
+        }).run();
+        reportProgress?.('preparing', deploymentId);
+
+        let result: DeployResult;
+        try {
+          result = await rollbackWithinLock(currentApp, worker, applicationId, targetDeploymentId, reportProgress, configuration, deploymentId);
+        } catch (error) {
+          const committed = db.select({ cutoverAt: deployments.cutoverAt }).from(deployments)
+            .where(eq(deployments.id, deploymentId)).get()?.cutoverAt;
+          const message = error instanceof Error ? error.message : String(error);
+          db.update(deployments).set({ status: 'failed', errorMessage: message, finishedAt: new Date() })
+            .where(eq(deployments.id, deploymentId)).run();
+          if (committed) throw Object.assign(new Error(`Rollback switched generations before finalization failed: ${message}`), { deploymentId });
+          return { success: false, statusCode: 500, message, deploymentId };
+        }
+        db.update(deployments).set({
+          status: result.success ? 'rolled_back' : 'failed',
+          errorMessage: result.success ? null : result.message,
+          finishedAt: new Date(),
+        }).where(eq(deployments.id, deploymentId)).run();
+        return { ...result, deploymentId };
+      }, execution && { manifest: execution.source.manifest, environment: execution.source.environment }),
     );
   } catch (e) {
     if (e instanceof LockError) return busyResult(worker.name);
+    if (e instanceof DomainReservationError) return { success: false, message: e.message, statusCode: 409 };
     throw e;
   }
 }
@@ -1687,6 +1739,9 @@ async function rollbackWithinLock(
   worker: typeof workers.$inferSelect,
   applicationId: string,
   targetDeploymentId: string,
+  reportProgress?: ReportOperationProgress,
+  configuration?: DeploymentConfiguration,
+  deploymentId?: string,
 ): Promise<DeployResult> {
   const retained = await db
     .select()
@@ -1735,7 +1790,7 @@ async function rollbackWithinLock(
   // several places, and a keep-alive agent that is merely dropped holds its
   // sockets open for the life of the process.
   try {
-    return await rollbackWithClient(app, worker, applicationId, retained, current, podmanClient);
+    return await rollbackWithClient(app, worker, applicationId, retained, current, podmanClient, reportProgress, configuration, deploymentId);
   } finally {
     podmanClient.destroy();
   }
@@ -1748,10 +1803,14 @@ async function rollbackWithClient(
   retained: Array<typeof containers.$inferSelect>,
   current: Array<typeof containers.$inferSelect>,
   podmanClient: PodmanRestClient,
+  reportProgress?: ReportOperationProgress,
+  configuration?: DeploymentConfiguration,
+  deploymentId?: string,
 ): Promise<DeployResult> {
   const restarted: CreatedContainer[] = [];
 
   try {
+    reportProgress?.('starting');
     for (const row of retained) await suppressContainerRestart(podmanClient, row);
     for (const row of retained) {
       await podmanClient.startContainer(row.containerId);
@@ -1762,8 +1821,10 @@ async function rollbackWithClient(
       restarted.push({ rowId: row.id, containerId: row.containerId, name: row.name });
     }
 
+    reportProgress?.('verifying');
     await verifyGeneration(podmanClient, restarted, healthTimeoutMs(app));
   } catch (error: any) {
+    reportProgress?.('cleaning');
     // Put it back the way it was. The current generation was never touched, so
     // the application is still serving whatever it was serving.
     for (const row of restarted) {
@@ -1783,10 +1844,11 @@ async function rollbackWithClient(
     };
   }
 
+  reportProgress?.('routing');
   // Keep the target boot-ineligible until it is committed active.
   for (const row of retained) await suppressContainerRestart(podmanClient, row);
   for (const row of current) await suppressContainerRestart(podmanClient, row);
-  commitGenerationCutover(worker.id, retained.map((c) => c.id), current.map((c) => c.id), undefined, app.id);
+  commitGenerationCutover(worker.id, retained.map((c) => c.id), current.map((c) => c.id), deploymentId, app.id, 'running', configuration);
   for (const row of retained) await restoreContainerRestart(podmanClient, row);
   const routingHash = await expectedRoutingHash(worker.id);
   if (current.length) db.update(containers).set({ drainConfigHash: routingHash })
@@ -1798,12 +1860,17 @@ async function rollbackWithClient(
   let converged = true;
 
   if (current.length > 0) {
+    reportProgress?.('acknowledging');
     converged = await waitForRoutingAcknowledgement(worker.id, routingHash);
     if (!converged) {
+      reportProgress?.('restoring');
       // Restore one active generation atomically. The candidate stays running
       // until its exclusion is acknowledged: the worker may have installed it.
       for (const row of retained) await suppressContainerRestart(podmanClient, row);
-      revertRetainedGenerationCutover(worker.id, app.id, app.desiredStatus, current, retained);
+      const originalConfiguration = configuration
+        ? { manifest: app.manifest, environment: app.environment, volumes: app.volumes }
+        : undefined;
+      revertRetainedGenerationCutover(worker.id, app.id, app.desiredStatus, current, retained, originalConfiguration, deploymentId);
       for (const row of current) {
         if ((row.desiredStatus ?? app.desiredStatus) === 'running') await restoreContainerRestart(podmanClient, row);
       }
@@ -1818,6 +1885,7 @@ async function rollbackWithClient(
         }
       }
     } else {
+      reportProgress?.('draining');
       await sleep(DRAIN_GRACE_MS);
       if (retentionMs(app) > 0) {
         // Retained in turn, so rolling forward again is also fast.

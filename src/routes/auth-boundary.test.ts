@@ -503,6 +503,19 @@ describe('admin-only APIs', () => {
  * the thing it used to hand over.
  */
 describe('cross-team resource access', () => {
+  test('deployment progress requires access to the application named by both the route and operation', async () => {
+    const { GET } = await import('./api/applications/[id]/operations/+server');
+    const { applicationTask, launchTask } = await import('#lib/server/application-operations.ts');
+    const app = db.select().from(applications).where(eq(applications.id, otherAppId)).get()!;
+    const launched = launchTask(applicationTask(app, 'deploy', admin.id), async () => ({ success: true, message: 'Done' }));
+    await launched.completion;
+    const url = new URL(`http://localhost/api/applications/${otherAppId}/operations?id=${launched.task.id}`);
+    const event = { url, params: { id: otherAppId }, request: new Request(url) };
+    expect((await GET({ ...event, locals: member.locals } as any)).status).toBe(404);
+    const allowed = await GET({ ...event, locals: admin.locals } as any);
+    expect(await allowed.json()).toMatchObject({ operation: { id: launched.task.id, status: 'succeeded' } });
+  });
+
   test('learning session mutations require the application team and the same origin', async () => {
     const { POST, DELETE } = await import('./api/applications/[id]/appsec/learning/+server');
     const url = new URL('https://rudder.example.test/api/applications/' + otherAppId + '/appsec/learning');

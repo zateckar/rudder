@@ -22,19 +22,21 @@ import type http from 'http';
 import type { workers } from '#lib/db/schema.ts';
 import { env } from './env';
 import { realizeMounts, type MountIntent } from './mounts';
-import type { PodmanClient } from './podman';
+import { PodmanApiError, type PodmanClient } from './podman';
 import { getRestPodmanClient, withPodman } from './podman-client';
 // The labels come from `reconcile`, which is what reads them back: a helper is
 // labelled so `mayRemove` permits cleaning one up and so `isTransientHelper` can
 // keep a mid-operation helper out of the drift report.
 import { APP_ID_LABEL, HELPER_ROLE, MANAGED_LABEL, ROLE_LABEL } from './reconcile';
 import { COPY_SOURCE_LABEL, volumeCopyName } from './volumes';
+import { requireTarEnd } from './tar';
 
 /** Where a helper sees the volume it is working on. */
 const MOUNT_AT = '/volume';
 /** Clone source and destination, kept apart so `cp -a` cannot recurse into itself. */
 const CLONE_FROM = '/from';
 const CLONE_TO = '/to';
+const STAGED_ARCHIVE = '/restore';
 
 /**
  * Keep the helper alive without depending on `sleep infinity`, which BusyBox
@@ -166,39 +168,45 @@ export async function backupVolume(
 
 export type RestoreMode = 'replace' | 'merge';
 
-/**
- * Write a tar back into a volume.
- *
- * `replace` removes and recreates the volume before extracting, which is the
- * only way to get a *restore* rather than an overlay: extracting a tar leaves
- * every file the archive does not mention exactly where it was, so a merge onto
- * a live database directory can produce a state that never existed. Recreating
- * the volume is also how the wipe avoids a shell — there is no `rm -rf` here to
- * get the quoting wrong.
- *
- * `merge` is offered because it is occasionally what you want: dropping a
- * config directory back in without touching the data beside it.
- */
+export class VolumeRestoreError extends Error {
+  constructor(message: string, readonly recoveryVolume?: string, options?: ErrorOptions) {
+    super(message, options);
+  }
+}
+
+/** Replace from a staged archive or explicitly merge the archive into the live volume. */
 export async function restoreVolume(
   worker: typeof workers.$inferSelect,
   appId: string,
   volumeName: string,
   archive: ReadableStream<Uint8Array>,
   mode: RestoreMode,
+  beforeInstall?: () => Promise<void>,
 ): Promise<void> {
   await withPodman(worker, async (client) => {
     if (mode === 'replace') {
-      // Before anything is destroyed. `withVolumeHelper` would pull the image
-      // itself, but that happens *after* the wipe, so a worker that cannot reach
-      // the registry — or that Rudder's own prune has just taken the image off —
-      // ended up with an emptied volume and the archive never applied. The upload
-      // stream is gone by then; there is nothing to retry with.
-      await client.ensureImage(env.VOLUME_TOOL_IMAGE);
-
-      // Force, because the caller has already established that nothing of the
-      // application's is running; anything still holding it is not ours.
-      await client.removeVolume(volumeName, true);
-      await client.createVolume(volumeName);
+      return replaceVolume(client, appId, volumeName, async (stage) => {
+        // A Rudder backup has one root, volume/. Extract it inside the staging
+        // mount so the helper can verify that root before touching the target.
+        await withVolumeHelper(
+          client,
+          appId,
+          [{ kind: 'volume', name: stage, target: STAGED_ARCHIVE, mode: 'rw' }],
+          IDLE_CMD,
+          (id) => client.putArchiveStream(id, STAGED_ARCHIVE, requireTarEnd(archive)),
+        );
+        await withVolumeHelper(
+          client,
+          appId,
+          [{ kind: 'volume', name: stage, target: CLONE_FROM, mode: 'ro' }],
+          ['sh', '-ec', `test -d ${CLONE_FROM}${MOUNT_AT} && test ! -L ${CLONE_FROM}${MOUNT_AT}`],
+          async (id) => {
+            if (await client.waitContainer(id) !== 0) {
+              throw new Error('The archive does not contain the volume/ directory produced by Rudder Backup.');
+            }
+          },
+        );
+      }, beforeInstall, `${CLONE_FROM}${MOUNT_AT}`);
     }
 
     await withVolumeHelper(
@@ -221,15 +229,19 @@ export async function restoreVolume(
  * ownership, modes and timestamps — without it a copy is present but not
  * restorable, because the process that reads it back no longer owns its files.
  *
- * Additive, exactly like extracting a tar: it does not remove what the source
- * does not mention. Callers wanting a replacement recreate the target first.
+ * Replacement clears only the directory mounted at /to. The original Podman
+ * volume and its configuration stay in place, along with stopped consumers.
  */
 async function copyVolumeContents(
   client: PodmanClient,
   appId: string,
   from: string,
   to: string,
+  { replace = false, source = CLONE_FROM }: { replace?: boolean; source?: string } = {},
 ): Promise<void> {
+  const clearTarget = replace
+    ? `for entry in ${CLONE_TO}/* ${CLONE_TO}/.[!.]* ${CLONE_TO}/..?*; do rm -rf -- "$entry"; done; `
+    : '';
   await withVolumeHelper(
     client,
     appId,
@@ -239,7 +251,7 @@ async function copyVolumeContents(
     ],
     // `/from/.` rather than `/from`: copying the directory itself would produce
     // `/to/from/…`.
-    ['sh', '-c', `cp -a ${CLONE_FROM}/. ${CLONE_TO}/`],
+    ['sh', '-ec', `${clearTarget}cp -a ${source}/. ${CLONE_TO}/; sync`],
     async (id) => {
       const exitCode = await client.waitContainer(id);
       if (exitCode === 0) return;
@@ -273,54 +285,134 @@ export async function cloneVolume(
   sourceName: string,
   stampMs: number,
 ): Promise<string> {
-  const target = volumeCopyName(appId, sourceName, stampMs);
+  return withPodman(worker, (client) => createVolumeCopy(client, appId, sourceName, stampMs));
+}
 
-  return withPodman(worker, async (client) => {
-    await client.createVolume(target, {
-      [MANAGED_LABEL]: 'true',
-      [APP_ID_LABEL]: appId,
-      // The exact source name, which the copy's own name cannot carry: the base
-      // segment has been through `volumeBaseName`. `buildAppStorage` matches on
-      // this to attach the copy to the volume it was really taken from.
-      [COPY_SOURCE_LABEL]: sourceName,
-    });
+async function discardVolume(client: PodmanClient, name: string): Promise<void> {
+  try {
+    await client.removeVolume(name);
+  } catch (error) {
+    console.warn(`[volume-ops] Could not remove temporary volume "${name}":`, error);
+  }
+}
 
-    try {
-      await copyVolumeContents(client, appId, sourceName, target);
-    } catch (e) {
-      try {
-        await client.removeVolume(target, true);
-      } catch (cleanupError) {
-        console.warn(`[volume-ops] Could not remove the failed copy ${target}:`, cleanupError);
-      }
-      throw e;
-    }
-
-    return target;
+async function createVolumeCopy(
+  client: PodmanClient,
+  appId: string,
+  source: string,
+  stampMs: number,
+): Promise<string> {
+  await client.inspectVolume(source);
+  // The worker lock serializes Rudder's copies, but two operations can use the
+  // same timestamp. Never overlay or clean up an existing copy at that name.
+  let target = volumeCopyName(appId, source, stampMs);
+  while (await volumeExists(client, target)) {
+    stampMs += 1;
+    target = volumeCopyName(appId, source, stampMs);
+  }
+  await client.createVolume(target, {
+    [MANAGED_LABEL]: 'true',
+    [APP_ID_LABEL]: appId,
+    [COPY_SOURCE_LABEL]: source,
   });
+  try {
+    await copyVolumeContents(client, appId, source, target);
+  } catch (error) {
+    await discardVolume(client, target);
+    throw error;
+  }
+  return target;
+}
+
+async function volumeExists(client: PodmanClient, name: string): Promise<boolean> {
+  try {
+    await client.inspectVolume(name);
+    return true;
+  } catch (error) {
+    if (PodmanApiError.hasStatus(error, 404)) return false;
+    throw error;
+  }
 }
 
 /**
- * Put a copy back over the volume it was taken from.
- *
- * Always a replacement, never a merge: the target is recreated first. A copy is
- * taken to be able to return to a known state, and merging one over whatever is
- * there now produces a state that never existed — which is the opposite of the
- * reason it was taken.
+ * Finish staging and snapshotting before any write to the destination. Keep the
+ * snapshot available if restoring the original after a failed promotion also fails.
  */
+async function replaceVolume(
+  client: PodmanClient,
+  appId: string,
+  target: string,
+  stageContents: (name: string) => Promise<void>,
+  beforeInstall?: () => Promise<void>,
+  source?: string,
+): Promise<void> {
+  const stage = `rudder-${appId.slice(0, 8)}-restore-stage-${crypto.randomUUID()}`;
+  let recovery: string | undefined;
+  let keepRecovery = false;
+  try {
+    try {
+      await client.createVolume(stage, { [MANAGED_LABEL]: 'true', [APP_ID_LABEL]: appId });
+      await stageContents(stage);
+      if (await volumeExists(client, target)) {
+        recovery = await createVolumeCopy(client, appId, target, Date.now());
+      }
+    } catch (error) {
+      throw new VolumeRestoreError(
+        `Could not prepare the replacement for "${target}". Existing contents were preserved. ${errorMessage(error)}`,
+        undefined,
+        { cause: error },
+      );
+    }
+
+    // A long archive upload or copy may overlap with a start outside Rudder.
+    // Recheck the destination immediately before any write to it.
+    await beforeInstall?.();
+    try {
+      if (!recovery) await client.createVolume(target);
+      await copyVolumeContents(client, appId, stage, target, { replace: true, source });
+    } catch (error) {
+      if (!recovery) {
+        await discardVolume(client, target);
+        throw new VolumeRestoreError(`Could not install the replacement into "${target}". ${errorMessage(error)}`, undefined, { cause: error });
+      }
+      try {
+        await copyVolumeContents(client, appId, recovery, target, { replace: true });
+      } catch (restoreError) {
+        keepRecovery = true;
+        throw new VolumeRestoreError(
+          `Replacing "${target}" failed and its original contents could not be put back. Keep the application stopped. The original data is saved in "${recovery}". ${errorMessage(restoreError)}`,
+          recovery,
+          { cause: error },
+        );
+      }
+      throw new VolumeRestoreError(
+        `Could not install the replacement into "${target}". The original contents were restored. ${errorMessage(error)}`,
+        undefined,
+        { cause: error },
+      );
+    }
+  } finally {
+    await discardVolume(client, stage);
+    if (recovery && !keepRecovery) await discardVolume(client, recovery);
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Install a verified copy over the volume it was taken from. */
 export async function restoreFromCopy(
   worker: typeof workers.$inferSelect,
   appId: string,
   copyName: string,
   targetName: string,
+  beforeInstall?: () => Promise<void>,
 ): Promise<void> {
   await withPodman(worker, async (client) => {
-    // As in `restoreVolume`: established before the target is destroyed, not
-    // when the helper is created halfway through.
-    await client.ensureImage(env.VOLUME_TOOL_IMAGE);
-
-    await client.removeVolume(targetName, true);
-    await client.createVolume(targetName);
-    await copyVolumeContents(client, appId, copyName, targetName);
+    await replaceVolume(client, appId, targetName, async (stage) => {
+      await client.inspectVolume(copyName);
+      await copyVolumeContents(client, appId, copyName, stage);
+    }, beforeInstall);
   });
 }

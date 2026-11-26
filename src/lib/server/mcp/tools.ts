@@ -27,7 +27,8 @@ import { primaryUrl, serviceUrls } from '../app-urls';
 import { withPodman } from '../podman-client';
 import { parseCapturedOutput, tailChars } from '../deploy/failure-logs';
 import type { McpPrincipal } from './auth';
-import { deploymentForTask, getTask, listTasks, startTask, type Task, type TaskKind } from './tasks';
+import { activeTask, applicationTask, deploymentForTask, getTask, listTasks, startTask, type Task, type TaskKind, type TaskOutcome } from '../application-operations';
+import type { ReportOperationProgress } from '#lib/application-operations.ts';
 
 type Application = typeof applications.$inferSelect;
 type Container = typeof containers.$inferSelect;
@@ -159,6 +160,7 @@ async function taskView(task: Task) {
     taskId: task.id,
     kind: task.kind,
     status: task.status,
+    stage: task.stage,
     application: { id: task.applicationId, name: task.applicationName },
     message: task.message,
     details: task.details,
@@ -210,12 +212,10 @@ async function launch(
   kind: TaskKind,
   auditAction: string,
   auditDetails: Record<string, unknown>,
-  work: () => Promise<{ success: boolean; message: string; deploymentId?: string; details?: Record<string, unknown> }>,
+  work: (report: ReportOperationProgress) => Promise<TaskOutcome>,
 ) {
   await workerFor(app);
-  const busy = listTasks({ teamIds: new Set([app.teamId!]), applicationId: app.id }).find(
-    (t) => t.status === 'running',
-  );
+  const busy = activeTask(app.id);
   if (busy) {
     throw new ToolError(
       `A ${busy.kind} of "${app.name}" is already running (task ${busy.id}). Wait for it with get_task.`,
@@ -223,10 +223,10 @@ async function launch(
   }
 
   const task = startTask(
-    { kind, applicationId: app.id, applicationName: app.name, teamId: app.teamId!, startedBy: principal.subject },
-    async () => {
+    applicationTask(app, kind, `mcp:${principal.subject}`),
+    async (report) => {
       try {
-        return await work();
+        return await work(report);
       } catch (e) {
         if (e instanceof LockError) {
           return { success: false, message: 'Another operation is running on this application\'s worker. Try again when it finishes.' };
@@ -363,8 +363,8 @@ const TOOLS = [
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     run: async (principal, args) => {
       const app = await findApplication(principal, args.application);
-      return launch(principal, app, 'deploy', 'DEPLOY', {}, async () => {
-        const result = await executeApplicationDeploy(app.id, null);
+      return launch(principal, app, 'deploy', 'DEPLOY', {}, async (reportProgress) => {
+        const result = await executeApplicationDeploy(app.id, null, { reportProgress });
         return { success: result.success, message: result.message, deploymentId: result.deploymentId };
       });
     },
@@ -390,8 +390,8 @@ const TOOLS = [
       if (!source || source.applicationId !== app.id) {
         throw new ToolError(`Deployment "${args.deploymentId}" not found for application "${app.name}".`);
       }
-      return launch(principal, app, 'rollback', 'ROLLBACK', { deploymentId: args.deploymentId }, async () => {
-        const result = await rollbackToDeployment(app, args.deploymentId, null);
+      return launch(principal, app, 'rollback', 'ROLLBACK', { deploymentId: args.deploymentId }, async (reportProgress) => {
+        const result = await rollbackToDeployment(app, args.deploymentId, null, reportProgress);
         return {
           success: result.success,
           message: result.message,
@@ -444,8 +444,8 @@ const TOOLS = [
       if (app.type !== 'single' && app.type !== 'k8s') {
         throw new ToolError(`"${app.name}" is a ${app.type} application; only single-container and Kubernetes applications scale.`);
       }
-      return launch(principal, app, 'scale', 'SCALE', { replicas: args.replicas }, async () => {
-        const result = await executeApplicationDeploy(app.id, null, { replicas: args.replicas });
+      return launch(principal, app, 'scale', 'SCALE', { replicas: args.replicas }, async (reportProgress) => {
+        const result = await executeApplicationDeploy(app.id, null, { replicas: args.replicas, reportProgress });
         return {
           success: result.success,
           message: result.success ? `Scaled to ${args.replicas} replica${args.replicas === 1 ? '' : 's'}. ${result.message}` : result.message,
@@ -465,9 +465,11 @@ const TOOLS = [
     annotations: { readOnlyHint: true, openWorldHint: false },
     run: async (principal, args) => {
       const task = getTask(args.taskId);
-      if (!task || !teamIds(principal).includes(task.teamId)) {
+      const app = task && db.select({ teamId: applications.teamId }).from(applications)
+        .where(eq(applications.id, task.applicationId)).get();
+      if (!task?.teamId || app?.teamId !== task.teamId || !teamIds(principal).includes(task.teamId)) {
         throw new ToolError(
-          `Task "${args.taskId}" not found. Tasks are kept for 24 hours and do not survive a Rudder restart; ` +
+          `Task "${args.taskId}" not found. Finished tasks are kept for up to 24 hours; ` +
             'list_deployments shows what was deployed.',
         );
       }
@@ -486,7 +488,7 @@ const TOOLS = [
     annotations: { readOnlyHint: true, openWorldHint: false },
     run: async (principal, args) => {
       const app = args.application ? await findApplication(principal, args.application) : null;
-      const found = listTasks({ teamIds: new Set(teamIds(principal)), applicationId: app?.id }).slice(0, args.limit ?? 20);
+      const found = listTasks({ teamIds: new Set(teamIds(principal)), applicationId: app?.id, limit: args.limit ?? 20 });
       return { tasks: await Promise.all(found.map(taskView)) };
     },
   }),

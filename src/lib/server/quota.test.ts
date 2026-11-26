@@ -9,7 +9,7 @@ import { executeApplicationDeploy } from './deploy';
 import { hashKey } from './encryption';
 import { POST as importApplication } from '../../routes/api/applications/import/+server';
 import { PATCH as scaleApplication } from '../../routes/api/applications/[id]/scale/+server';
-import { POST as webhookDeploy } from '../../routes/api/applications/[id]/webhook/trigger/+server';
+import { GET as webhookOperation, POST as webhookDeploy } from '../../routes/api/applications/[id]/webhook/trigger/+server';
 import { POST as recreateContainer } from '../../routes/api/containers/[id]/recreate/+server';
 import { evictPodmanClient } from './podman-client';
 
@@ -128,6 +128,30 @@ test('webhooks reach the same quota gate and cannot create a multi-service plan'
   const response = await webhookDeploy({ params: { id }, request: new Request('http://localhost/test', { method: 'POST', headers: { Authorization: 'Bearer quota-token' } }) });
   expect(response.status).toBe(403);
   expect(calls).toEqual([]);
+});
+
+test('async webhooks expose only their own persisted deploy status', async () => {
+  const id = app({ workerId: null });
+  const original = `operation-hook-${suffix}`;
+  const other = `other-operation-hook-${suffix}`;
+  for (const token of [original, other]) {
+    db.insert(deployWebhooks).values({
+      id: token, applicationId: id, token: hashKey(token), enabled: true, createdBy: userId, createdAt: new Date(),
+    }).run();
+  }
+  const url = 'http://localhost/test';
+  const created = await webhookDeploy({
+    params: { id },
+    request: new Request(url, { method: 'POST', headers: { Authorization: `Bearer ${original}`, Prefer: 'respond-async' } }),
+  });
+  expect(created.status).toBe(202);
+  const { operation } = await created.json();
+  const read = (token: string) => webhookOperation({
+    params: { id }, request: new Request(`${url}?id=${operation.id}`, { headers: { Authorization: `Bearer ${token}` } }),
+  });
+  expect((await read(other)).status).toBe(404);
+  const allowed = await read(original);
+  expect(await allowed.json()).toMatchObject({ operation: { id: operation.id, status: 'failed', message: 'No worker assigned to this application' } });
 });
 
 test('denied scale preserves replicas and existing containers', async () => {

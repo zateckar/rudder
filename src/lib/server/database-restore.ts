@@ -7,7 +7,7 @@ import * as schema from '../db/schema';
 import { resolveMigrationsDir } from './paths';
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync,
+  closeSync, constants, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync,
   renameSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
@@ -124,6 +124,29 @@ function readJournal(dbPath: string): RestoreJournal {
   return value;
 }
 
+/** Keep the current journal/candidate pair usable until the new pair is durable. */
+function preparePendingCandidate(dbPath: string, journal: RestoreJournal, path: string): string {
+  const candidate = `${basename(dbPath)}.restore-${randomUUID()}.db`;
+  const copy = join(dirname(dbPath), candidate);
+  let publishing = false;
+  try {
+    copyFileSync(path, copy, constants.COPYFILE_EXCL);
+    prepareRestoreDatabase(copy);
+    const sha256 = checksum(copy);
+    if (sha256 === journal.sha256) return path;
+
+    // If publishing throws after the rename, startup may already own the copy.
+    publishing = true;
+    saveJournal(dbPath, { ...journal, candidate, sha256 });
+    journal.candidate = candidate;
+    journal.sha256 = sha256;
+    unlinkSync(path);
+    return copy;
+  } finally {
+    if (!publishing && existsSync(copy)) unlinkSync(copy);
+  }
+}
+
 /**
  * Startup-only: call before the application's SQLite connection is opened.
  * The journal makes replacement resumable across interruption at any rename.
@@ -132,7 +155,7 @@ export function applyPendingDatabaseRestore(dbPath: string): boolean {
   const marker = journalPath(dbPath);
   if (!existsSync(marker)) return false;
   const journal = readJournal(dbPath);
-  const path = join(dirname(dbPath), journal.candidate);
+  let path = join(dirname(dbPath), journal.candidate);
   const recovery = `${dbPath}.pre-restore`;
 
   if (!existsSync(path)) {
@@ -151,12 +174,7 @@ export function applyPendingDatabaseRestore(dbPath: string): boolean {
   if (checksum(path) !== journal.sha256) throw new Error('Pending restore file changed after validation.');
   // A new application version may have shipped between staging and restart.
   // Recheck its migrations on the candidate, before altering the live file.
-  prepareRestoreDatabase(path);
-  const preparedHash = checksum(path);
-  if (preparedHash !== journal.sha256) {
-    journal.sha256 = preparedHash;
-    saveJournal(dbPath, journal);
-  }
+  path = preparePendingCandidate(dbPath, journal, path);
 
   if (journal.phase === 'staged') {
     if (!existsSync(dbPath)) throw new Error('Cannot preserve the current database: it is missing.');

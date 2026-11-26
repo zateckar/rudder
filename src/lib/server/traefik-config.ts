@@ -22,7 +22,7 @@ import {
   type AppMiddlewareOptions,
   type AppTokenForwarding,
 } from './provisioning';
-import { normalizeOidcSecret } from './oidc';
+import { InvalidAppOidcConfig, normalizeOidcSecret, parseAppOidcConfig } from './oidc';
 import { domainFormatError } from './domains';
 import { decryptField } from './encryption';
 import { MAX_ROUTES_PER_CONTAINER, ROUTE_ENTRYPOINTS, routeKey } from './deploy/plan';
@@ -206,17 +206,10 @@ export function buildMiddlewareOpts(app: any): AppMiddlewareOptions | undefined 
     hasOpts = true;
   }
 
-  if (app.authType === 'oidc' && app.authConfig) {
-    try {
-      opts.authType = 'oidc';
-      // Encrypted at rest since it holds the client secret and session key.
-      // `decryptField` passes plaintext through untouched, so rows written
-      // before the column was encrypted keep working until their next save.
-      opts.authConfig = JSON.parse(decryptField(app.authConfig) ?? '');
-      hasOpts = true;
-    } catch {
-      // Invalid auth config, skip
-    }
+  if (app.authType === 'oidc') {
+    opts.authType = 'oidc';
+    opts.authConfig = parseAppOidcConfig(decryptField(app.authConfig));
+    hasOpts = true;
   }
 
   if (app.authType === 'none') {
@@ -468,8 +461,9 @@ export async function routeGroupsForWorker(workerId: string): Promise<RouteGroup
     .all();
 
   const byRouter = new Map<string, RouteGroup>();
+  const invalidAuthApps = new Set<string>();
   for (const { app, container } of rows) {
-    if (!container.routerName || !container.domain || !container.exposedPort) continue;
+    if (invalidAuthApps.has(app.id) || !container.routerName || !container.domain || !container.exposedPort) continue;
 
     // `containers.routes` when the row has it, the primary columns otherwise.
     // Null is every container deployed before the column existed, and it means
@@ -490,6 +484,14 @@ export async function routeGroupsForWorker(workerId: string): Promise<RouteGroup
       });
       continue;
     }
+    let middlewareOpts;
+    try { middlewareOpts = buildMiddlewareOpts(app); }
+    catch (error) {
+      if (!(error instanceof InvalidAppOidcConfig)) throw error;
+      invalidAuthApps.add(app.id);
+      console.warn(`[routing] Withholding routes for application ${app.id}: ${error.message}`);
+      continue;
+    }
     byRouter.set(container.routerName, {
       routerBase: container.routerName,
       domain: container.domain,
@@ -506,7 +508,7 @@ export async function routeGroupsForWorker(workerId: string): Promise<RouteGroup
       // besides. The reverse was just as wrong — `authType: 'none'` reached
       // `generateTraefikLabelsForApp` as `undefined`, which is not the same
       // statement, so a public compose app had global OIDC attached anyway.
-      middlewareOpts: buildMiddlewareOpts(app),
+      middlewareOpts,
     });
   }
 

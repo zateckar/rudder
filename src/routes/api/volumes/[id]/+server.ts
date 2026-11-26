@@ -6,6 +6,7 @@ import { eq, and, inArray } from 'drizzle-orm';
 import { AuthorizationError, requireUser, route } from '#lib/server/auth.ts';
 import { withPodman } from '#lib/server/podman-client.ts';
 import { registryVolumeName } from '#lib/server/volumes.ts';
+import { withLock, workerDeployLock } from '#lib/server/locks.ts';
 
 /**
  * Resolve a volume the caller may act on.
@@ -95,10 +96,10 @@ export const DELETE: RequestHandler = route(async (event) => {
   if (alsoData) {
     for (const target of await podmanTargetsFor(volume)) {
       try {
-        await withPodman(target.worker, (client) =>
-          // Not forced: a volume a container still mounts is a refusal the
-          // caller should see rather than something to override on their behalf.
-          client.removeVolume(target.podmanName, false),
+        await withLock(
+          workerDeployLock(target.worker.id),
+          { operation: `delete volume ${target.podmanName}` },
+          () => withPodman(target.worker, (client) => client.removeVolume(target.podmanName)),
         );
         removed.push(target.podmanName);
       } catch (e) {

@@ -50,6 +50,13 @@
       "when": 1791078033319,
       "tag": "0006_deployed_resource_limits",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1791078033320,
+      "tag": "0007_application_operations",
+      "breakpoints": true
     }
   ]
 }

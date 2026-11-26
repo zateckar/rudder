@@ -2,6 +2,8 @@ import { db } from '#lib/db/index.ts';
 import { applications, containers, deployments, workers } from '#lib/db/schema.ts';
 import { eq, inArray, sql } from 'drizzle-orm';
 
+export type DeploymentConfiguration = Pick<typeof applications.$inferSelect, 'manifest' | 'environment' | 'volumes'>;
+
 /** All role changes and their crash-recovery marker commit in one SQLite transaction. */
 export function commitGenerationCutover(
   workerId: string,
@@ -10,6 +12,7 @@ export function commitGenerationCutover(
   deploymentId?: string,
   applicationId?: string,
   desiredStatus: 'running' | 'stopped' = 'running',
+  configuration?: DeploymentConfiguration,
 ): Date {
   const now = new Date();
   db.transaction((tx) => {
@@ -23,14 +26,14 @@ export function commitGenerationCutover(
       .where(eq(workers.id, workerId)).run();
     if (deploymentId) tx.update(deployments).set({ cutoverAt: now })
       .where(eq(deployments.id, deploymentId)).run();
-    if (applicationId) tx.update(applications).set({ desiredStatus, updatedAt: now })
+    if (applicationId) tx.update(applications).set({ ...configuration, desiredStatus, updatedAt: now })
       .where(eq(applications.id, applicationId)).run();
   });
   return now;
 }
 
 /** A failed candidate remains pending until routing exclusion is acknowledged. */
-export function revertGenerationCutover(workerId: string, restoreIds: string[], candidateIds: string[], deploymentId?: string, applicationId?: string, desiredStatus: 'running' | 'stopped' = 'running'): void {
+export function revertGenerationCutover(workerId: string, restoreIds: string[], candidateIds: string[], deploymentId?: string, applicationId?: string, desiredStatus: 'running' | 'stopped' = 'running', configuration?: DeploymentConfiguration): void {
   const now = new Date();
   db.transaction((tx) => {
     if (candidateIds.length) tx.update(containers)
@@ -43,7 +46,7 @@ export function revertGenerationCutover(workerId: string, restoreIds: string[], 
       .where(eq(workers.id, workerId)).run();
     if (deploymentId) tx.update(deployments).set({ cutoverAt: null })
       .where(eq(deployments.id, deploymentId)).run();
-    if (applicationId) tx.update(applications).set({ desiredStatus, updatedAt: now })
+    if (applicationId) tx.update(applications).set({ ...configuration, desiredStatus, updatedAt: now })
       .where(eq(applications.id, applicationId)).run();
   });
 }
@@ -55,6 +58,8 @@ export function revertRetainedGenerationCutover(
   desiredStatus: 'running' | 'stopped',
   previous: Array<Pick<typeof containers.$inferSelect, 'id' | 'desiredStatus'>>,
   candidate: Array<Pick<typeof containers.$inferSelect, 'id' | 'desiredStatus' | 'retainedAt' | 'updatedAt'>>,
+  configuration?: DeploymentConfiguration,
+  deploymentId?: string,
 ): void {
   db.transaction((tx) => {
     for (const row of previous) tx.update(containers)
@@ -63,7 +68,8 @@ export function revertRetainedGenerationCutover(
     for (const row of candidate) tx.update(containers)
       .set({ state: 'draining', desiredStatus: row.desiredStatus, retainedAt: row.retainedAt ?? row.updatedAt, drainConfigHash: null })
       .where(eq(containers.id, row.id)).run();
-    tx.update(applications).set({ desiredStatus }).where(eq(applications.id, applicationId)).run();
+    tx.update(applications).set({ ...configuration, desiredStatus }).where(eq(applications.id, applicationId)).run();
+    if (deploymentId) tx.update(deployments).set({ cutoverAt: null }).where(eq(deployments.id, deploymentId)).run();
     tx.update(workers).set({ routingRevision: sql`${workers.routingRevision} + 1`, configAppliedHash: null })
       .where(eq(workers.id, workerId)).run();
   });

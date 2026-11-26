@@ -29,7 +29,7 @@ import {
   k8sList,
   matchPath,
 } from '#lib/server/k8s/mapper.ts';
-import { db, sqlite } from '#lib/db/index.ts';
+import { db } from '#lib/db/index.ts';
 import {
   applications,
   containers,
@@ -37,7 +37,7 @@ import {
 } from '#lib/db/schema.ts';
 import { eq, and } from 'drizzle-orm';
 import { executeApplicationDeploy } from '#lib/server/deploy.ts';
-import { getRestPodmanClient } from '#lib/server/podman-client.ts';
+import { deleteApplication } from '#lib/server/application-delete.ts';
 import { createApplicationWithQuota } from '#lib/server/quota.ts';
 import { buildAppDomain, assertDomainAvailable, withApplicationDomainWrite } from '#lib/server/domains.ts';
 import { serializeExposedPorts } from '#lib/server/deploy/plan.ts';
@@ -360,44 +360,11 @@ export async function DELETE({
     if (!app)
       return k8sError(404, `deployments.apps "${m.name}" not found`);
 
-    // Remove containers via Podman
-    if (app.workerId) {
-      const worker = await db
-        .select()
-        .from(workers)
-        .where(eq(workers.id, app.workerId))
-        .get();
-      if (worker) {
-        const podmanClient = getRestPodmanClient(worker);
-        const appContainers = await db
-          .select()
-          .from(containers)
-          .where(eq(containers.applicationId, app.id))
-          .all();
-        for (const c of appContainers) {
-          try {
-            await podmanClient.removeContainer(c.containerId, true);
-          } catch {
-            /* best-effort */
-          }
-          await db.delete(containers).where(eq(containers.id, c.id));
-        }
-        podmanClient.destroy();
-      }
+    const result = await deleteApplication(app);
+    if (!result.ok) {
+      return k8sError(result.status, result.message,
+        result.status === 409 ? 'Conflict' : result.status === 502 ? 'ServiceUnavailable' : 'NotFound');
     }
-
-    // Clear FK references and remove the application atomically — a failure
-    // partway through previously left orphaned deployments and webhooks
-    // pointing at an application that no longer existed.
-    sqlite.transaction(() => {
-      sqlite.run('DELETE FROM deployments WHERE application_id = ?', [app.id]);
-      sqlite.run('DELETE FROM deploy_webhooks WHERE application_id = ?', [app.id]);
-      sqlite.run(
-        'UPDATE application_templates SET source_app_id = NULL WHERE source_app_id = ?',
-        [app.id],
-      );
-      sqlite.run('DELETE FROM applications WHERE id = ?', [app.id]);
-    })();
 
     return k8sJson({
       kind: 'Status',

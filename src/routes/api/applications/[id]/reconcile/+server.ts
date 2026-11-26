@@ -29,6 +29,8 @@ import { eq } from 'drizzle-orm';
 import { executeApplicationDeploy } from '#lib/server/deploy.ts';
 import { canAccessApplication, requireAuth } from '#lib/server/auth.ts';
 import { actionable, reconcileWorker, StaleWorkerSnapshotError } from '#lib/server/reconcile.ts';
+import { applicationTask } from '#lib/server/application-operations.ts';
+import { operationResponse } from '#lib/server/operation-http.ts';
 
 export async function GET({ params, cookies }: { params: { id: string }; cookies: any }) {
   await requireAuth(cookies);
@@ -65,18 +67,18 @@ export async function GET({ params, cookies }: { params: { id: string }; cookies
   }
 }
 
-export async function POST({ params, cookies }: { params: { id: string }; cookies: any }) {
+export async function POST({ params, cookies, request }: { params: { id: string }; cookies: any; request: Request }) {
   const ctx = await requireAuth(cookies);
 
   const access = await canAccessApplication(cookies, params.id);
   if (!access) return json({ error: 'Application not found' }, { status: 404 });
 
   try {
-    const result = await executeApplicationDeploy(params.id, ctx.user?.id ?? null, { respectRuntimeIntent: true });
-    if (!result.success) {
-      return json({ error: result.message }, { status: result.statusCode || 500 });
-    }
-    return json({ success: true, message: 'Reconciled by deploying the current configuration' });
+    return await operationResponse(request, applicationTask(access.application, 'deploy', ctx.user.id),
+      (reportProgress) => executeApplicationDeploy(params.id, ctx.user.id, { respectRuntimeIntent: true, reportProgress }),
+      (result, operationId) => result.success
+        ? json({ success: true, message: 'Reconciled by deploying the current configuration', operationId })
+        : json({ error: result.message, operationId }, { status: result.statusCode || 500 }));
   } catch (e: any) {
     console.error('[reconcile] Corrective deploy failed:', e);
     return json({ error: e.message }, { status: 500 });

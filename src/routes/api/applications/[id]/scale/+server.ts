@@ -1,6 +1,8 @@
 import { json } from '@sveltejs/kit';
 import { executeApplicationDeploy } from '#lib/server/deploy.ts';
 import { canAccessApplication, requireAuth } from '#lib/server/auth.ts';
+import { applicationTask } from '#lib/server/application-operations.ts';
+import { operationResponse } from '#lib/server/operation-http.ts';
 
 export async function PATCH({ params, request, cookies }: { params: { id: string }; request: Request; cookies: any }) {
   const ctx = await requireAuth(cookies);
@@ -25,11 +27,11 @@ export async function PATCH({ params, request, cookies }: { params: { id: string
 
   // Validate the requested plan under the deployment locks before saving it.
   try {
-    const result = await executeApplicationDeploy(params.id, ctx.user?.id ?? null, { replicas });
-    if (!result.success) {
-      return json({ error: result.message }, { status: result.statusCode || 500 });
-    }
-    return json({ success: true, message: `Scaled to ${replicas} replica${replicas !== 1 ? 's' : ''}` });
+    return await operationResponse(request, applicationTask(app, 'scale', ctx.user.id),
+      (reportProgress) => executeApplicationDeploy(params.id, ctx.user.id, { replicas, reportProgress }),
+      (result, operationId) => result.success
+        ? json({ success: true, message: `Scaled to ${replicas} replica${replicas !== 1 ? 's' : ''}`, operationId })
+        : json({ error: result.message, operationId }, { status: result.statusCode || 500 }));
   } catch (error: any) {
     console.error('Scale error:', error);
     return json({ error: error.message }, { status: 500 });
